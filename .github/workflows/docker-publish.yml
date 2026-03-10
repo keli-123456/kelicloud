@@ -1,9 +1,9 @@
 name: Publish Docker Image on Main
 
 on:
-  #push:
-  #  branches:
-  #    - main
+  push:
+    branches:
+      - main
   workflow_dispatch:
 
 env:
@@ -28,7 +28,7 @@ jobs:
 
       - name: Clone and build frontend
         run: |
-          git clone https://github.com/komari-monitor/komari-web web
+          git clone -b radix https://github.com/keli-123456/komari-web web
           cd web
           npm install
           npm run build
