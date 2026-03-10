@@ -223,16 +223,21 @@ func CreateClient() (clientUUID, token string, err error) {
 }
 
 func CreateClientWithName(name string) (clientUUID, token string, err error) {
-	if name == "" {
-		return CreateClient()
-	}
+	return CreateClientWithNameAndGroup(name, "")
+}
+
+func CreateClientWithNameAndGroup(name, group string) (clientUUID, token string, err error) {
 	db := dbcore.GetDBInstance()
 	token = utils.GenerateToken()
 	clientUUID = uuid.New().String()
+	if name == "" {
+		name = "client_" + clientUUID[0:8]
+	}
 	client := models.Client{
 		UUID:      clientUUID,
 		Token:     token,
 		Name:      name,
+		Group:     group,
 		CreatedAt: models.FromTime(time.Now()),
 		UpdatedAt: models.FromTime(time.Now()),
 	}
