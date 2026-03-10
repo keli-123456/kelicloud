@@ -1,6 +1,7 @@
 package client
 
 import (
+	"encoding/base64"
 	"net/url"
 	"strings"
 
@@ -22,9 +23,20 @@ func parseAutoDiscoveryAuthorization(authHeader string) (string, string, bool) {
 	}
 
 	const groupMarker = "::group="
+	const groupBase64Marker = "::group-b64="
 	baseKey := rawKey
 	group := ""
-	if strings.Contains(rawKey, groupMarker) {
+	switch {
+	case strings.Contains(rawKey, groupBase64Marker):
+		parts := strings.SplitN(rawKey, groupBase64Marker, 2)
+		baseKey = strings.TrimSpace(parts[0])
+		if len(parts) == 2 {
+			decoded, err := base64.RawURLEncoding.DecodeString(parts[1])
+			if err == nil {
+				group = strings.TrimSpace(string(decoded))
+			}
+		}
+	case strings.Contains(rawKey, groupMarker):
 		parts := strings.SplitN(rawKey, groupMarker, 2)
 		baseKey = strings.TrimSpace(parts[0])
 		if len(parts) == 2 {
