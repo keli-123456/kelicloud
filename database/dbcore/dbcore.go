@@ -460,6 +460,7 @@ func GetDBInstance() *gorm.DB {
 			&models.OidcProvider{},
 			&models.MessageSenderProvider{},
 			&models.CloudProvider{},
+			&models.CloudInstanceShare{},
 			&models.ThemeConfiguration{},
 		)
 		if err != nil {

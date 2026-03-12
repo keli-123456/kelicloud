@@ -190,6 +190,7 @@ func RunServer() {
 	r.GET("/api/clients", api.GetClients)
 	r.GET("/api/nodes", api.GetNodesInformation)
 	r.GET("/api/public", api.GetPublicSettings)
+	r.GET("/api/public/cloud/shares/:token", api.GetPublicCloudInstanceShare)
 	r.GET("/api/oauth", api.OAuth)
 	r.GET("/api/oauth_callback", api.OAuthCallback)
 	r.GET("/api/logout", api.Logout)
@@ -258,6 +259,9 @@ func RunServer() {
 			cloudGroup.GET("/providers", admin.GetCloudProviders)
 			cloudGroup.GET("/providers/:provider", admin.GetCloudProvider)
 			cloudGroup.POST("/providers/:provider", admin.SetCloudProvider)
+			cloudGroup.GET("/shares/:provider/:resource_type/:resource_id", admin.GetCloudInstanceShare)
+			cloudGroup.POST("/shares/:provider/:resource_type/:resource_id", admin.UpsertCloudInstanceShare)
+			cloudGroup.DELETE("/shares/:provider/:resource_type/:resource_id", admin.DeleteCloudInstanceShare)
 
 			digitalOceanGroup := cloudGroup.Group("/digitalocean")
 			{
