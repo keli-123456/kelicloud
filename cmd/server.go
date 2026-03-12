@@ -261,6 +261,11 @@ func RunServer() {
 
 			digitalOceanGroup := cloudGroup.Group("/digitalocean")
 			{
+				digitalOceanGroup.GET("/tokens", admin.GetDigitalOceanTokens)
+				digitalOceanGroup.POST("/tokens", admin.SaveDigitalOceanTokens)
+				digitalOceanGroup.POST("/tokens/active", admin.SetDigitalOceanActiveToken)
+				digitalOceanGroup.POST("/tokens/check", admin.CheckDigitalOceanTokens)
+				digitalOceanGroup.DELETE("/tokens/:id", admin.DeleteDigitalOceanToken)
 				digitalOceanGroup.GET("/account", admin.GetDigitalOceanAccount)
 				digitalOceanGroup.GET("/catalog", admin.GetDigitalOceanCatalog)
 				digitalOceanGroup.GET("/droplets", admin.ListDigitalOceanDroplets)

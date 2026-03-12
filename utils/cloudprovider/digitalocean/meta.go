@@ -2,7 +2,7 @@ package digitalocean
 
 import "github.com/komari-monitor/komari/utils/cloudprovider/factory"
 
-type Addition struct {
+type providerConfig struct {
 	Token string `json:"token" required:"true" help:"DigitalOcean Personal Access Token. It should have Droplet read/write permissions."`
 }
 
@@ -13,7 +13,7 @@ func (p *Provider) GetName() string {
 }
 
 func (p *Provider) GetConfiguration() factory.Configuration {
-	return &Addition{}
+	return &providerConfig{}
 }
 
 func init() {

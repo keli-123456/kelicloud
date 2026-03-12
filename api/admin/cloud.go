@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -77,6 +78,193 @@ func SetCloudProvider(c *gin.Context) {
 
 	logCloudAudit(c, "update cloud provider config: "+providerName)
 	api.RespondSuccess(c, gin.H{"message": "Cloud provider configured successfully"})
+}
+
+func GetDigitalOceanTokens(c *gin.Context) {
+	_, addition, err := loadDigitalOceanAddition(true)
+	if err != nil {
+		api.RespondError(c, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	api.RespondSuccess(c, addition.ToPoolView())
+}
+
+func SaveDigitalOceanTokens(c *gin.Context) {
+	var payload struct {
+		Tokens        []digitalocean.TokenImport `json:"tokens"`
+		ActiveTokenID string                     `json:"active_token_id"`
+	}
+	if err := c.ShouldBindJSON(&payload); err != nil {
+		api.RespondError(c, http.StatusBadRequest, "Invalid token payload: "+err.Error())
+		return
+	}
+
+	if len(payload.Tokens) == 0 {
+		api.RespondError(c, http.StatusBadRequest, "At least one token is required")
+		return
+	}
+
+	_, addition, err := loadDigitalOceanAddition(true)
+	if err != nil {
+		api.RespondError(c, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	imported := addition.UpsertTokens(payload.Tokens)
+	if imported == 0 {
+		api.RespondError(c, http.StatusBadRequest, "No valid tokens were provided")
+		return
+	}
+
+	if payload.ActiveTokenID != "" {
+		if !addition.SetActiveToken(payload.ActiveTokenID) {
+			api.RespondError(c, http.StatusBadRequest, "Active token not found")
+			return
+		}
+	}
+
+	if err := saveDigitalOceanAddition(addition); err != nil {
+		api.RespondError(c, http.StatusInternalServerError, "Failed to save DigitalOcean tokens: "+err.Error())
+		return
+	}
+
+	logCloudAudit(c, fmt.Sprintf("import digitalocean tokens: %d", imported))
+	api.RespondSuccess(c, addition.ToPoolView())
+}
+
+func SetDigitalOceanActiveToken(c *gin.Context) {
+	var payload struct {
+		TokenID string `json:"token_id" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&payload); err != nil {
+		api.RespondError(c, http.StatusBadRequest, "Invalid active token payload: "+err.Error())
+		return
+	}
+
+	_, addition, err := loadDigitalOceanAddition(false)
+	if err != nil {
+		api.RespondError(c, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	if !addition.SetActiveToken(payload.TokenID) {
+		api.RespondError(c, http.StatusNotFound, "DigitalOcean token not found")
+		return
+	}
+
+	if err := saveDigitalOceanAddition(addition); err != nil {
+		api.RespondError(c, http.StatusInternalServerError, "Failed to update active token: "+err.Error())
+		return
+	}
+
+	logCloudAudit(c, "set active digitalocean token: "+payload.TokenID)
+	api.RespondSuccess(c, addition.ToPoolView())
+}
+
+func CheckDigitalOceanTokens(c *gin.Context) {
+	var payload struct {
+		TokenIDs []string `json:"token_ids"`
+	}
+	if c.Request.ContentLength > 0 {
+		if err := c.ShouldBindJSON(&payload); err != nil {
+			api.RespondError(c, http.StatusBadRequest, "Invalid token check payload: "+err.Error())
+			return
+		}
+	}
+
+	_, addition, err := loadDigitalOceanAddition(false)
+	if err != nil {
+		api.RespondError(c, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	if len(addition.Tokens) == 0 {
+		api.RespondSuccess(c, addition.ToPoolView())
+		return
+	}
+
+	selected := make(map[string]struct{}, len(payload.TokenIDs))
+	for _, tokenID := range payload.TokenIDs {
+		tokenID = strings.TrimSpace(tokenID)
+		if tokenID != "" {
+			selected[tokenID] = struct{}{}
+		}
+	}
+
+	checkedAt := time.Now().UTC()
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	limiter := make(chan struct{}, 4)
+
+	for index := range addition.Tokens {
+		tokenID := addition.Tokens[index].ID
+		if len(selected) > 0 {
+			if _, exists := selected[tokenID]; !exists {
+				continue
+			}
+		}
+
+		wg.Add(1)
+		go func(tokenIndex int) {
+			defer wg.Done()
+
+			limiter <- struct{}{}
+			defer func() {
+				<-limiter
+			}()
+
+			record := addition.Tokens[tokenIndex]
+			client, err := digitalocean.NewClientFromToken(record.Token)
+			var account *digitalocean.Account
+			if err == nil {
+				ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+				defer cancel()
+				account, err = client.GetAccount(ctx)
+			}
+
+			mu.Lock()
+			addition.Tokens[tokenIndex].SetCheckResult(checkedAt, account, err)
+			mu.Unlock()
+		}(index)
+	}
+
+	wg.Wait()
+
+	if err := saveDigitalOceanAddition(addition); err != nil {
+		api.RespondError(c, http.StatusInternalServerError, "Failed to save token health: "+err.Error())
+		return
+	}
+
+	logCloudAudit(c, fmt.Sprintf("check digitalocean tokens: %d", len(addition.Tokens)))
+	api.RespondSuccess(c, addition.ToPoolView())
+}
+
+func DeleteDigitalOceanToken(c *gin.Context) {
+	tokenID := strings.TrimSpace(c.Param("id"))
+	if tokenID == "" {
+		api.RespondError(c, http.StatusBadRequest, "Invalid token id")
+		return
+	}
+
+	_, addition, err := loadDigitalOceanAddition(false)
+	if err != nil {
+		api.RespondError(c, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	if !addition.RemoveToken(tokenID) {
+		api.RespondError(c, http.StatusNotFound, "DigitalOcean token not found")
+		return
+	}
+
+	if err := saveDigitalOceanAddition(addition); err != nil {
+		api.RespondError(c, http.StatusInternalServerError, "Failed to delete token: "+err.Error())
+		return
+	}
+
+	logCloudAudit(c, "delete digitalocean token: "+tokenID)
+	api.RespondSuccess(c, addition.ToPoolView())
 }
 
 func GetDigitalOceanAccount(c *gin.Context) {
@@ -276,17 +464,17 @@ func PostDigitalOceanDropletAction(c *gin.Context) {
 }
 
 func getDigitalOceanClient(c *gin.Context) (*digitalocean.Client, context.Context, context.CancelFunc, error) {
-	config, err := database.GetCloudProviderConfigByName(digitalOceanProviderName)
+	_, addition, err := loadDigitalOceanAddition(false)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("DigitalOcean provider is not configured")
+		return nil, nil, nil, err
 	}
 
-	var addition digitalocean.Addition
-	if err := json.Unmarshal([]byte(config.Addition), &addition); err != nil {
-		return nil, nil, nil, fmt.Errorf("DigitalOcean configuration is invalid: %w", err)
+	activeToken := addition.ActiveToken()
+	if activeToken == nil {
+		return nil, nil, nil, fmt.Errorf("DigitalOcean token is not configured")
 	}
 
-	client, err := digitalocean.NewClient(&addition)
+	client, err := digitalocean.NewClientFromToken(activeToken.Token)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -327,6 +515,47 @@ func trimStringSlice(values []string) []string {
 		}
 	}
 	return result
+}
+
+func loadDigitalOceanAddition(allowMissing bool) (*models.CloudProvider, *digitalocean.Addition, error) {
+	config, err := database.GetCloudProviderConfigByName(digitalOceanProviderName)
+	if err != nil {
+		if allowMissing {
+			addition := &digitalocean.Addition{}
+			addition.Normalize()
+			return nil, addition, nil
+		}
+		return nil, nil, fmt.Errorf("DigitalOcean provider is not configured")
+	}
+
+	addition := &digitalocean.Addition{}
+	raw := strings.TrimSpace(config.Addition)
+	if raw == "" {
+		raw = "{}"
+	}
+	if err := json.Unmarshal([]byte(raw), addition); err != nil {
+		return nil, nil, fmt.Errorf("DigitalOcean configuration is invalid: %w", err)
+	}
+
+	addition.Normalize()
+	return config, addition, nil
+}
+
+func saveDigitalOceanAddition(addition *digitalocean.Addition) error {
+	if addition == nil {
+		addition = &digitalocean.Addition{}
+	}
+	addition.Normalize()
+
+	payload, err := json.Marshal(addition)
+	if err != nil {
+		return err
+	}
+
+	return database.SaveCloudProviderConfig(&models.CloudProvider{
+		Name:     digitalOceanProviderName,
+		Addition: string(payload),
+	})
 }
 
 func logCloudAudit(c *gin.Context, message string) {

@@ -43,7 +43,16 @@ func NewClient(addition *Addition) (*Client, error) {
 	if addition == nil {
 		return nil, errors.New("digitalocean configuration is missing")
 	}
+	addition.Normalize()
+	active := addition.ActiveToken()
+	if active != nil {
+		return newClient(active.Token, defaultBaseURL)
+	}
 	return newClient(addition.Token, defaultBaseURL)
+}
+
+func NewClientFromToken(token string) (*Client, error) {
+	return newClient(token, defaultBaseURL)
 }
 
 func newClient(token, baseURL string) (*Client, error) {
