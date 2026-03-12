@@ -185,7 +185,7 @@ func (a *Addition) Normalize() {
 		a.ActiveCredentialID = a.Credentials[0].ID
 	}
 
-	active := a.ActiveCredential()
+	active := a.FindCredential(a.ActiveCredentialID)
 	if active != nil {
 		a.AccessKeyID = active.AccessKeyID
 		a.SecretAccessKey = active.SecretAccessKey
