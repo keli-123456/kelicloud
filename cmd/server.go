@@ -38,6 +38,7 @@ import (
 	"github.com/komari-monitor/komari/public"
 	"github.com/komari-monitor/komari/utils"
 	"github.com/komari-monitor/komari/utils/cloudflared"
+	_ "github.com/komari-monitor/komari/utils/cloudprovider"
 	"github.com/komari-monitor/komari/utils/geoip"
 	logutil "github.com/komari-monitor/komari/utils/log"
 	"github.com/komari-monitor/komari/utils/messageSender"
@@ -251,6 +252,22 @@ func RunServer() {
 			settingsGroup.GET("/oidc", admin.GetOidcProvider)
 			settingsGroup.POST("/message-sender", admin.SetMessageSenderProvider)
 			settingsGroup.GET("/message-sender", admin.GetMessageSenderProvider)
+		}
+		cloudGroup := adminAuthrized.Group("/cloud")
+		{
+			cloudGroup.GET("/providers", admin.GetCloudProviders)
+			cloudGroup.GET("/providers/:provider", admin.GetCloudProvider)
+			cloudGroup.POST("/providers/:provider", admin.SetCloudProvider)
+
+			digitalOceanGroup := cloudGroup.Group("/digitalocean")
+			{
+				digitalOceanGroup.GET("/account", admin.GetDigitalOceanAccount)
+				digitalOceanGroup.GET("/catalog", admin.GetDigitalOceanCatalog)
+				digitalOceanGroup.GET("/droplets", admin.ListDigitalOceanDroplets)
+				digitalOceanGroup.POST("/droplets", admin.CreateDigitalOceanDroplet)
+				digitalOceanGroup.DELETE("/droplets/:id", admin.DeleteDigitalOceanDroplet)
+				digitalOceanGroup.POST("/droplets/:id/actions", admin.PostDigitalOceanDropletAction)
+			}
 		}
 		// themes
 		themeGroup := adminAuthrized.Group("/theme")

@@ -459,6 +459,7 @@ func GetDBInstance() *gorm.DB {
 			&models.PingTask{},
 			&models.OidcProvider{},
 			&models.MessageSenderProvider{},
+			&models.CloudProvider{},
 			&models.ThemeConfiguration{},
 		)
 		if err != nil {
