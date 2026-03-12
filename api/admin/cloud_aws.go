@@ -33,6 +33,17 @@ type createAWSInstancePayload struct {
 	Tags             []awscloud.Tag `json:"tags,omitempty"`
 }
 
+type createAWSLightsailInstancePayload struct {
+	Name             string         `json:"name" binding:"required"`
+	AvailabilityZone string         `json:"availability_zone" binding:"required"`
+	BlueprintID      string         `json:"blueprint_id" binding:"required"`
+	BundleID         string         `json:"bundle_id" binding:"required"`
+	KeyPairName      string         `json:"key_pair_name,omitempty"`
+	UserData         string         `json:"user_data,omitempty"`
+	IPAddressType    string         `json:"ip_address_type,omitempty"`
+	Tags             []awscloud.Tag `json:"tags,omitempty"`
+}
+
 type awsAccountView struct {
 	AccountID string `json:"account_id"`
 	ARN       string `json:"arn"`
@@ -339,6 +350,11 @@ func GetAWSCatalog(c *gin.Context) {
 		respondAWSError(c, err)
 		return
 	}
+	elasticAddresses, err := awscloud.ListElasticAddresses(ctx, credential, region)
+	if err != nil {
+		respondAWSError(c, err)
+		return
+	}
 
 	if regions == nil {
 		regions = make([]awscloud.Region, 0)
@@ -358,16 +374,146 @@ func GetAWSCatalog(c *gin.Context) {
 	if securityGroups == nil {
 		securityGroups = make([]awscloud.SecurityGroup, 0)
 	}
+	if elasticAddresses == nil {
+		elasticAddresses = make([]awscloud.Address, 0)
+	}
 
 	api.RespondSuccess(c, gin.H{
-		"active_region":   region,
-		"regions":         regions,
-		"instance_types":  instanceTypes,
-		"images":          images,
-		"key_pairs":       keyPairs,
-		"subnets":         subnets,
-		"security_groups": securityGroups,
+		"active_region":     region,
+		"regions":           regions,
+		"instance_types":    instanceTypes,
+		"images":            images,
+		"key_pairs":         keyPairs,
+		"subnets":           subnets,
+		"security_groups":   securityGroups,
+		"elastic_addresses": elasticAddresses,
 	})
+}
+
+func GetAWSInstanceDetail(c *gin.Context) {
+	_, credential, region, ctx, cancel, err := getAWSActiveCredential(c)
+	if err != nil {
+		respondAWSError(c, err)
+		return
+	}
+	defer cancel()
+
+	instanceID := strings.TrimSpace(c.Param("id"))
+	if instanceID == "" {
+		api.RespondError(c, http.StatusBadRequest, "Invalid instance id")
+		return
+	}
+
+	detail, err := awscloud.GetInstanceDetail(ctx, credential, region, instanceID)
+	if err != nil {
+		respondAWSError(c, err)
+		return
+	}
+
+	api.RespondSuccess(c, detail)
+}
+
+func GetAWSLightsailCatalog(c *gin.Context) {
+	_, credential, region, ctx, cancel, err := getAWSActiveCredential(c)
+	if err != nil {
+		respondAWSError(c, err)
+		return
+	}
+	defer cancel()
+
+	regions, err := awscloud.ListLightsailRegions(ctx, credential, region)
+	if err != nil {
+		respondAWSError(c, err)
+		return
+	}
+	bundles, err := awscloud.ListLightsailBundles(ctx, credential, region)
+	if err != nil {
+		respondAWSError(c, err)
+		return
+	}
+	blueprints, err := awscloud.ListLightsailBlueprints(ctx, credential, region)
+	if err != nil {
+		respondAWSError(c, err)
+		return
+	}
+	keyPairs, err := awscloud.ListLightsailKeyPairs(ctx, credential, region)
+	if err != nil {
+		respondAWSError(c, err)
+		return
+	}
+	staticIPs, err := awscloud.ListLightsailStaticIPs(ctx, credential, region)
+	if err != nil {
+		respondAWSError(c, err)
+		return
+	}
+
+	if regions == nil {
+		regions = make([]awscloud.LightsailRegion, 0)
+	}
+	if bundles == nil {
+		bundles = make([]awscloud.LightsailBundle, 0)
+	}
+	if blueprints == nil {
+		blueprints = make([]awscloud.LightsailBlueprint, 0)
+	}
+	if keyPairs == nil {
+		keyPairs = make([]awscloud.LightsailKeyPair, 0)
+	}
+	if staticIPs == nil {
+		staticIPs = make([]awscloud.LightsailStaticIP, 0)
+	}
+
+	api.RespondSuccess(c, gin.H{
+		"active_region": region,
+		"regions":       regions,
+		"bundles":       bundles,
+		"blueprints":    blueprints,
+		"key_pairs":     keyPairs,
+		"static_ips":    staticIPs,
+	})
+}
+
+func ListAWSLightsailInstances(c *gin.Context) {
+	_, credential, region, ctx, cancel, err := getAWSActiveCredential(c)
+	if err != nil {
+		respondAWSError(c, err)
+		return
+	}
+	defer cancel()
+
+	instances, err := awscloud.ListLightsailInstances(ctx, credential, region)
+	if err != nil {
+		respondAWSError(c, err)
+		return
+	}
+	if instances == nil {
+		instances = make([]awscloud.LightsailInstance, 0)
+	}
+
+	api.RespondSuccess(c, instances)
+}
+
+func GetAWSLightsailInstanceDetail(c *gin.Context) {
+	_, credential, region, ctx, cancel, err := getAWSActiveCredential(c)
+	if err != nil {
+		respondAWSError(c, err)
+		return
+	}
+	defer cancel()
+
+	instanceName := strings.TrimSpace(c.Param("name"))
+	if instanceName == "" {
+		api.RespondError(c, http.StatusBadRequest, "Invalid Lightsail instance name")
+		return
+	}
+
+	detail, err := awscloud.GetLightsailInstanceDetail(ctx, credential, region, instanceName)
+	if err != nil {
+		respondAWSError(c, err)
+		return
+	}
+
+	api.RespondSuccess(c, detail)
 }
 
 func ListAWSInstances(c *gin.Context) {
@@ -428,6 +574,43 @@ func CreateAWSInstance(c *gin.Context) {
 	})
 }
 
+func CreateAWSLightsailInstance(c *gin.Context) {
+	_, credential, region, ctx, cancel, err := getAWSActiveCredential(c)
+	if err != nil {
+		respondAWSError(c, err)
+		return
+	}
+	defer cancel()
+
+	var payload createAWSLightsailInstancePayload
+	if err := c.ShouldBindJSON(&payload); err != nil {
+		api.RespondError(c, http.StatusBadRequest, "Invalid Lightsail instance request: "+err.Error())
+		return
+	}
+
+	request := awscloud.CreateLightsailInstanceRequest{
+		Name:             strings.TrimSpace(payload.Name),
+		AvailabilityZone: strings.TrimSpace(payload.AvailabilityZone),
+		BlueprintID:      strings.TrimSpace(payload.BlueprintID),
+		BundleID:         strings.TrimSpace(payload.BundleID),
+		KeyPairName:      strings.TrimSpace(payload.KeyPairName),
+		UserData:         strings.TrimSpace(payload.UserData),
+		IPAddressType:    strings.TrimSpace(payload.IPAddressType),
+		Tags:             payload.Tags,
+	}
+
+	if err := awscloud.CreateLightsailInstance(ctx, credential, region, request); err != nil {
+		respondAWSError(c, err)
+		return
+	}
+
+	logCloudAudit(c, fmt.Sprintf("create aws lightsail instance: %s (%s/%s)", request.Name, request.AvailabilityZone, request.BundleID))
+	api.RespondSuccess(c, gin.H{
+		"name":   request.Name,
+		"status": "submitted",
+	})
+}
+
 func DeleteAWSInstance(c *gin.Context) {
 	_, credential, region, ctx, cancel, err := getAWSActiveCredential(c)
 	if err != nil {
@@ -451,6 +634,29 @@ func DeleteAWSInstance(c *gin.Context) {
 	api.RespondSuccess(c, nil)
 }
 
+func DeleteAWSLightsailInstance(c *gin.Context) {
+	_, credential, region, ctx, cancel, err := getAWSActiveCredential(c)
+	if err != nil {
+		respondAWSError(c, err)
+		return
+	}
+	defer cancel()
+
+	instanceName := strings.TrimSpace(c.Param("name"))
+	if instanceName == "" {
+		api.RespondError(c, http.StatusBadRequest, "Invalid Lightsail instance name")
+		return
+	}
+
+	if err := awscloud.DeleteLightsailInstance(ctx, credential, region, instanceName); err != nil {
+		respondAWSError(c, err)
+		return
+	}
+
+	logCloudAudit(c, fmt.Sprintf("delete aws lightsail instance: %s", instanceName))
+	api.RespondSuccess(c, nil)
+}
+
 func PostAWSInstanceAction(c *gin.Context) {
 	_, credential, region, ctx, cancel, err := getAWSActiveCredential(c)
 	if err != nil {
@@ -466,7 +672,15 @@ func PostAWSInstanceAction(c *gin.Context) {
 	}
 
 	var payload struct {
-		Type string `json:"type" binding:"required"`
+		Type          string         `json:"type" binding:"required"`
+		Name          string         `json:"name,omitempty"`
+		Description   string         `json:"description,omitempty"`
+		NoReboot      bool           `json:"no_reboot,omitempty"`
+		InstanceType  string         `json:"instance_type,omitempty"`
+		Tags          []awscloud.Tag `json:"tags,omitempty"`
+		AllocationID  string         `json:"allocation_id,omitempty"`
+		AssociationID string         `json:"association_id,omitempty"`
+		PrivateIP     string         `json:"private_ip,omitempty"`
 	}
 	if err := c.ShouldBindJSON(&payload); err != nil {
 		api.RespondError(c, http.StatusBadRequest, "Invalid action request: "+err.Error())
@@ -474,6 +688,7 @@ func PostAWSInstanceAction(c *gin.Context) {
 	}
 
 	actionType := strings.ToLower(strings.TrimSpace(payload.Type))
+	response := gin.H{"type": actionType, "instance_id": instanceID, "status": "submitted"}
 	switch actionType {
 	case "start":
 		err = awscloud.StartInstance(ctx, credential, region, instanceID)
@@ -483,6 +698,57 @@ func PostAWSInstanceAction(c *gin.Context) {
 		err = awscloud.RebootInstance(ctx, credential, region, instanceID)
 	case "terminate":
 		err = awscloud.TerminateInstance(ctx, credential, region, instanceID)
+	case "create_image":
+		name := strings.TrimSpace(payload.Name)
+		if name == "" {
+			name = fmt.Sprintf("komari-%s-%d", instanceID, time.Now().Unix())
+		}
+		imageID, actionErr := awscloud.CreateImage(ctx, credential, region, instanceID, name, payload.Description, payload.NoReboot)
+		err = actionErr
+		response["image_id"] = imageID
+	case "change_type":
+		instanceType := strings.TrimSpace(payload.InstanceType)
+		if instanceType == "" {
+			api.RespondError(c, http.StatusBadRequest, "instance_type is required")
+			return
+		}
+		err = awscloud.ModifyInstanceType(ctx, credential, region, instanceID, instanceType)
+		response["instance_type"] = instanceType
+	case "enable_monitoring":
+		err = awscloud.SetDetailedMonitoring(ctx, credential, region, instanceID, true)
+	case "disable_monitoring":
+		err = awscloud.SetDetailedMonitoring(ctx, credential, region, instanceID, false)
+	case "sync_tags":
+		err = awscloud.ReplaceInstanceTags(ctx, credential, region, instanceID, payload.Tags)
+		response["tags"] = payload.Tags
+	case "create_snapshots":
+		snapshotIDs, actionErr := awscloud.CreateVolumeSnapshots(ctx, credential, region, instanceID, payload.Description)
+		err = actionErr
+		response["snapshot_ids"] = snapshotIDs
+	case "allocate_address":
+		address, actionErr := awscloud.AllocateAndAssociateAddress(ctx, credential, region, instanceID, payload.PrivateIP)
+		err = actionErr
+		response["address"] = address
+	case "associate_address":
+		if strings.TrimSpace(payload.AllocationID) == "" {
+			api.RespondError(c, http.StatusBadRequest, "allocation_id is required")
+			return
+		}
+		address, actionErr := awscloud.AssociateAddress(ctx, credential, region, payload.AllocationID, instanceID, payload.PrivateIP)
+		err = actionErr
+		response["address"] = address
+	case "disassociate_address":
+		if strings.TrimSpace(payload.AssociationID) == "" {
+			api.RespondError(c, http.StatusBadRequest, "association_id is required")
+			return
+		}
+		err = awscloud.DisassociateAddress(ctx, credential, region, payload.AssociationID)
+	case "release_address":
+		if strings.TrimSpace(payload.AllocationID) == "" {
+			api.RespondError(c, http.StatusBadRequest, "allocation_id is required")
+			return
+		}
+		err = awscloud.ReleaseAddress(ctx, credential, region, payload.AllocationID)
 	default:
 		api.RespondError(c, http.StatusBadRequest, "Unsupported instance action: "+payload.Type)
 		return
@@ -493,7 +759,89 @@ func PostAWSInstanceAction(c *gin.Context) {
 	}
 
 	logCloudAudit(c, fmt.Sprintf("aws ec2 instance action: %s (%s)", actionType, instanceID))
-	api.RespondSuccess(c, gin.H{"type": actionType, "instance_id": instanceID, "status": "submitted"})
+	api.RespondSuccess(c, response)
+}
+
+func PostAWSLightsailInstanceAction(c *gin.Context) {
+	_, credential, region, ctx, cancel, err := getAWSActiveCredential(c)
+	if err != nil {
+		respondAWSError(c, err)
+		return
+	}
+	defer cancel()
+
+	instanceName := strings.TrimSpace(c.Param("name"))
+	if instanceName == "" {
+		api.RespondError(c, http.StatusBadRequest, "Invalid Lightsail instance name")
+		return
+	}
+
+	var payload struct {
+		Type         string         `json:"type" binding:"required"`
+		SnapshotName string         `json:"snapshot_name,omitempty"`
+		StaticIPName string         `json:"static_ip_name,omitempty"`
+		Tags         []awscloud.Tag `json:"tags,omitempty"`
+	}
+	if err := c.ShouldBindJSON(&payload); err != nil {
+		api.RespondError(c, http.StatusBadRequest, "Invalid Lightsail action request: "+err.Error())
+		return
+	}
+
+	actionType := strings.ToLower(strings.TrimSpace(payload.Type))
+	response := gin.H{"type": actionType, "instance_name": instanceName, "status": "submitted"}
+	switch actionType {
+	case "start":
+		err = awscloud.StartLightsailInstance(ctx, credential, region, instanceName)
+	case "stop":
+		err = awscloud.StopLightsailInstance(ctx, credential, region, instanceName)
+	case "reboot":
+		err = awscloud.RebootLightsailInstance(ctx, credential, region, instanceName)
+	case "create_snapshot":
+		snapshotName := strings.TrimSpace(payload.SnapshotName)
+		if snapshotName == "" {
+			snapshotName = fmt.Sprintf("%s-%d", instanceName, time.Now().Unix())
+		}
+		err = awscloud.CreateLightsailSnapshot(ctx, credential, region, instanceName, snapshotName, payload.Tags)
+		response["snapshot_name"] = snapshotName
+	case "allocate_static_ip":
+		staticIPName := strings.TrimSpace(payload.StaticIPName)
+		if staticIPName == "" {
+			staticIPName = fmt.Sprintf("%s-ip-%d", instanceName, time.Now().Unix())
+		}
+		err = awscloud.AllocateLightsailStaticIP(ctx, credential, region, staticIPName)
+		response["static_ip_name"] = staticIPName
+	case "attach_static_ip":
+		if strings.TrimSpace(payload.StaticIPName) == "" {
+			api.RespondError(c, http.StatusBadRequest, "static_ip_name is required")
+			return
+		}
+		err = awscloud.AttachLightsailStaticIP(ctx, credential, region, payload.StaticIPName, instanceName)
+		response["static_ip_name"] = strings.TrimSpace(payload.StaticIPName)
+	case "detach_static_ip":
+		if strings.TrimSpace(payload.StaticIPName) == "" {
+			api.RespondError(c, http.StatusBadRequest, "static_ip_name is required")
+			return
+		}
+		err = awscloud.DetachLightsailStaticIP(ctx, credential, region, payload.StaticIPName)
+		response["static_ip_name"] = strings.TrimSpace(payload.StaticIPName)
+	case "release_static_ip":
+		if strings.TrimSpace(payload.StaticIPName) == "" {
+			api.RespondError(c, http.StatusBadRequest, "static_ip_name is required")
+			return
+		}
+		err = awscloud.ReleaseLightsailStaticIP(ctx, credential, region, payload.StaticIPName)
+		response["static_ip_name"] = strings.TrimSpace(payload.StaticIPName)
+	default:
+		api.RespondError(c, http.StatusBadRequest, "Unsupported Lightsail action: "+payload.Type)
+		return
+	}
+	if err != nil {
+		respondAWSError(c, err)
+		return
+	}
+
+	logCloudAudit(c, fmt.Sprintf("aws lightsail instance action: %s (%s)", actionType, instanceName))
+	api.RespondSuccess(c, response)
 }
 
 func getAWSActiveCredential(c *gin.Context) (*awscloud.Addition, *awscloud.CredentialRecord, string, context.Context, context.CancelFunc, error) {

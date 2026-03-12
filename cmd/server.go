@@ -287,6 +287,7 @@ func RunServer() {
 				linodeGroup.GET("/account", admin.GetLinodeAccount)
 				linodeGroup.GET("/catalog", admin.GetLinodeCatalog)
 				linodeGroup.GET("/instances", admin.ListLinodeInstances)
+				linodeGroup.GET("/instances/:id", admin.GetLinodeInstanceDetail)
 				linodeGroup.GET("/instances/:id/password", admin.GetLinodeInstancePassword)
 				linodeGroup.POST("/instances", admin.CreateLinodeInstance)
 				linodeGroup.DELETE("/instances/:id", admin.DeleteLinodeInstance)
@@ -304,9 +305,19 @@ func RunServer() {
 				awsGroup.GET("/account", admin.GetAWSAccount)
 				awsGroup.GET("/catalog", admin.GetAWSCatalog)
 				awsGroup.GET("/instances", admin.ListAWSInstances)
+				awsGroup.GET("/instances/:id", admin.GetAWSInstanceDetail)
 				awsGroup.POST("/instances", admin.CreateAWSInstance)
 				awsGroup.DELETE("/instances/:id", admin.DeleteAWSInstance)
 				awsGroup.POST("/instances/:id/actions", admin.PostAWSInstanceAction)
+				lightsailGroup := awsGroup.Group("/lightsail")
+				{
+					lightsailGroup.GET("/catalog", admin.GetAWSLightsailCatalog)
+					lightsailGroup.GET("/instances", admin.ListAWSLightsailInstances)
+					lightsailGroup.GET("/instances/:name", admin.GetAWSLightsailInstanceDetail)
+					lightsailGroup.POST("/instances", admin.CreateAWSLightsailInstance)
+					lightsailGroup.DELETE("/instances/:name", admin.DeleteAWSLightsailInstance)
+					lightsailGroup.POST("/instances/:name/actions", admin.PostAWSLightsailInstanceAction)
+				}
 			}
 		}
 		// themes

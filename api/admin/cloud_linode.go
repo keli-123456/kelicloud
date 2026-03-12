@@ -55,6 +55,13 @@ type createLinodeInstanceResponse struct {
 	PasswordSaveError string              `json:"password_save_error,omitempty"`
 }
 
+type linodeInstanceDetailView struct {
+	Instance *linodeInstanceView  `json:"instance"`
+	Disks    []linodecloud.Disk   `json:"disks"`
+	Configs  []linodecloud.Config `json:"configs"`
+	Backups  *linodecloud.Backups `json:"backups,omitempty"`
+}
+
 func GetLinodeTokens(c *gin.Context) {
 	_, addition, err := loadLinodeAddition(true)
 	if err != nil {
@@ -441,6 +448,56 @@ func ListLinodeInstances(c *gin.Context) {
 	api.RespondSuccess(c, views)
 }
 
+func GetLinodeInstanceDetail(c *gin.Context) {
+	client, _, activeToken, ctx, cancel, err := getLinodeActiveTokenClient(c)
+	if err != nil {
+		respondLinodeError(c, err)
+		return
+	}
+	defer cancel()
+
+	instanceID, err := strconv.Atoi(strings.TrimSpace(c.Param("id")))
+	if err != nil || instanceID <= 0 {
+		api.RespondError(c, http.StatusBadRequest, "Invalid instance id")
+		return
+	}
+
+	instance, err := client.GetInstance(ctx, instanceID)
+	if err != nil {
+		respondLinodeError(c, err)
+		return
+	}
+	disks, err := client.ListInstanceDisks(ctx, instanceID)
+	if err != nil {
+		respondLinodeError(c, err)
+		return
+	}
+	configs, err := client.ListInstanceConfigs(ctx, instanceID)
+	if err != nil {
+		respondLinodeError(c, err)
+		return
+	}
+	backups, err := client.GetInstanceBackups(ctx, instanceID)
+	if err != nil {
+		respondLinodeError(c, err)
+		return
+	}
+
+	if disks == nil {
+		disks = make([]linodecloud.Disk, 0)
+	}
+	if configs == nil {
+		configs = make([]linodecloud.Config, 0)
+	}
+
+	api.RespondSuccess(c, linodeInstanceDetailView{
+		Instance: buildLinodeInstanceView(instance, activeToken),
+		Disks:    disks,
+		Configs:  configs,
+		Backups:  backups,
+	})
+}
+
 func CreateLinodeInstance(c *gin.Context) {
 	client, addition, activeToken, ctx, cancel, err := getLinodeActiveTokenClient(c)
 	if err != nil {
@@ -560,7 +617,7 @@ func DeleteLinodeInstance(c *gin.Context) {
 }
 
 func PostLinodeInstanceAction(c *gin.Context) {
-	client, ctx, cancel, err := getLinodeClient(c)
+	client, addition, activeToken, ctx, cancel, err := getLinodeActiveTokenClient(c)
 	if err != nil {
 		respondLinodeError(c, err)
 		return
@@ -574,7 +631,14 @@ func PostLinodeInstanceAction(c *gin.Context) {
 	}
 
 	var payload struct {
-		Type string `json:"type" binding:"required"`
+		Type             string   `json:"type" binding:"required"`
+		TargetType       string   `json:"target_type,omitempty"`
+		Image            string   `json:"image,omitempty"`
+		RootPasswordMode string   `json:"root_password_mode,omitempty"`
+		RootPassword     string   `json:"root_password,omitempty"`
+		AuthorizedKeys   []string `json:"authorized_keys,omitempty"`
+		Booted           bool     `json:"booted,omitempty"`
+		UserData         string   `json:"user_data,omitempty"`
 	}
 	if err := c.ShouldBindJSON(&payload); err != nil {
 		api.RespondError(c, http.StatusBadRequest, "Invalid action request: "+err.Error())
@@ -582,6 +646,7 @@ func PostLinodeInstanceAction(c *gin.Context) {
 	}
 
 	actionType := strings.ToLower(strings.TrimSpace(payload.Type))
+	response := gin.H{"type": actionType, "resource_id": instanceID, "status": "submitted"}
 	switch actionType {
 	case "boot":
 		err = client.BootInstance(ctx, instanceID)
@@ -589,6 +654,117 @@ func PostLinodeInstanceAction(c *gin.Context) {
 		err = client.ShutdownInstance(ctx, instanceID)
 	case "reboot":
 		err = client.RebootInstance(ctx, instanceID)
+	case "resize":
+		targetType := strings.TrimSpace(payload.TargetType)
+		if targetType == "" {
+			api.RespondError(c, http.StatusBadRequest, "target_type is required")
+			return
+		}
+		err = client.ResizeInstance(ctx, instanceID, linodecloud.ResizeInstanceRequest{
+			Type: targetType,
+		})
+		response["target_type"] = targetType
+	case "snapshot":
+		backup, actionErr := client.CreateInstanceSnapshot(ctx, instanceID)
+		err = actionErr
+		response["snapshot"] = backup
+	case "reset_root_password":
+		passwordMode := normalizeLinodeRootPasswordMode(payload.RootPasswordMode)
+		if passwordMode == "" {
+			api.RespondError(c, http.StatusBadRequest, "Unsupported root password mode: "+payload.RootPasswordMode)
+			return
+		}
+		rootPassword := strings.TrimSpace(payload.RootPassword)
+		generatedPassword := ""
+		if passwordMode == "random" {
+			rootPassword, err = linodecloud.GenerateRandomPassword(20)
+			if err != nil {
+				api.RespondError(c, http.StatusInternalServerError, "Failed to generate root password: "+err.Error())
+				return
+			}
+			generatedPassword = rootPassword
+		}
+		if rootPassword == "" {
+			api.RespondError(c, http.StatusBadRequest, "Root password cannot be empty")
+			return
+		}
+		err = client.ResetInstanceRootPassword(ctx, instanceID, rootPassword)
+		if err == nil && activeToken != nil {
+			label := ""
+			if instance, lookupErr := client.GetInstance(ctx, instanceID); lookupErr == nil && instance != nil {
+				label = instance.Label
+			}
+			if saveErr := activeToken.SaveInstancePassword(instanceID, label, passwordMode, rootPassword, time.Now()); saveErr != nil {
+				response["password_saved"] = false
+				response["password_save_error"] = saveErr.Error()
+			} else if saveErr := saveLinodeAddition(addition); saveErr != nil {
+				activeToken.RemoveSavedInstancePassword(instanceID)
+				response["password_saved"] = false
+				response["password_save_error"] = "Failed to save root password: " + saveErr.Error()
+			} else {
+				response["password_saved"] = true
+			}
+		}
+		response["generated_password"] = generatedPassword
+	case "rebuild":
+		passwordMode := normalizeLinodeRootPasswordMode(payload.RootPasswordMode)
+		if passwordMode == "" {
+			api.RespondError(c, http.StatusBadRequest, "Unsupported root password mode: "+payload.RootPasswordMode)
+			return
+		}
+		rootPassword := strings.TrimSpace(payload.RootPassword)
+		generatedPassword := ""
+		if passwordMode == "random" {
+			rootPassword, err = linodecloud.GenerateRandomPassword(20)
+			if err != nil {
+				api.RespondError(c, http.StatusInternalServerError, "Failed to generate root password: "+err.Error())
+				return
+			}
+			generatedPassword = rootPassword
+		}
+		if rootPassword == "" {
+			api.RespondError(c, http.StatusBadRequest, "Root password cannot be empty")
+			return
+		}
+
+		request := linodecloud.RebuildInstanceRequest{
+			Image:          strings.TrimSpace(payload.Image),
+			RootPass:       rootPassword,
+			AuthorizedKeys: trimStringSlice(payload.AuthorizedKeys),
+			Booted:         payload.Booted,
+		}
+		if request.Image == "" {
+			api.RespondError(c, http.StatusBadRequest, "image is required")
+			return
+		}
+		if userData := strings.TrimSpace(payload.UserData); userData != "" {
+			request.Metadata = &struct {
+				UserData string `json:"user_data,omitempty"`
+			}{
+				UserData: linodecloud.EncodeUserData(userData),
+			}
+		}
+
+		rebuilt, actionErr := client.RebuildInstance(ctx, instanceID, request)
+		err = actionErr
+		if err == nil && activeToken != nil {
+			label := ""
+			if rebuilt != nil {
+				label = rebuilt.Label
+			}
+			if saveErr := activeToken.SaveInstancePassword(instanceID, label, passwordMode, rootPassword, time.Now()); saveErr != nil {
+				response["password_saved"] = false
+				response["password_save_error"] = saveErr.Error()
+			} else if saveErr := saveLinodeAddition(addition); saveErr != nil {
+				activeToken.RemoveSavedInstancePassword(instanceID)
+				response["password_saved"] = false
+				response["password_save_error"] = "Failed to save root password: " + saveErr.Error()
+			} else {
+				response["password_saved"] = true
+			}
+		}
+		response["generated_password"] = generatedPassword
+		response["instance"] = buildLinodeInstanceView(rebuilt, activeToken)
 	default:
 		api.RespondError(c, http.StatusBadRequest, "Unsupported instance action: "+payload.Type)
 		return
@@ -599,7 +775,7 @@ func PostLinodeInstanceAction(c *gin.Context) {
 	}
 
 	logCloudAudit(c, fmt.Sprintf("linode instance action: %s (%d)", actionType, instanceID))
-	api.RespondSuccess(c, gin.H{"type": actionType, "resource_id": instanceID, "status": "submitted"})
+	api.RespondSuccess(c, response)
 }
 
 func getLinodeClient(c *gin.Context) (*linodecloud.Client, context.Context, context.CancelFunc, error) {
