@@ -124,6 +124,11 @@ type SSHKey struct {
 	PublicKey   string `json:"public_key"`
 }
 
+type CreateSSHKeyRequest struct {
+	Name      string `json:"name" binding:"required"`
+	PublicKey string `json:"public_key" binding:"required"`
+}
+
 type Networks struct {
 	V4 []NetworkV4 `json:"v4"`
 	V6 []NetworkV6 `json:"v6"`
@@ -218,6 +223,14 @@ func (c *Client) ListImages(ctx context.Context, imageType string) ([]Image, err
 func (c *Client) ListSSHKeys(ctx context.Context) ([]SSHKey, error) {
 	query := url.Values{"per_page": {"200"}}
 	return getPaginated[SSHKey](ctx, c, "/v2/account/keys", query, "ssh_keys")
+}
+
+func (c *Client) CreateSSHKey(ctx context.Context, request CreateSSHKeyRequest) (*SSHKey, error) {
+	return postObject[SSHKey](ctx, c, "/v2/account/keys", request, "ssh_key")
+}
+
+func (c *Client) DeleteSSHKey(ctx context.Context, keyID int) error {
+	return c.doEmpty(ctx, http.MethodDelete, fmt.Sprintf("/v2/account/keys/%d", keyID), nil)
 }
 
 func (c *Client) ListDroplets(ctx context.Context) ([]Droplet, error) {

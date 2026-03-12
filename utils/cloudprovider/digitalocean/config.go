@@ -20,15 +20,20 @@ type Addition struct {
 }
 
 type TokenRecord struct {
-	ID            string `json:"id"`
-	Name          string `json:"name"`
-	Token         string `json:"token"`
-	AccountEmail  string `json:"account_email,omitempty"`
-	AccountUUID   string `json:"account_uuid,omitempty"`
-	DropletLimit  int    `json:"droplet_limit,omitempty"`
-	LastStatus    string `json:"last_status,omitempty"`
-	LastError     string `json:"last_error,omitempty"`
-	LastCheckedAt string `json:"last_checked_at,omitempty"`
+	ID                       string `json:"id"`
+	Name                     string `json:"name"`
+	Token                    string `json:"token"`
+	AccountEmail             string `json:"account_email,omitempty"`
+	AccountUUID              string `json:"account_uuid,omitempty"`
+	DropletLimit             int    `json:"droplet_limit,omitempty"`
+	LastStatus               string `json:"last_status,omitempty"`
+	LastError                string `json:"last_error,omitempty"`
+	LastCheckedAt            string `json:"last_checked_at,omitempty"`
+	ManagedSSHKeyID          int    `json:"managed_ssh_key_id,omitempty"`
+	ManagedSSHKeyName        string `json:"managed_ssh_key_name,omitempty"`
+	ManagedSSHKeyFingerprint string `json:"managed_ssh_key_fingerprint,omitempty"`
+	ManagedSSHPrivateKey     string `json:"managed_ssh_private_key,omitempty"`
+	ManagedSSHPublicKey      string `json:"managed_ssh_public_key,omitempty"`
 }
 
 type TokenImport struct {
@@ -38,21 +43,34 @@ type TokenImport struct {
 }
 
 type TokenView struct {
-	ID            string `json:"id"`
-	Name          string `json:"name"`
-	MaskedToken   string `json:"masked_token"`
-	AccountEmail  string `json:"account_email,omitempty"`
-	AccountUUID   string `json:"account_uuid,omitempty"`
-	DropletLimit  int    `json:"droplet_limit,omitempty"`
-	LastStatus    string `json:"last_status"`
-	LastError     string `json:"last_error,omitempty"`
-	LastCheckedAt string `json:"last_checked_at,omitempty"`
-	IsActive      bool   `json:"is_active"`
+	ID                       string `json:"id"`
+	Name                     string `json:"name"`
+	MaskedToken              string `json:"masked_token"`
+	AccountEmail             string `json:"account_email,omitempty"`
+	AccountUUID              string `json:"account_uuid,omitempty"`
+	DropletLimit             int    `json:"droplet_limit,omitempty"`
+	LastStatus               string `json:"last_status"`
+	LastError                string `json:"last_error,omitempty"`
+	LastCheckedAt            string `json:"last_checked_at,omitempty"`
+	ManagedSSHKeyName        string `json:"managed_ssh_key_name,omitempty"`
+	ManagedSSHKeyFingerprint string `json:"managed_ssh_key_fingerprint,omitempty"`
+	ManagedSSHKeyReady       bool   `json:"managed_ssh_key_ready"`
+	IsActive                 bool   `json:"is_active"`
 }
 
 type TokenPoolView struct {
 	ActiveTokenID string      `json:"active_token_id,omitempty"`
 	Tokens        []TokenView `json:"tokens"`
+}
+
+type ManagedSSHKeyMaterialView struct {
+	TokenID     string `json:"token_id"`
+	TokenName   string `json:"token_name"`
+	KeyID       int    `json:"key_id"`
+	Name        string `json:"name"`
+	Fingerprint string `json:"fingerprint,omitempty"`
+	PublicKey   string `json:"public_key"`
+	PrivateKey  string `json:"private_key"`
 }
 
 func (a *Addition) Normalize() {
@@ -86,6 +104,10 @@ func (a *Addition) Normalize() {
 		token.AccountUUID = strings.TrimSpace(token.AccountUUID)
 		token.LastError = strings.TrimSpace(token.LastError)
 		token.LastCheckedAt = strings.TrimSpace(token.LastCheckedAt)
+		token.ManagedSSHKeyName = strings.TrimSpace(token.ManagedSSHKeyName)
+		token.ManagedSSHKeyFingerprint = strings.TrimSpace(token.ManagedSSHKeyFingerprint)
+		token.ManagedSSHPrivateKey = strings.TrimSpace(token.ManagedSSHPrivateKey)
+		token.ManagedSSHPublicKey = strings.TrimSpace(token.ManagedSSHPublicKey)
 		token.LastStatus = normalizeTokenStatus(token.LastStatus)
 
 		if token.Token == "" {
@@ -283,19 +305,44 @@ func (a *Addition) ToPoolView() TokenPoolView {
 	}
 	for _, token := range a.Tokens {
 		view.Tokens = append(view.Tokens, TokenView{
-			ID:            token.ID,
-			Name:          token.Name,
-			MaskedToken:   maskToken(token.Token),
-			AccountEmail:  token.AccountEmail,
-			AccountUUID:   token.AccountUUID,
-			DropletLimit:  token.DropletLimit,
-			LastStatus:    normalizeTokenStatus(token.LastStatus),
-			LastError:     token.LastError,
-			LastCheckedAt: token.LastCheckedAt,
-			IsActive:      token.ID == a.ActiveTokenID,
+			ID:                       token.ID,
+			Name:                     token.Name,
+			MaskedToken:              maskToken(token.Token),
+			AccountEmail:             token.AccountEmail,
+			AccountUUID:              token.AccountUUID,
+			DropletLimit:             token.DropletLimit,
+			LastStatus:               normalizeTokenStatus(token.LastStatus),
+			LastError:                token.LastError,
+			LastCheckedAt:            token.LastCheckedAt,
+			ManagedSSHKeyName:        token.ManagedSSHKeyName,
+			ManagedSSHKeyFingerprint: token.ManagedSSHKeyFingerprint,
+			ManagedSSHKeyReady:       token.HasManagedSSHKeyMaterial(),
+			IsActive:                 token.ID == a.ActiveTokenID,
 		})
 	}
 	return view
+}
+
+func (t *TokenRecord) HasManagedSSHKeyMaterial() bool {
+	if t == nil {
+		return false
+	}
+	return t.ManagedSSHKeyID > 0 && t.ManagedSSHPrivateKey != "" && t.ManagedSSHPublicKey != ""
+}
+
+func (t *TokenRecord) ManagedSSHKeyMaterialView() *ManagedSSHKeyMaterialView {
+	if t == nil || !t.HasManagedSSHKeyMaterial() {
+		return nil
+	}
+	return &ManagedSSHKeyMaterialView{
+		TokenID:     t.ID,
+		TokenName:   t.Name,
+		KeyID:       t.ManagedSSHKeyID,
+		Name:        t.ManagedSSHKeyName,
+		Fingerprint: t.ManagedSSHKeyFingerprint,
+		PublicKey:   t.ManagedSSHPublicKey,
+		PrivateKey:  t.ManagedSSHPrivateKey,
+	}
 }
 
 func (t *TokenRecord) SetCheckResult(checkedAt time.Time, account *Account, err error) {

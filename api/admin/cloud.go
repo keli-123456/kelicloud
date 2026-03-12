@@ -23,6 +23,28 @@ import (
 
 const digitalOceanProviderName = "digitalocean"
 
+type createDigitalOceanDropletPayload struct {
+	Name             string   `json:"name" binding:"required"`
+	Region           string   `json:"region" binding:"required"`
+	Size             string   `json:"size" binding:"required"`
+	Image            string   `json:"image" binding:"required"`
+	SSHKeys          []int    `json:"ssh_keys,omitempty"`
+	Backups          bool     `json:"backups"`
+	IPv6             bool     `json:"ipv6"`
+	Monitoring       bool     `json:"monitoring"`
+	Tags             []string `json:"tags,omitempty"`
+	UserData         string   `json:"user_data,omitempty"`
+	VPCUUID          string   `json:"vpc_uuid,omitempty"`
+	RootPasswordMode string   `json:"root_password_mode,omitempty"`
+	RootPassword     string   `json:"root_password,omitempty"`
+}
+
+type createDigitalOceanDropletResponse struct {
+	Droplet           *digitalocean.Droplet                   `json:"droplet"`
+	GeneratedPassword string                                  `json:"generated_password,omitempty"`
+	ManagedSSHKey     *digitalocean.ManagedSSHKeyMaterialView `json:"managed_ssh_key,omitempty"`
+}
+
 func GetCloudProviders(c *gin.Context) {
 	api.RespondSuccess(c, factory.GetProviderConfigs())
 }
@@ -267,6 +289,34 @@ func DeleteDigitalOceanToken(c *gin.Context) {
 	api.RespondSuccess(c, addition.ToPoolView())
 }
 
+func GetDigitalOceanManagedSSHKey(c *gin.Context) {
+	tokenID := strings.TrimSpace(c.Param("id"))
+	if tokenID == "" {
+		api.RespondError(c, http.StatusBadRequest, "Invalid token id")
+		return
+	}
+
+	_, addition, err := loadDigitalOceanAddition(false)
+	if err != nil {
+		api.RespondError(c, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	token := addition.FindToken(tokenID)
+	if token == nil {
+		api.RespondError(c, http.StatusNotFound, "DigitalOcean token not found")
+		return
+	}
+
+	material := token.ManagedSSHKeyMaterialView()
+	if material == nil {
+		api.RespondError(c, http.StatusNotFound, "Managed SSH key is not configured for this token")
+		return
+	}
+
+	api.RespondSuccess(c, material)
+}
+
 func GetDigitalOceanAccount(c *gin.Context) {
 	client, ctx, cancel, err := getDigitalOceanClient(c)
 	if err != nil {
@@ -373,26 +423,82 @@ func ListDigitalOceanDroplets(c *gin.Context) {
 }
 
 func CreateDigitalOceanDroplet(c *gin.Context) {
-	client, ctx, cancel, err := getDigitalOceanClient(c)
+	client, addition, activeToken, ctx, cancel, err := getDigitalOceanActiveTokenClient(c)
 	if err != nil {
 		respondCloudError(c, err)
 		return
 	}
 	defer cancel()
 
-	var request digitalocean.CreateDropletRequest
-	if err := c.ShouldBindJSON(&request); err != nil {
+	var payload createDigitalOceanDropletPayload
+	if err := c.ShouldBindJSON(&payload); err != nil {
 		api.RespondError(c, http.StatusBadRequest, "Invalid droplet request: "+err.Error())
 		return
 	}
 
-	request.Name = strings.TrimSpace(request.Name)
-	request.Region = strings.TrimSpace(request.Region)
-	request.Size = strings.TrimSpace(request.Size)
-	request.Image = strings.TrimSpace(request.Image)
-	request.Tags = trimStringSlice(request.Tags)
-	request.UserData = strings.TrimSpace(request.UserData)
-	request.VPCUUID = strings.TrimSpace(request.VPCUUID)
+	payload.Name = strings.TrimSpace(payload.Name)
+	payload.Region = strings.TrimSpace(payload.Region)
+	payload.Size = strings.TrimSpace(payload.Size)
+	payload.Image = strings.TrimSpace(payload.Image)
+	payload.Tags = trimStringSlice(payload.Tags)
+	payload.UserData = strings.TrimSpace(payload.UserData)
+	payload.VPCUUID = strings.TrimSpace(payload.VPCUUID)
+	payload.RootPassword = strings.TrimSpace(payload.RootPassword)
+
+	passwordMode := normalizeRootPasswordMode(payload.RootPasswordMode)
+	if passwordMode == "" {
+		api.RespondError(c, http.StatusBadRequest, "Unsupported root password mode: "+payload.RootPasswordMode)
+		return
+	}
+
+	request := digitalocean.CreateDropletRequest{
+		Name:       payload.Name,
+		Region:     payload.Region,
+		Size:       payload.Size,
+		Image:      payload.Image,
+		SSHKeys:    uniqueIntSlice(payload.SSHKeys),
+		Backups:    payload.Backups,
+		IPv6:       payload.IPv6,
+		Monitoring: payload.Monitoring,
+		Tags:       payload.Tags,
+		UserData:   payload.UserData,
+		VPCUUID:    payload.VPCUUID,
+	}
+
+	var generatedPassword string
+	var managedSSHKey *digitalocean.ManagedSSHKeyMaterialView
+	if passwordMode != "ssh" {
+		rootPassword := payload.RootPassword
+		if passwordMode == "random" {
+			rootPassword, err = digitalocean.GenerateRandomPassword(20)
+			if err != nil {
+				api.RespondError(c, http.StatusInternalServerError, "Failed to generate root password: "+err.Error())
+				return
+			}
+			generatedPassword = rootPassword
+		} else if rootPassword == "" {
+			api.RespondError(c, http.StatusBadRequest, "Custom root password cannot be empty")
+			return
+		}
+
+		managedSSHKey, err = ensureManagedDigitalOceanSSHKey(ctx, addition, activeToken, client)
+		if err != nil {
+			var apiErr *digitalocean.APIError
+			if errors.As(err, &apiErr) {
+				respondCloudError(c, err)
+			} else {
+				api.RespondError(c, http.StatusInternalServerError, "Failed to prepare managed SSH key: "+err.Error())
+			}
+			return
+		}
+
+		request.SSHKeys = appendUniqueInt(request.SSHKeys, managedSSHKey.KeyID)
+		request.UserData, err = digitalocean.BuildRootPasswordUserData(rootPassword, request.UserData)
+		if err != nil {
+			api.RespondError(c, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
 
 	droplet, err := client.CreateDroplet(ctx, request)
 	if err != nil {
@@ -400,8 +506,12 @@ func CreateDigitalOceanDroplet(c *gin.Context) {
 		return
 	}
 
-	logCloudAudit(c, fmt.Sprintf("create digitalocean droplet: %s (%s/%s/%s)", request.Name, request.Region, request.Size, request.Image))
-	api.RespondSuccess(c, droplet)
+	logCloudAudit(c, fmt.Sprintf("create digitalocean droplet: %s (%s/%s/%s, password_mode=%s)", request.Name, request.Region, request.Size, request.Image, passwordMode))
+	api.RespondSuccess(c, createDigitalOceanDropletResponse{
+		Droplet:           droplet,
+		GeneratedPassword: generatedPassword,
+		ManagedSSHKey:     managedSSHKey,
+	})
 }
 
 func DeleteDigitalOceanDroplet(c *gin.Context) {
@@ -464,23 +574,28 @@ func PostDigitalOceanDropletAction(c *gin.Context) {
 }
 
 func getDigitalOceanClient(c *gin.Context) (*digitalocean.Client, context.Context, context.CancelFunc, error) {
+	client, _, _, ctx, cancel, err := getDigitalOceanActiveTokenClient(c)
+	return client, ctx, cancel, err
+}
+
+func getDigitalOceanActiveTokenClient(c *gin.Context) (*digitalocean.Client, *digitalocean.Addition, *digitalocean.TokenRecord, context.Context, context.CancelFunc, error) {
 	_, addition, err := loadDigitalOceanAddition(false)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, nil, err
 	}
 
 	activeToken := addition.ActiveToken()
 	if activeToken == nil {
-		return nil, nil, nil, fmt.Errorf("DigitalOcean token is not configured")
+		return nil, nil, nil, nil, nil, fmt.Errorf("DigitalOcean token is not configured")
 	}
 
 	client, err := digitalocean.NewClientFromToken(activeToken.Token)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, nil, err
 	}
 
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
-	return client, ctx, cancel, nil
+	return client, addition, activeToken, ctx, cancel, nil
 }
 
 func respondCloudError(c *gin.Context, err error) {
@@ -515,6 +630,96 @@ func trimStringSlice(values []string) []string {
 		}
 	}
 	return result
+}
+
+func normalizeRootPasswordMode(mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "", "ssh", "ssh_key", "ssh_only":
+		return "ssh"
+	case "custom":
+		return "custom"
+	case "random":
+		return "random"
+	default:
+		return ""
+	}
+}
+
+func uniqueIntSlice(values []int) []int {
+	result := make([]int, 0, len(values))
+	seen := make(map[int]struct{}, len(values))
+	for _, value := range values {
+		if value <= 0 {
+			continue
+		}
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	return result
+}
+
+func appendUniqueInt(values []int, value int) []int {
+	if value <= 0 {
+		return values
+	}
+	for _, current := range values {
+		if current == value {
+			return values
+		}
+	}
+	return append(values, value)
+}
+
+func ensureManagedDigitalOceanSSHKey(ctx context.Context, addition *digitalocean.Addition, token *digitalocean.TokenRecord, client *digitalocean.Client) (*digitalocean.ManagedSSHKeyMaterialView, error) {
+	if token == nil {
+		return nil, fmt.Errorf("DigitalOcean token is not configured")
+	}
+
+	if token.ManagedSSHKeyID > 0 && token.HasManagedSSHKeyMaterial() {
+		sshKeys, err := client.ListSSHKeys(ctx)
+		if err != nil {
+			return nil, err
+		}
+		for _, sshKey := range sshKeys {
+			if sshKey.ID == token.ManagedSSHKeyID {
+				if token.ManagedSSHKeyName == "" {
+					token.ManagedSSHKeyName = sshKey.Name
+				}
+				if token.ManagedSSHKeyFingerprint == "" {
+					token.ManagedSSHKeyFingerprint = sshKey.Fingerprint
+				}
+				return token.ManagedSSHKeyMaterialView(), nil
+			}
+		}
+	}
+
+	material, err := digitalocean.GenerateManagedSSHKeyPair(digitalocean.ManagedSSHKeyName(token))
+	if err != nil {
+		return nil, err
+	}
+
+	createdSSHKey, err := client.CreateSSHKey(ctx, digitalocean.CreateSSHKeyRequest{
+		Name:      material.Name,
+		PublicKey: material.PublicKey,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	token.ManagedSSHKeyID = createdSSHKey.ID
+	token.ManagedSSHKeyName = createdSSHKey.Name
+	token.ManagedSSHKeyFingerprint = createdSSHKey.Fingerprint
+	token.ManagedSSHPublicKey = material.PublicKey
+	token.ManagedSSHPrivateKey = material.PrivateKey
+
+	if err := saveDigitalOceanAddition(addition); err != nil {
+		return nil, err
+	}
+
+	return token.ManagedSSHKeyMaterialView(), nil
 }
 
 func loadDigitalOceanAddition(allowMissing bool) (*models.CloudProvider, *digitalocean.Addition, error) {

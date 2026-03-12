@@ -74,3 +74,24 @@ func TestTokenRecordSetCheckResult(t *testing.T) {
 	require.Empty(t, token.AccountUUID)
 	require.Zero(t, token.DropletLimit)
 }
+
+func TestGenerateManagedSSHKeyPair(t *testing.T) {
+	material, err := GenerateManagedSSHKeyPair("komari-test")
+
+	require.NoError(t, err)
+	require.Equal(t, "komari-test", material.Name)
+	require.Contains(t, material.PublicKey, "ssh-ed25519 ")
+	require.Contains(t, material.PrivateKey, "BEGIN PRIVATE KEY")
+}
+
+func TestBuildRootPasswordUserData(t *testing.T) {
+	userData, err := BuildRootPasswordUserData("Secret!123", "echo ready")
+
+	require.NoError(t, err)
+	require.Contains(t, userData, "root:Secret!123")
+	require.Contains(t, userData, "PasswordAuthentication yes")
+	require.Contains(t, userData, "echo ready")
+
+	_, err = BuildRootPasswordUserData("Secret!123", "#cloud-config\nusers: []")
+	require.Error(t, err)
+}

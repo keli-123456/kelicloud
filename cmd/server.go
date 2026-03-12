@@ -265,6 +265,7 @@ func RunServer() {
 				digitalOceanGroup.POST("/tokens", admin.SaveDigitalOceanTokens)
 				digitalOceanGroup.POST("/tokens/active", admin.SetDigitalOceanActiveToken)
 				digitalOceanGroup.POST("/tokens/check", admin.CheckDigitalOceanTokens)
+				digitalOceanGroup.GET("/tokens/:id/managed-ssh-key", admin.GetDigitalOceanManagedSSHKey)
 				digitalOceanGroup.DELETE("/tokens/:id", admin.DeleteDigitalOceanToken)
 				digitalOceanGroup.GET("/account", admin.GetDigitalOceanAccount)
 				digitalOceanGroup.GET("/catalog", admin.GetDigitalOceanCatalog)
