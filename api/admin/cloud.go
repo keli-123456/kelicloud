@@ -39,10 +39,18 @@ type createDigitalOceanDropletPayload struct {
 	RootPassword     string   `json:"root_password,omitempty"`
 }
 
+type digitalOceanDropletView struct {
+	digitalocean.Droplet
+	SavedRootPassword          bool   `json:"saved_root_password"`
+	SavedRootPasswordUpdatedAt string `json:"saved_root_password_updated_at,omitempty"`
+}
+
 type createDigitalOceanDropletResponse struct {
-	Droplet           *digitalocean.Droplet                   `json:"droplet"`
+	Droplet           *digitalOceanDropletView                `json:"droplet"`
 	GeneratedPassword string                                  `json:"generated_password,omitempty"`
 	ManagedSSHKey     *digitalocean.ManagedSSHKeyMaterialView `json:"managed_ssh_key,omitempty"`
+	PasswordSaved     bool                                    `json:"password_saved"`
+	PasswordSaveError string                                  `json:"password_save_error,omitempty"`
 }
 
 func GetCloudProviders(c *gin.Context) {
@@ -317,6 +325,41 @@ func GetDigitalOceanManagedSSHKey(c *gin.Context) {
 	api.RespondSuccess(c, material)
 }
 
+func GetDigitalOceanDropletPassword(c *gin.Context) {
+	dropletID, err := strconv.Atoi(strings.TrimSpace(c.Param("id")))
+	if err != nil || dropletID <= 0 {
+		api.RespondError(c, http.StatusBadRequest, "Invalid droplet id")
+		return
+	}
+
+	_, addition, err := loadDigitalOceanAddition(false)
+	if err != nil {
+		api.RespondError(c, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	activeToken := addition.ActiveToken()
+	if activeToken == nil {
+		api.RespondError(c, http.StatusBadRequest, "DigitalOcean token is not configured")
+		return
+	}
+
+	passwordView, err := activeToken.RevealDropletPassword(dropletID)
+	if err != nil {
+		switch {
+		case errors.Is(err, digitalocean.ErrSavedDropletPasswordNotFound):
+			api.RespondError(c, http.StatusNotFound, err.Error())
+		case errors.Is(err, digitalocean.ErrDropletPasswordVaultDisabled), errors.Is(err, digitalocean.ErrDropletPasswordDecryptFailed):
+			api.RespondError(c, http.StatusBadRequest, err.Error())
+		default:
+			api.RespondError(c, http.StatusInternalServerError, "Failed to load saved root password: "+err.Error())
+		}
+		return
+	}
+
+	api.RespondSuccess(c, passwordView)
+}
+
 func GetDigitalOceanAccount(c *gin.Context) {
 	client, ctx, cancel, err := getDigitalOceanClient(c)
 	if err != nil {
@@ -399,7 +442,7 @@ func GetDigitalOceanCatalog(c *gin.Context) {
 }
 
 func ListDigitalOceanDroplets(c *gin.Context) {
-	client, ctx, cancel, err := getDigitalOceanClient(c)
+	client, addition, activeToken, ctx, cancel, err := getDigitalOceanActiveTokenClient(c)
 	if err != nil {
 		respondCloudError(c, err)
 		return
@@ -419,7 +462,29 @@ func ListDigitalOceanDroplets(c *gin.Context) {
 		droplets = make([]digitalocean.Droplet, 0)
 	}
 
-	api.RespondSuccess(c, droplets)
+	views := make([]digitalOceanDropletView, 0, len(droplets))
+	validDropletIDs := make(map[int]struct{}, len(droplets))
+	credentialsChanged := false
+
+	for index := range droplets {
+		validDropletIDs[droplets[index].ID] = struct{}{}
+		if activeToken != nil && activeToken.SyncDropletCredentialName(droplets[index].ID, droplets[index].Name) {
+			credentialsChanged = true
+		}
+		view := buildDigitalOceanDropletView(&droplets[index], activeToken)
+		if view != nil {
+			views = append(views, *view)
+		}
+	}
+
+	if activeToken != nil && activeToken.PruneDropletCredentials(validDropletIDs) {
+		credentialsChanged = true
+	}
+	if credentialsChanged {
+		_ = saveDigitalOceanAddition(addition)
+	}
+
+	api.RespondSuccess(c, views)
 }
 
 func CreateDigitalOceanDroplet(c *gin.Context) {
@@ -467,6 +532,7 @@ func CreateDigitalOceanDroplet(c *gin.Context) {
 
 	var generatedPassword string
 	var managedSSHKey *digitalocean.ManagedSSHKeyMaterialView
+	var resolvedRootPassword string
 	if passwordMode != "ssh" {
 		rootPassword := payload.RootPassword
 		if passwordMode == "random" {
@@ -480,6 +546,7 @@ func CreateDigitalOceanDroplet(c *gin.Context) {
 			api.RespondError(c, http.StatusBadRequest, "Custom root password cannot be empty")
 			return
 		}
+		resolvedRootPassword = rootPassword
 
 		managedSSHKey, err = ensureManagedDigitalOceanSSHKey(ctx, addition, activeToken, client)
 		if err != nil {
@@ -506,16 +573,31 @@ func CreateDigitalOceanDroplet(c *gin.Context) {
 		return
 	}
 
+	passwordSaved := false
+	passwordSaveError := ""
+	if passwordMode != "ssh" && droplet != nil && resolvedRootPassword != "" && activeToken != nil {
+		if saveErr := activeToken.SaveDropletPassword(droplet.ID, droplet.Name, passwordMode, resolvedRootPassword, time.Now()); saveErr != nil {
+			passwordSaveError = saveErr.Error()
+		} else if saveErr := saveDigitalOceanAddition(addition); saveErr != nil {
+			activeToken.RemoveSavedDropletPassword(droplet.ID)
+			passwordSaveError = "Failed to save root password: " + saveErr.Error()
+		} else {
+			passwordSaved = true
+		}
+	}
+
 	logCloudAudit(c, fmt.Sprintf("create digitalocean droplet: %s (%s/%s/%s, password_mode=%s)", request.Name, request.Region, request.Size, request.Image, passwordMode))
 	api.RespondSuccess(c, createDigitalOceanDropletResponse{
-		Droplet:           droplet,
+		Droplet:           buildDigitalOceanDropletView(droplet, activeToken),
 		GeneratedPassword: generatedPassword,
 		ManagedSSHKey:     managedSSHKey,
+		PasswordSaved:     passwordSaved,
+		PasswordSaveError: passwordSaveError,
 	})
 }
 
 func DeleteDigitalOceanDroplet(c *gin.Context) {
-	client, ctx, cancel, err := getDigitalOceanClient(c)
+	client, addition, activeToken, ctx, cancel, err := getDigitalOceanActiveTokenClient(c)
 	if err != nil {
 		respondCloudError(c, err)
 		return
@@ -531,6 +613,10 @@ func DeleteDigitalOceanDroplet(c *gin.Context) {
 	if err := client.DeleteDroplet(ctx, dropletID); err != nil {
 		respondCloudError(c, err)
 		return
+	}
+
+	if activeToken != nil && activeToken.RemoveSavedDropletPassword(dropletID) {
+		_ = saveDigitalOceanAddition(addition)
 	}
 
 	logCloudAudit(c, fmt.Sprintf("delete digitalocean droplet: %d", dropletID))
@@ -671,6 +757,22 @@ func appendUniqueInt(values []int, value int) []int {
 		}
 	}
 	return append(values, value)
+}
+
+func buildDigitalOceanDropletView(droplet *digitalocean.Droplet, token *digitalocean.TokenRecord) *digitalOceanDropletView {
+	if droplet == nil {
+		return nil
+	}
+
+	view := &digitalOceanDropletView{
+		Droplet: *droplet,
+	}
+	if token != nil && token.HasSavedDropletPassword(droplet.ID) {
+		view.SavedRootPassword = true
+		view.SavedRootPasswordUpdatedAt = token.SavedDropletPasswordUpdatedAt(droplet.ID)
+	}
+
+	return view
 }
 
 func ensureManagedDigitalOceanSSHKey(ctx context.Context, addition *digitalocean.Addition, token *digitalocean.TokenRecord, client *digitalocean.Client) (*digitalocean.ManagedSSHKeyMaterialView, error) {

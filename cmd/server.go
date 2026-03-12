@@ -270,6 +270,7 @@ func RunServer() {
 				digitalOceanGroup.GET("/account", admin.GetDigitalOceanAccount)
 				digitalOceanGroup.GET("/catalog", admin.GetDigitalOceanCatalog)
 				digitalOceanGroup.GET("/droplets", admin.ListDigitalOceanDroplets)
+				digitalOceanGroup.GET("/droplets/:id/password", admin.GetDigitalOceanDropletPassword)
 				digitalOceanGroup.POST("/droplets", admin.CreateDigitalOceanDroplet)
 				digitalOceanGroup.DELETE("/droplets/:id", admin.DeleteDigitalOceanDroplet)
 				digitalOceanGroup.POST("/droplets/:id/actions", admin.PostDigitalOceanDropletAction)

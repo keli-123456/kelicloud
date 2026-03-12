@@ -95,3 +95,49 @@ func TestBuildRootPasswordUserData(t *testing.T) {
 	_, err = BuildRootPasswordUserData("Secret!123", "#cloud-config\nusers: []")
 	require.Error(t, err)
 }
+
+func TestDropletPasswordVaultRoundTrip(t *testing.T) {
+	t.Setenv(DropletPasswordVaultKeyEnv, "komari-test-secret")
+
+	ciphertext, err := encryptDropletPassword("Secret!123")
+	require.NoError(t, err)
+	require.NotEmpty(t, ciphertext)
+
+	plaintext, err := decryptDropletPassword(ciphertext)
+	require.NoError(t, err)
+	require.Equal(t, "Secret!123", plaintext)
+}
+
+func TestTokenRecordSaveAndRevealDropletPassword(t *testing.T) {
+	t.Setenv(DropletPasswordVaultKeyEnv, "komari-test-secret")
+
+	token := &TokenRecord{
+		ID:    "token-1",
+		Name:  "primary",
+		Token: "dop_v1_token",
+	}
+
+	err := token.SaveDropletPassword(1001, "web-01", "custom", "Secret!123", time.Unix(1710000000, 0))
+	require.NoError(t, err)
+	require.True(t, token.HasSavedDropletPassword(1001))
+	require.NotEmpty(t, token.SavedDropletPasswordUpdatedAt(1001))
+
+	passwordView, err := token.RevealDropletPassword(1001)
+	require.NoError(t, err)
+	require.Equal(t, 1001, passwordView.DropletID)
+	require.Equal(t, "web-01", passwordView.DropletName)
+	require.Equal(t, "root", passwordView.Username)
+	require.Equal(t, "custom", passwordView.PasswordMode)
+	require.Equal(t, "Secret!123", passwordView.RootPassword)
+}
+
+func TestTokenRecordSaveDropletPasswordRequiresVault(t *testing.T) {
+	token := &TokenRecord{
+		ID:    "token-1",
+		Name:  "primary",
+		Token: "dop_v1_token",
+	}
+
+	err := token.SaveDropletPassword(1001, "web-01", "custom", "Secret!123", time.Unix(1710000000, 0))
+	require.ErrorIs(t, err, ErrDropletPasswordVaultDisabled)
+}
