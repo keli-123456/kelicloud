@@ -276,6 +276,38 @@ func RunServer() {
 				digitalOceanGroup.DELETE("/droplets/:id", admin.DeleteDigitalOceanDroplet)
 				digitalOceanGroup.POST("/droplets/:id/actions", admin.PostDigitalOceanDropletAction)
 			}
+			linodeGroup := cloudGroup.Group("/linode")
+			{
+				linodeGroup.GET("/tokens", admin.GetLinodeTokens)
+				linodeGroup.POST("/tokens", admin.SaveLinodeTokens)
+				linodeGroup.POST("/tokens/active", admin.SetLinodeActiveToken)
+				linodeGroup.POST("/tokens/check", admin.CheckLinodeTokens)
+				linodeGroup.GET("/tokens/:id/secret", admin.GetLinodeTokenSecret)
+				linodeGroup.DELETE("/tokens/:id", admin.DeleteLinodeToken)
+				linodeGroup.GET("/account", admin.GetLinodeAccount)
+				linodeGroup.GET("/catalog", admin.GetLinodeCatalog)
+				linodeGroup.GET("/instances", admin.ListLinodeInstances)
+				linodeGroup.GET("/instances/:id/password", admin.GetLinodeInstancePassword)
+				linodeGroup.POST("/instances", admin.CreateLinodeInstance)
+				linodeGroup.DELETE("/instances/:id", admin.DeleteLinodeInstance)
+				linodeGroup.POST("/instances/:id/actions", admin.PostLinodeInstanceAction)
+			}
+			awsGroup := cloudGroup.Group("/aws")
+			{
+				awsGroup.GET("/credentials", admin.GetAWSCredentials)
+				awsGroup.POST("/credentials", admin.SaveAWSCredentials)
+				awsGroup.POST("/credentials/active", admin.SetAWSActiveCredential)
+				awsGroup.POST("/credentials/region", admin.SetAWSActiveRegion)
+				awsGroup.POST("/credentials/check", admin.CheckAWSCredentials)
+				awsGroup.GET("/credentials/:id/secret", admin.GetAWSCredentialSecret)
+				awsGroup.DELETE("/credentials/:id", admin.DeleteAWSCredential)
+				awsGroup.GET("/account", admin.GetAWSAccount)
+				awsGroup.GET("/catalog", admin.GetAWSCatalog)
+				awsGroup.GET("/instances", admin.ListAWSInstances)
+				awsGroup.POST("/instances", admin.CreateAWSInstance)
+				awsGroup.DELETE("/instances/:id", admin.DeleteAWSInstance)
+				awsGroup.POST("/instances/:id/actions", admin.PostAWSInstanceAction)
+			}
 		}
 		// themes
 		themeGroup := adminAuthrized.Group("/theme")
