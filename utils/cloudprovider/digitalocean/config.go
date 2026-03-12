@@ -75,6 +75,14 @@ type ManagedSSHKeyMaterialView struct {
 	PrivateKey  string `json:"private_key"`
 }
 
+type TokenSecretView struct {
+	TokenID      string `json:"token_id"`
+	TokenName    string `json:"token_name"`
+	Token        string `json:"token"`
+	MaskedToken  string `json:"masked_token"`
+	AccountEmail string `json:"account_email,omitempty"`
+}
+
 type DropletCredentialRecord struct {
 	DropletID          int    `json:"droplet_id"`
 	DropletName        string `json:"droplet_name,omitempty"`
@@ -380,6 +388,19 @@ func (t *TokenRecord) ManagedSSHKeyMaterialView() *ManagedSSHKeyMaterialView {
 		Fingerprint: t.ManagedSSHKeyFingerprint,
 		PublicKey:   t.ManagedSSHPublicKey,
 		PrivateKey:  t.ManagedSSHPrivateKey,
+	}
+}
+
+func (t *TokenRecord) TokenSecretView() *TokenSecretView {
+	if t == nil {
+		return nil
+	}
+	return &TokenSecretView{
+		TokenID:      t.ID,
+		TokenName:    t.Name,
+		Token:        t.Token,
+		MaskedToken:  maskToken(t.Token),
+		AccountEmail: t.AccountEmail,
 	}
 }
 

@@ -325,6 +325,28 @@ func GetDigitalOceanManagedSSHKey(c *gin.Context) {
 	api.RespondSuccess(c, material)
 }
 
+func GetDigitalOceanTokenSecret(c *gin.Context) {
+	tokenID := strings.TrimSpace(c.Param("id"))
+	if tokenID == "" {
+		api.RespondError(c, http.StatusBadRequest, "Invalid token id")
+		return
+	}
+
+	_, addition, err := loadDigitalOceanAddition(false)
+	if err != nil {
+		api.RespondError(c, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	token := addition.FindToken(tokenID)
+	if token == nil {
+		api.RespondError(c, http.StatusNotFound, "DigitalOcean token not found")
+		return
+	}
+
+	api.RespondSuccess(c, token.TokenSecretView())
+}
+
 func GetDigitalOceanDropletPassword(c *gin.Context) {
 	dropletID, err := strconv.Atoi(strings.TrimSpace(c.Param("id")))
 	if err != nil || dropletID <= 0 {
