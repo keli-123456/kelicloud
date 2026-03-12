@@ -139,6 +139,18 @@ func GetDigitalOceanCatalog(c *gin.Context) {
 	sort.Slice(sshKeys, func(i, j int) bool {
 		return sshKeys[i].Name < sshKeys[j].Name
 	})
+	if regions == nil {
+		regions = make([]digitalocean.Region, 0)
+	}
+	if sizes == nil {
+		sizes = make([]digitalocean.Size, 0)
+	}
+	if images == nil {
+		images = make([]digitalocean.Image, 0)
+	}
+	if sshKeys == nil {
+		sshKeys = make([]digitalocean.SSHKey, 0)
+	}
 
 	api.RespondSuccess(c, gin.H{
 		"regions":  regions,
@@ -165,6 +177,9 @@ func ListDigitalOceanDroplets(c *gin.Context) {
 	sort.Slice(droplets, func(i, j int) bool {
 		return droplets[i].CreatedAt > droplets[j].CreatedAt
 	})
+	if droplets == nil {
+		droplets = make([]digitalocean.Droplet, 0)
+	}
 
 	api.RespondSuccess(c, droplets)
 }
