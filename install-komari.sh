@@ -37,7 +37,7 @@ show_banner() {
     clear
     echo "=============================================================="
     echo "            Komari Monitoring System Installer"
-    echo "       https://github.com/komari-monitor/komari"
+    echo "       https://github.com/keli-123456/kelicloud"
     echo "=============================================================="
     echo
 }
@@ -149,7 +149,7 @@ install_binary() {
     mkdir -p "$DATA_DIR"
 
     local file_name="komari-linux-${arch}"
-    local download_url="https://github.com/komari-monitor/komari/releases/latest/download/${file_name}"
+    local download_url="https://github.com/keli-123456/kelicloud/releases/latest/download/${file_name}"
 
     log_step "下载 Komari 二进制文件..."
     log_info "URL: $download_url"
@@ -262,7 +262,7 @@ upgrade_komari() {
 
     local arch=$(detect_arch)
     local file_name="komari-linux-${arch}"
-    local download_url="https://github.com/komari-monitor/komari/releases/latest/download/${file_name}"
+    local download_url="https://github.com/keli-123456/kelicloud/releases/latest/download/${file_name}"
 
     log_step "下载最新版本..."
     if ! curl -L -o "$BINARY_PATH" "$download_url"; then

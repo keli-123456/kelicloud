@@ -8,7 +8,7 @@ import (
 	"github.com/komari-monitor/komari/config"
 )
 
-const defaultAgentInstallScriptBaseURL = "https://raw.githubusercontent.com/komari-monitor/komari-agent/refs/heads/main"
+const defaultAgentInstallScriptBaseURL = "https://raw.githubusercontent.com/keli-123456/kelicloud-agent/refs/heads/main"
 
 func resolveAgentInstallScriptURL(scriptFile string) (string, error) {
 	baseScriptsURL, err := config.GetAs[string](config.BaseScriptsURLKey, "")

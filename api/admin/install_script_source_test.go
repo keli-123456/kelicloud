@@ -13,7 +13,7 @@ func TestBuildAgentInstallScriptURL(t *testing.T) {
 			name:     "default official source",
 			base:     "",
 			script:   "install.sh",
-			expected: "https://raw.githubusercontent.com/komari-monitor/komari-agent/refs/heads/main/install.sh",
+			expected: "https://raw.githubusercontent.com/keli-123456/kelicloud-agent/refs/heads/main/install.sh",
 		},
 		{
 			name:     "github repo root",
