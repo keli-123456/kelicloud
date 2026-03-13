@@ -3,18 +3,21 @@ package config
 import "time"
 
 type Legacy struct {
-	ID                uint   `json:"id,omitempty"`                                        // 1
-	Sitename          string `json:"sitename" default:"Komari"`                           // 站点名称，默认 "Komari"
-	Description       string `json:"description" default:"A simple server monitor tool."` // 站点描述
-	AllowCors         bool   `json:"allow_cors" default:"false"`                          // 是否允许跨域，默认 false
-	Theme             string `json:"theme" default:"default"`                             // 主题名称，默认 'default'
-	PrivateSite       bool   `json:"private_site" default:"false"`                        // 是否为私有站点，默认 false
-	ApiKey            string `json:"api_key" default:""`                                  // API 密钥，默认空字符串
-	AutoDiscoveryKey  string `json:"auto_discovery_key" default:""`                       // 自动发现密钥
-	ScriptDomain      string `json:"script_domain" default:""`                            // 自定义脚本域名
-	SendIpAddrToGuest bool   `json:"send_ip_addr_to_guest" default:"false"`               // 是否向访客页面发送 IP 地址，默认 false
-	EulaAccepted      bool   `json:"eula_accepted" default:"false"`
-	BaseScriptsURLKey string `json:"base_scripts_url" default:""`
+	ID                     uint   `json:"id,omitempty"`                                        // 1
+	Sitename               string `json:"sitename" default:"Komari"`                           // 站点名称，默认 "Komari"
+	Description            string `json:"description" default:"A simple server monitor tool."` // 站点描述
+	AllowCors              bool   `json:"allow_cors" default:"false"`                          // 是否允许跨域，默认 false
+	Theme                  string `json:"theme" default:"default"`                             // 主题名称，默认 'default'
+	PrivateSite            bool   `json:"private_site" default:"false"`                        // 是否为私有站点，默认 false
+	ApiKey                 string `json:"api_key" default:""`                                  // API 密钥，默认空字符串
+	AutoDiscoveryKey       string `json:"auto_discovery_key" default:""`                       // 自动发现密钥
+	ScriptDomain           string `json:"script_domain" default:""`                            // 自定义脚本域名
+	CNConnectivityEnabled  bool   `json:"cn_connectivity_enabled" default:"false"`             // 是否启用国内连通性探测
+	CNConnectivityTarget   string `json:"cn_connectivity_target" default:""`                   // 国内连通性探测目标
+	CNConnectivityInterval int    `json:"cn_connectivity_interval" default:"60"`               // 国内连通性探测间隔，单位秒
+	SendIpAddrToGuest      bool   `json:"send_ip_addr_to_guest" default:"false"`               // 是否向访客页面发送 IP 地址，默认 false
+	EulaAccepted           bool   `json:"eula_accepted" default:"false"`
+	BaseScriptsURL         string `json:"base_scripts_url" default:""` // 安装脚本源地址
 	// GeoIP 配置
 	GeoIpEnabled  bool   `json:"geo_ip_enabled" default:"true"`
 	GeoIpProvider string `json:"geo_ip_provider" default:"ipinfo"` // empty, mmdb, ip-api, geojs
@@ -52,6 +55,9 @@ const (
 	ApiKeyKey                     = "api_key"
 	AutoDiscoveryKeyKey           = "auto_discovery_key"
 	ScriptDomainKey               = "script_domain"
+	CNConnectivityEnabledKey      = "cn_connectivity_enabled"
+	CNConnectivityTargetKey       = "cn_connectivity_target"
+	CNConnectivityIntervalKey     = "cn_connectivity_interval"
 	SendIpAddrToGuestKey          = "send_ip_addr_to_guest"
 	EulaAcceptedKey               = "eula_accepted"
 	BaseScriptsURLKey             = "base_scripts_url"

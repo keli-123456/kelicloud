@@ -1,6 +1,7 @@
 package aws
 
 import (
+	"fmt"
 	"strings"
 	"time"
 
@@ -276,9 +277,6 @@ func (a *Addition) UpsertCredentials(inputs []CredentialImport) int {
 			continue
 		}
 		name := strings.TrimSpace(input.Name)
-		if name == "" {
-			name = "Credential"
-		}
 		defaultRegion := normalizeRegion(input.DefaultRegion)
 		inputID := strings.TrimSpace(input.ID)
 
@@ -295,12 +293,17 @@ func (a *Addition) UpsertCredentials(inputs []CredentialImport) int {
 		}
 
 		if matched != nil {
-			matched.Name = name
+			if name != "" {
+				matched.Name = name
+			}
 			matched.AccessKeyID = accessKeyID
 			matched.SecretAccessKey = secretAccessKey
 			matched.SessionToken = strings.TrimSpace(input.SessionToken)
 			matched.DefaultRegion = defaultRegion
 		} else {
+			if name == "" {
+				name = nextGeneratedCredentialName(a.Credentials)
+			}
 			a.Credentials = append(a.Credentials, CredentialRecord{
 				ID:              uuid.NewString(),
 				Name:            name,
@@ -316,6 +319,23 @@ func (a *Addition) UpsertCredentials(inputs []CredentialImport) int {
 
 	a.Normalize()
 	return count
+}
+
+func nextGeneratedCredentialName(credentials []CredentialRecord) string {
+	used := make(map[string]struct{}, len(credentials))
+	for _, credential := range credentials {
+		name := strings.TrimSpace(credential.Name)
+		if name != "" {
+			used[name] = struct{}{}
+		}
+	}
+
+	for index := 1; ; index++ {
+		candidate := fmt.Sprintf("Credential %d", index)
+		if _, exists := used[candidate]; !exists {
+			return candidate
+		}
+	}
 }
 
 func (a *Addition) RemoveCredential(id string) bool {

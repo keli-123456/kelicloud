@@ -11,8 +11,6 @@ import (
 	webutils "github.com/komari-monitor/komari/utils"
 )
 
-const komariAgentInstallScriptURL = "https://raw.githubusercontent.com/komari-monitor/komari-agent/refs/heads/main/install.sh"
-
 type autoConnectUserDataOptions struct {
 	Enabled           bool
 	Group             string
@@ -157,10 +155,15 @@ func buildScopedAutoDiscoveryKey(baseKey, group string) string {
 }
 
 func buildCloudAutoConnectInstallSnippet(endpoint, scopedAutoDiscoveryKey string) string {
+	installScriptURL, err := resolveAgentInstallScriptURL("install.sh")
+	if err != nil {
+		installScriptURL = buildAgentInstallScriptURL("", "install.sh")
+	}
+
 	var builder strings.Builder
 	builder.WriteString("# Komari auto-connect\n")
 	builder.WriteString("KOMARI_INSTALL_URL=")
-	builder.WriteString(shellSingleQuote(komariAgentInstallScriptURL))
+	builder.WriteString(shellSingleQuote(installScriptURL))
 	builder.WriteString("\n")
 	builder.WriteString("KOMARI_ENDPOINT=")
 	builder.WriteString(shellSingleQuote(strings.TrimSpace(endpoint)))

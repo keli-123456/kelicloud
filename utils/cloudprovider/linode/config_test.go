@@ -63,3 +63,26 @@ func TestTokenRecordSetCheckResultClearsFieldsOnError(t *testing.T) {
 	require.Empty(t, token.ProfileEmail)
 	require.Empty(t, token.AccountCompany)
 }
+
+func TestAdditionUpsertTokensGeneratesUniqueDefaultNames(t *testing.T) {
+	addition := &Addition{
+		Tokens: []TokenRecord{
+			{
+				ID:    "token-1",
+				Name:  "Token 1",
+				Token: "linode-token-1",
+			},
+		},
+	}
+
+	count := addition.UpsertTokens([]TokenImport{
+		{Token: "linode-token-2"},
+		{Token: "linode-token-3"},
+	})
+
+	require.Equal(t, 2, count)
+	require.Len(t, addition.Tokens, 3)
+	require.Equal(t, "Token 1", addition.Tokens[0].Name)
+	require.Equal(t, "Token 2", addition.Tokens[1].Name)
+	require.Equal(t, "Token 3", addition.Tokens[2].Name)
+}

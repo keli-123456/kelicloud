@@ -209,6 +209,7 @@ func WebSocketReport(c *gin.Context) {
 	}
 	ws.SetConnectedClients(uuid, conn)
 	log.Printf("Client %s is reconnect success, connID: %d", uuid, conn.ID)
+	pushCNConnectivityProbeConfig(conn)
 	go notifier.OnlineNotification(uuid, conn.ID)
 	defer func() {
 		ws.DeleteClientConditionally(uuid, conn)

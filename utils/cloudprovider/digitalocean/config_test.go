@@ -46,6 +46,29 @@ func TestAdditionUpsertTokensDeduplicatesByToken(t *testing.T) {
 	require.NotEmpty(t, addition.ActiveTokenID)
 }
 
+func TestAdditionUpsertTokensGeneratesUniqueDefaultNames(t *testing.T) {
+	addition := &Addition{
+		Tokens: []TokenRecord{
+			{
+				ID:    "token-1",
+				Name:  "Token 1",
+				Token: "dop_v1_existing",
+			},
+		},
+	}
+
+	count := addition.UpsertTokens([]TokenImport{
+		{Token: "dop_v1_second"},
+		{Token: "dop_v1_third"},
+	})
+
+	require.Equal(t, 2, count)
+	require.Len(t, addition.Tokens, 3)
+	require.Equal(t, "Token 1", addition.Tokens[0].Name)
+	require.Equal(t, "Token 2", addition.Tokens[1].Name)
+	require.Equal(t, "Token 3", addition.Tokens[2].Name)
+}
+
 func TestAdditionNormalizeMigratesLegacyManagedSSHKeyToSharedMaterial(t *testing.T) {
 	addition := &Addition{
 		Tokens: []TokenRecord{

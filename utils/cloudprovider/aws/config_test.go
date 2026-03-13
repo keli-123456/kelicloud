@@ -80,3 +80,36 @@ func TestCredentialRecordSetCheckResultClearsQuotaOnIdentityError(t *testing.T) 
 	require.Nil(t, credential.EC2Quota)
 	require.Empty(t, credential.EC2QuotaError)
 }
+
+func TestAdditionUpsertCredentialsGeneratesUniqueDefaultNames(t *testing.T) {
+	addition := &Addition{
+		Credentials: []CredentialRecord{
+			{
+				ID:              "cred-1",
+				Name:            "Credential 1",
+				AccessKeyID:     "AKIAEXISTING",
+				SecretAccessKey: "secret-1",
+				DefaultRegion:   "us-east-1",
+			},
+		},
+	}
+
+	count := addition.UpsertCredentials([]CredentialImport{
+		{
+			AccessKeyID:     "AKIASECOND",
+			SecretAccessKey: "secret-2",
+			DefaultRegion:   "us-east-1",
+		},
+		{
+			AccessKeyID:     "AKIATHIRD",
+			SecretAccessKey: "secret-3",
+			DefaultRegion:   "us-west-2",
+		},
+	})
+
+	require.Equal(t, 2, count)
+	require.Len(t, addition.Credentials, 3)
+	require.Equal(t, "Credential 1", addition.Credentials[0].Name)
+	require.Equal(t, "Credential 2", addition.Credentials[1].Name)
+	require.Equal(t, "Credential 3", addition.Credentials[2].Name)
+}

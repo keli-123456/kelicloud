@@ -2,6 +2,7 @@ package linode
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -237,9 +238,6 @@ func (a *Addition) UpsertTokens(inputs []TokenImport) int {
 			continue
 		}
 		name := strings.TrimSpace(input.Name)
-		if name == "" {
-			name = "Token"
-		}
 		inputID := strings.TrimSpace(input.ID)
 
 		var matched *TokenRecord
@@ -255,9 +253,14 @@ func (a *Addition) UpsertTokens(inputs []TokenImport) int {
 		}
 
 		if matched != nil {
-			matched.Name = name
+			if name != "" {
+				matched.Name = name
+			}
 			matched.Token = tokenValue
 		} else {
+			if name == "" {
+				name = nextGeneratedTokenName(a.Tokens)
+			}
 			a.Tokens = append(a.Tokens, TokenRecord{
 				ID:         uuid.NewString(),
 				Name:       name,
@@ -270,6 +273,23 @@ func (a *Addition) UpsertTokens(inputs []TokenImport) int {
 
 	a.Normalize()
 	return count
+}
+
+func nextGeneratedTokenName(tokens []TokenRecord) string {
+	used := make(map[string]struct{}, len(tokens))
+	for _, token := range tokens {
+		name := strings.TrimSpace(token.Name)
+		if name != "" {
+			used[name] = struct{}{}
+		}
+	}
+
+	for index := 1; ; index++ {
+		candidate := fmt.Sprintf("Token %d", index)
+		if _, exists := used[candidate]; !exists {
+			return candidate
+		}
+	}
 }
 
 func (a *Addition) RemoveToken(id string) bool {
