@@ -31,6 +31,8 @@ type createAWSInstancePayload struct {
 	UserData         string         `json:"user_data,omitempty"`
 	AssignPublicIP   bool           `json:"assign_public_ip"`
 	Tags             []awscloud.Tag `json:"tags,omitempty"`
+	AutoConnect      bool           `json:"auto_connect"`
+	AutoConnectGroup string         `json:"auto_connect_group,omitempty"`
 }
 
 type createAWSLightsailInstancePayload struct {
@@ -42,6 +44,8 @@ type createAWSLightsailInstancePayload struct {
 	UserData         string         `json:"user_data,omitempty"`
 	IPAddressType    string         `json:"ip_address_type,omitempty"`
 	Tags             []awscloud.Tag `json:"tags,omitempty"`
+	AutoConnect      bool           `json:"auto_connect"`
+	AutoConnectGroup string         `json:"auto_connect_group,omitempty"`
 }
 
 type awsAccountView struct {
@@ -561,6 +565,22 @@ func CreateAWSInstance(c *gin.Context) {
 		return
 	}
 
+	resolvedUserData := strings.TrimSpace(payload.UserData)
+	autoConnectGroup := ""
+	if payload.AutoConnect {
+		resolvedUserData, autoConnectGroup, err = prepareCloudAutoConnectUserData(c, resolvedUserData, autoConnectUserDataOptions{
+			Enabled:           true,
+			Group:             payload.AutoConnectGroup,
+			Provider:          awsProviderName,
+			CredentialName:    credential.Name,
+			WrapInShellScript: true,
+		})
+		if err != nil {
+			api.RespondError(c, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+
 	request := awscloud.CreateInstanceRequest{
 		Name:             strings.TrimSpace(payload.Name),
 		ImageID:          strings.TrimSpace(payload.ImageID),
@@ -568,7 +588,7 @@ func CreateAWSInstance(c *gin.Context) {
 		KeyName:          strings.TrimSpace(payload.KeyName),
 		SubnetID:         strings.TrimSpace(payload.SubnetID),
 		SecurityGroupIDs: trimStringSlice(payload.SecurityGroupIDs),
-		UserData:         strings.TrimSpace(payload.UserData),
+		UserData:         resolvedUserData,
 		AssignPublicIP:   payload.AssignPublicIP,
 		Tags:             payload.Tags,
 	}
@@ -579,7 +599,12 @@ func CreateAWSInstance(c *gin.Context) {
 		return
 	}
 
-	logCloudAudit(c, fmt.Sprintf("create aws ec2 instance: %s (%s/%s)", request.Name, region, request.InstanceType))
+	logMessage := fmt.Sprintf("create aws ec2 instance: %s (%s/%s", request.Name, region, request.InstanceType)
+	if autoConnectGroup != "" {
+		logMessage += ", auto_connect_group=" + autoConnectGroup
+	}
+	logMessage += ")"
+	logCloudAudit(c, logMessage)
 	api.RespondSuccess(c, gin.H{
 		"instance": instance,
 	})
@@ -599,13 +624,29 @@ func CreateAWSLightsailInstance(c *gin.Context) {
 		return
 	}
 
+	resolvedUserData := strings.TrimSpace(payload.UserData)
+	autoConnectGroup := ""
+	if payload.AutoConnect {
+		resolvedUserData, autoConnectGroup, err = prepareCloudAutoConnectUserData(c, resolvedUserData, autoConnectUserDataOptions{
+			Enabled:           true,
+			Group:             payload.AutoConnectGroup,
+			Provider:          awsProviderName,
+			CredentialName:    credential.Name,
+			WrapInShellScript: true,
+		})
+		if err != nil {
+			api.RespondError(c, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+
 	request := awscloud.CreateLightsailInstanceRequest{
 		Name:             strings.TrimSpace(payload.Name),
 		AvailabilityZone: strings.TrimSpace(payload.AvailabilityZone),
 		BlueprintID:      strings.TrimSpace(payload.BlueprintID),
 		BundleID:         strings.TrimSpace(payload.BundleID),
 		KeyPairName:      strings.TrimSpace(payload.KeyPairName),
-		UserData:         strings.TrimSpace(payload.UserData),
+		UserData:         resolvedUserData,
 		IPAddressType:    strings.TrimSpace(payload.IPAddressType),
 		Tags:             payload.Tags,
 	}
@@ -615,7 +656,12 @@ func CreateAWSLightsailInstance(c *gin.Context) {
 		return
 	}
 
-	logCloudAudit(c, fmt.Sprintf("create aws lightsail instance: %s (%s/%s)", request.Name, request.AvailabilityZone, request.BundleID))
+	logMessage := fmt.Sprintf("create aws lightsail instance: %s (%s/%s", request.Name, request.AvailabilityZone, request.BundleID)
+	if autoConnectGroup != "" {
+		logMessage += ", auto_connect_group=" + autoConnectGroup
+	}
+	logMessage += ")"
+	logCloudAudit(c, logMessage)
 	api.RespondSuccess(c, gin.H{
 		"name":   request.Name,
 		"status": "submitted",

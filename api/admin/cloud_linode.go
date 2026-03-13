@@ -33,6 +33,8 @@ type createLinodeInstancePayload struct {
 	UserData         string   `json:"user_data,omitempty"`
 	RootPasswordMode string   `json:"root_password_mode,omitempty"`
 	RootPassword     string   `json:"root_password,omitempty"`
+	AutoConnect      bool     `json:"auto_connect"`
+	AutoConnectGroup string   `json:"auto_connect_group,omitempty"`
 }
 
 type linodeAccountView struct {
@@ -522,6 +524,7 @@ func CreateLinodeInstance(c *gin.Context) {
 	payload.Tags = trimStringSlice(payload.Tags)
 	payload.UserData = strings.TrimSpace(payload.UserData)
 	payload.RootPassword = strings.TrimSpace(payload.RootPassword)
+	payload.AutoConnectGroup = strings.TrimSpace(payload.AutoConnectGroup)
 
 	passwordMode := normalizeLinodeRootPasswordMode(payload.RootPasswordMode)
 	if passwordMode == "" {
@@ -544,6 +547,22 @@ func CreateLinodeInstance(c *gin.Context) {
 		return
 	}
 
+	resolvedUserData := payload.UserData
+	autoConnectGroup := ""
+	if payload.AutoConnect {
+		resolvedUserData, autoConnectGroup, err = prepareCloudAutoConnectUserData(c, payload.UserData, autoConnectUserDataOptions{
+			Enabled:           true,
+			Group:             payload.AutoConnectGroup,
+			Provider:          linodeProviderName,
+			CredentialName:    activeToken.Name,
+			WrapInShellScript: true,
+		})
+		if err != nil {
+			api.RespondError(c, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+
 	request := linodecloud.CreateInstanceRequest{
 		Label:          payload.Label,
 		Region:         payload.Region,
@@ -555,11 +574,11 @@ func CreateLinodeInstance(c *gin.Context) {
 		Booted:         payload.Booted,
 		Tags:           payload.Tags,
 	}
-	if payload.UserData != "" {
+	if resolvedUserData != "" {
 		request.Metadata = &struct {
 			UserData string `json:"user_data,omitempty"`
 		}{
-			UserData: linodecloud.EncodeUserData(payload.UserData),
+			UserData: linodecloud.EncodeUserData(resolvedUserData),
 		}
 	}
 
@@ -582,7 +601,12 @@ func CreateLinodeInstance(c *gin.Context) {
 		}
 	}
 
-	logCloudAudit(c, fmt.Sprintf("create linode instance: %s (%s/%s/%s, password_mode=%s)", request.Label, request.Region, request.Type, request.Image, passwordMode))
+	logMessage := fmt.Sprintf("create linode instance: %s (%s/%s/%s, password_mode=%s", request.Label, request.Region, request.Type, request.Image, passwordMode)
+	if autoConnectGroup != "" {
+		logMessage += ", auto_connect_group=" + autoConnectGroup
+	}
+	logMessage += ")"
+	logCloudAudit(c, logMessage)
 	api.RespondSuccess(c, createLinodeInstanceResponse{
 		Instance:          buildLinodeInstanceView(instance, activeToken),
 		GeneratedPassword: generatedPassword,

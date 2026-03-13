@@ -37,6 +37,8 @@ type createDigitalOceanDropletPayload struct {
 	VPCUUID          string   `json:"vpc_uuid,omitempty"`
 	RootPasswordMode string   `json:"root_password_mode,omitempty"`
 	RootPassword     string   `json:"root_password,omitempty"`
+	AutoConnect      bool     `json:"auto_connect"`
+	AutoConnectGroup string   `json:"auto_connect_group,omitempty"`
 }
 
 type digitalOceanDropletView struct {
@@ -531,11 +533,28 @@ func CreateDigitalOceanDroplet(c *gin.Context) {
 	payload.UserData = strings.TrimSpace(payload.UserData)
 	payload.VPCUUID = strings.TrimSpace(payload.VPCUUID)
 	payload.RootPassword = strings.TrimSpace(payload.RootPassword)
+	payload.AutoConnectGroup = strings.TrimSpace(payload.AutoConnectGroup)
 
 	passwordMode := normalizeRootPasswordMode(payload.RootPasswordMode)
 	if passwordMode == "" {
 		api.RespondError(c, http.StatusBadRequest, "Unsupported root password mode: "+payload.RootPasswordMode)
 		return
+	}
+
+	resolvedUserData := payload.UserData
+	autoConnectGroup := ""
+	if payload.AutoConnect {
+		resolvedUserData, autoConnectGroup, err = prepareCloudAutoConnectUserData(c, payload.UserData, autoConnectUserDataOptions{
+			Enabled:           true,
+			Group:             payload.AutoConnectGroup,
+			Provider:          digitalOceanProviderName,
+			CredentialName:    activeToken.Name,
+			WrapInShellScript: passwordMode == "ssh",
+		})
+		if err != nil {
+			api.RespondError(c, http.StatusBadRequest, err.Error())
+			return
+		}
 	}
 
 	request := digitalocean.CreateDropletRequest{
@@ -548,7 +567,7 @@ func CreateDigitalOceanDroplet(c *gin.Context) {
 		IPv6:       payload.IPv6,
 		Monitoring: payload.Monitoring,
 		Tags:       payload.Tags,
-		UserData:   payload.UserData,
+		UserData:   resolvedUserData,
 		VPCUUID:    payload.VPCUUID,
 	}
 
@@ -608,7 +627,12 @@ func CreateDigitalOceanDroplet(c *gin.Context) {
 		}
 	}
 
-	logCloudAudit(c, fmt.Sprintf("create digitalocean droplet: %s (%s/%s/%s, password_mode=%s)", request.Name, request.Region, request.Size, request.Image, passwordMode))
+	logMessage := fmt.Sprintf("create digitalocean droplet: %s (%s/%s/%s, password_mode=%s", request.Name, request.Region, request.Size, request.Image, passwordMode)
+	if autoConnectGroup != "" {
+		logMessage += ", auto_connect_group=" + autoConnectGroup
+	}
+	logMessage += ")"
+	logCloudAudit(c, logMessage)
 	api.RespondSuccess(c, createDigitalOceanDropletResponse{
 		Droplet:           buildDigitalOceanDropletView(droplet, activeToken),
 		GeneratedPassword: generatedPassword,
