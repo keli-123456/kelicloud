@@ -9,20 +9,21 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"strings"
+
+	"github.com/komari-monitor/komari/utils/cloudprovider/passwordvault"
 )
 
-const DropletPasswordVaultKeyEnv = "KOMARI_CLOUD_SECRET_KEY"
+const DropletPasswordVaultKeyEnv = passwordvault.SecretKeyEnv
 
 var (
-	ErrDropletPasswordVaultDisabled = errors.New("saved root password storage is disabled; set KOMARI_CLOUD_SECRET_KEY on the server")
-	ErrDropletPasswordDecryptFailed = errors.New("saved root password could not be decrypted; verify KOMARI_CLOUD_SECRET_KEY")
+	ErrDropletPasswordVaultDisabled = errors.New("saved root password storage is unavailable; allow Komari to write ./data/cloud_secret.key or set KOMARI_CLOUD_SECRET_KEY")
+	ErrDropletPasswordDecryptFailed = errors.New("saved root password could not be decrypted; verify KOMARI_CLOUD_SECRET_KEY or ./data/cloud_secret.key")
 	ErrSavedDropletPasswordNotFound = errors.New("saved root password was not found for this droplet")
 )
 
 func IsDropletPasswordVaultEnabled() bool {
-	return strings.TrimSpace(os.Getenv(DropletPasswordVaultKeyEnv)) != ""
+	return passwordvault.IsAvailable()
 }
 
 func encryptDropletPassword(plaintext string) (string, error) {
@@ -67,9 +68,9 @@ func decryptDropletPassword(ciphertext string) (string, error) {
 }
 
 func newDropletPasswordCipher() (cipher.AEAD, error) {
-	secret := strings.TrimSpace(os.Getenv(DropletPasswordVaultKeyEnv))
-	if secret == "" {
-		return nil, ErrDropletPasswordVaultDisabled
+	secret, err := passwordvault.LoadOrCreateSecret()
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrDropletPasswordVaultDisabled, err)
 	}
 
 	key := sha256.Sum256([]byte(secret))

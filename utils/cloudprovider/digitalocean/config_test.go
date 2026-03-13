@@ -2,6 +2,7 @@ package digitalocean
 
 import (
 	"errors"
+	"os"
 	"testing"
 	"time"
 
@@ -234,7 +235,9 @@ func TestTokenRecordSaveAndRevealDropletPassword(t *testing.T) {
 	require.Equal(t, "Secret!123", passwordView.RootPassword)
 }
 
-func TestTokenRecordSaveDropletPasswordRequiresVault(t *testing.T) {
+func TestTokenRecordSaveDropletPasswordAutoCreatesVaultSecret(t *testing.T) {
+	t.Chdir(t.TempDir())
+
 	token := &TokenRecord{
 		ID:    "token-1",
 		Name:  "primary",
@@ -242,5 +245,12 @@ func TestTokenRecordSaveDropletPasswordRequiresVault(t *testing.T) {
 	}
 
 	err := token.SaveDropletPassword(1001, "web-01", "custom", "Secret!123", time.Unix(1710000000, 0))
-	require.ErrorIs(t, err, ErrDropletPasswordVaultDisabled)
+	require.NoError(t, err)
+
+	passwordView, revealErr := token.RevealDropletPassword(1001)
+	require.NoError(t, revealErr)
+	require.Equal(t, "Secret!123", passwordView.RootPassword)
+
+	_, statErr := os.Stat("./data/cloud_secret.key")
+	require.NoError(t, statErr)
 }

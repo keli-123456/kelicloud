@@ -2,6 +2,7 @@ package linode
 
 import (
 	"errors"
+	"os"
 	"testing"
 	"time"
 
@@ -85,4 +86,24 @@ func TestAdditionUpsertTokensGeneratesUniqueDefaultNames(t *testing.T) {
 	require.Equal(t, "Token 1", addition.Tokens[0].Name)
 	require.Equal(t, "Token 2", addition.Tokens[1].Name)
 	require.Equal(t, "Token 3", addition.Tokens[2].Name)
+}
+
+func TestTokenRecordSaveInstancePasswordAutoCreatesVaultSecret(t *testing.T) {
+	t.Chdir(t.TempDir())
+
+	token := &TokenRecord{
+		ID:    "token-1",
+		Name:  "primary",
+		Token: "linode-token",
+	}
+
+	err := token.SaveInstancePassword(2001, "web-01", "custom", "Secret!123", time.Unix(1710000000, 0))
+	require.NoError(t, err)
+
+	passwordView, revealErr := token.RevealInstancePassword(2001)
+	require.NoError(t, revealErr)
+	require.Equal(t, "Secret!123", passwordView.RootPassword)
+
+	_, statErr := os.Stat("./data/cloud_secret.key")
+	require.NoError(t, statErr)
 }
