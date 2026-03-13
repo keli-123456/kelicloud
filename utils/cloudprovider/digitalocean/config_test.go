@@ -46,6 +46,71 @@ func TestAdditionUpsertTokensDeduplicatesByToken(t *testing.T) {
 	require.NotEmpty(t, addition.ActiveTokenID)
 }
 
+func TestAdditionNormalizeMigratesLegacyManagedSSHKeyToSharedMaterial(t *testing.T) {
+	addition := &Addition{
+		Tokens: []TokenRecord{
+			{
+				ID:                       "token-1",
+				Name:                     "primary",
+				Token:                    "dop_v1_token",
+				AccountUUID:              "account-1",
+				AccountEmail:             "ops@example.com",
+				ManagedSSHKeyID:          101,
+				ManagedSSHKeyName:        "komari-token-1",
+				ManagedSSHKeyFingerprint: "fp-1",
+				ManagedSSHPrivateKey:     "private-key",
+				ManagedSSHPublicKey:      "ssh-ed25519 AAAATEST",
+			},
+		},
+	}
+
+	addition.Normalize()
+
+	require.True(t, addition.HasManagedSSHKeyMaterial())
+	require.Equal(t, "private-key", addition.ManagedSSHPrivateKey)
+	require.Equal(t, "ssh-ed25519 AAAATEST", addition.ManagedSSHPublicKey)
+
+	material := addition.ManagedSSHKeyMaterialViewForToken(&addition.Tokens[0])
+	require.NotNil(t, material)
+	require.Equal(t, 101, material.KeyID)
+	require.Equal(t, "komari-token-1", material.Name)
+	require.Equal(t, "fp-1", material.Fingerprint)
+	require.Equal(t, "private-key", material.PrivateKey)
+	require.Equal(t, "ssh-ed25519 AAAATEST", material.PublicKey)
+}
+
+func TestAdditionToPoolViewMarksSharedManagedSSHKeyReadyForAllTokens(t *testing.T) {
+	addition := &Addition{
+		ManagedSSHKeyName:    "komari-managed",
+		ManagedSSHPrivateKey: "private-key",
+		ManagedSSHPublicKey:  "ssh-ed25519 AAAATEST",
+		Tokens: []TokenRecord{
+			{
+				ID:           "token-1",
+				Name:         "primary",
+				Token:        "dop_v1_token_1",
+				AccountUUID:  "account-1",
+				AccountEmail: "ops@example.com",
+			},
+			{
+				ID:           "token-2",
+				Name:         "secondary",
+				Token:        "dop_v1_token_2",
+				AccountUUID:  "account-2",
+				AccountEmail: "ops2@example.com",
+			},
+		},
+	}
+
+	view := addition.ToPoolView()
+
+	require.Len(t, view.Tokens, 2)
+	require.True(t, view.Tokens[0].ManagedSSHKeyReady)
+	require.True(t, view.Tokens[1].ManagedSSHKeyReady)
+	require.Equal(t, "komari-managed", view.Tokens[0].ManagedSSHKeyName)
+	require.Equal(t, "komari-managed", view.Tokens[1].ManagedSSHKeyName)
+}
+
 func TestTokenRecordSetCheckResult(t *testing.T) {
 	token := &TokenRecord{
 		ID:    "token-1",
@@ -73,6 +138,21 @@ func TestTokenRecordSetCheckResult(t *testing.T) {
 	require.Empty(t, token.AccountEmail)
 	require.Empty(t, token.AccountUUID)
 	require.Zero(t, token.DropletLimit)
+}
+
+func TestTokenRecordSetCheckResultMarksLockedAccountAsError(t *testing.T) {
+	token := &TokenRecord{
+		ID:    "token-1",
+		Name:  "primary",
+		Token: "dop_v1_token",
+	}
+
+	token.SetCheckResult(time.Unix(1710000000, 0), &Account{
+		StatusMessage: "There is currently a lock on the account, please log in to the control panel and contact support.",
+	}, nil)
+
+	require.Equal(t, TokenStatusError, token.LastStatus)
+	require.Equal(t, "There is currently a lock on the account, please log in to the control panel and contact support.", token.LastError)
 }
 
 func TestGenerateManagedSSHKeyPair(t *testing.T) {

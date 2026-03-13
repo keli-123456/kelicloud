@@ -316,7 +316,7 @@ func GetDigitalOceanManagedSSHKey(c *gin.Context) {
 		return
 	}
 
-	material := token.ManagedSSHKeyMaterialView()
+	material := addition.ManagedSSHKeyMaterialViewForToken(token)
 	if material == nil {
 		api.RespondError(c, http.StatusNotFound, "Managed SSH key is not configured for this token")
 		return
@@ -802,48 +802,126 @@ func ensureManagedDigitalOceanSSHKey(ctx context.Context, addition *digitalocean
 		return nil, fmt.Errorf("DigitalOcean token is not configured")
 	}
 
-	if token.ManagedSSHKeyID > 0 && token.HasManagedSSHKeyMaterial() {
-		sshKeys, err := client.ListSSHKeys(ctx)
-		if err != nil {
-			return nil, err
-		}
-		for _, sshKey := range sshKeys {
-			if sshKey.ID == token.ManagedSSHKeyID {
-				if token.ManagedSSHKeyName == "" {
-					token.ManagedSSHKeyName = sshKey.Name
-				}
-				if token.ManagedSSHKeyFingerprint == "" {
-					token.ManagedSSHKeyFingerprint = sshKey.Fingerprint
-				}
-				return token.ManagedSSHKeyMaterialView(), nil
-			}
-		}
-	}
+	addition.Normalize()
 
-	material, err := digitalocean.GenerateManagedSSHKeyPair(digitalocean.ManagedSSHKeyName(token))
+	account, err := client.GetAccount(ctx)
 	if err != nil {
 		return nil, err
 	}
 
+	changed := syncDigitalOceanTokenAccount(token, account)
+
+	if !addition.HasManagedSSHKeyMaterial() {
+		material, err := digitalocean.GenerateManagedSSHKeyPair(digitalocean.ManagedSSHKeyName(nil))
+		if err != nil {
+			return nil, err
+		}
+		addition.ManagedSSHKeyName = material.Name
+		addition.ManagedSSHPublicKey = material.PublicKey
+		addition.ManagedSSHPrivateKey = material.PrivateKey
+		changed = true
+	}
+
+	sshKeys, err := client.ListSSHKeys(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	accountUUID := ""
+	accountEmail := ""
+	if account != nil {
+		accountUUID = account.UUID
+		accountEmail = account.Email
+	}
+
+	if registration := addition.FindManagedSSHKeyAccount(accountUUID, accountEmail); registration != nil {
+		for _, sshKey := range sshKeys {
+			if sshKey.ID != registration.KeyID {
+				continue
+			}
+			if addition.UpsertManagedSSHKeyAccount(accountUUID, accountEmail, &sshKey) {
+				changed = true
+			}
+			if addition.ManagedSSHKeyFingerprint == "" && strings.TrimSpace(sshKey.Fingerprint) != "" {
+				addition.ManagedSSHKeyFingerprint = strings.TrimSpace(sshKey.Fingerprint)
+				changed = true
+			}
+			if changed {
+				if err := saveDigitalOceanAddition(addition); err != nil {
+					return nil, err
+				}
+			}
+			return addition.ManagedSSHKeyMaterialViewForToken(token), nil
+		}
+	}
+
+	for _, sshKey := range sshKeys {
+		if strings.TrimSpace(sshKey.PublicKey) != strings.TrimSpace(addition.ManagedSSHPublicKey) {
+			continue
+		}
+		if addition.UpsertManagedSSHKeyAccount(accountUUID, accountEmail, &sshKey) {
+			changed = true
+		}
+		if addition.ManagedSSHKeyFingerprint == "" && strings.TrimSpace(sshKey.Fingerprint) != "" {
+			addition.ManagedSSHKeyFingerprint = strings.TrimSpace(sshKey.Fingerprint)
+			changed = true
+		}
+		if changed {
+			if err := saveDigitalOceanAddition(addition); err != nil {
+				return nil, err
+			}
+		}
+		return addition.ManagedSSHKeyMaterialViewForToken(token), nil
+	}
+
 	createdSSHKey, err := client.CreateSSHKey(ctx, digitalocean.CreateSSHKeyRequest{
-		Name:      material.Name,
-		PublicKey: material.PublicKey,
+		Name:      addition.ManagedSSHKeyName,
+		PublicKey: addition.ManagedSSHPublicKey,
 	})
 	if err != nil {
 		return nil, err
 	}
 
-	token.ManagedSSHKeyID = createdSSHKey.ID
-	token.ManagedSSHKeyName = createdSSHKey.Name
-	token.ManagedSSHKeyFingerprint = createdSSHKey.Fingerprint
-	token.ManagedSSHPublicKey = material.PublicKey
-	token.ManagedSSHPrivateKey = material.PrivateKey
-
-	if err := saveDigitalOceanAddition(addition); err != nil {
-		return nil, err
+	if addition.UpsertManagedSSHKeyAccount(accountUUID, accountEmail, createdSSHKey) {
+		changed = true
+	}
+	if addition.ManagedSSHKeyFingerprint == "" && strings.TrimSpace(createdSSHKey.Fingerprint) != "" {
+		addition.ManagedSSHKeyFingerprint = strings.TrimSpace(createdSSHKey.Fingerprint)
+		changed = true
+	}
+	if changed {
+		if err := saveDigitalOceanAddition(addition); err != nil {
+			return nil, err
+		}
 	}
 
-	return token.ManagedSSHKeyMaterialView(), nil
+	return addition.ManagedSSHKeyMaterialViewForToken(token), nil
+}
+
+func syncDigitalOceanTokenAccount(token *digitalocean.TokenRecord, account *digitalocean.Account) bool {
+	if token == nil || account == nil {
+		return false
+	}
+
+	changed := false
+	email := strings.TrimSpace(account.Email)
+	if token.AccountEmail != email {
+		token.AccountEmail = email
+		changed = true
+	}
+
+	uuid := strings.TrimSpace(account.UUID)
+	if token.AccountUUID != uuid {
+		token.AccountUUID = uuid
+		changed = true
+	}
+
+	if token.DropletLimit != account.DropletLimit {
+		token.DropletLimit = account.DropletLimit
+		changed = true
+	}
+
+	return changed
 }
 
 func loadDigitalOceanAddition(allowMissing bool) (*models.CloudProvider, *digitalocean.Addition, error) {

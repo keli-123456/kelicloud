@@ -45,10 +45,12 @@ type createAWSLightsailInstancePayload struct {
 }
 
 type awsAccountView struct {
-	AccountID string `json:"account_id"`
-	ARN       string `json:"arn"`
-	UserID    string `json:"user_id"`
-	Region    string `json:"region"`
+	AccountID     string                    `json:"account_id"`
+	ARN           string                    `json:"arn"`
+	UserID        string                    `json:"user_id"`
+	Region        string                    `json:"region"`
+	EC2Quota      *awscloud.EC2QuotaSummary `json:"ec2_quota,omitempty"`
+	EC2QuotaError string                    `json:"ec2_quota_error,omitempty"`
 }
 
 func GetAWSCredentials(c *gin.Context) {
@@ -219,8 +221,13 @@ func CheckAWSCredentials(c *gin.Context) {
 			defer cancel()
 
 			identity, err := awscloud.GetIdentity(ctx, &record, record.DefaultRegion)
+			var quota *awscloud.EC2QuotaSummary
+			var quotaErr error
+			if err == nil {
+				quota, quotaErr = awscloud.GetEC2QuotaSummary(ctx, &record, record.DefaultRegion)
+			}
 			mu.Lock()
-			addition.Credentials[credentialIndex].SetCheckResult(checkedAt, identity, err)
+			addition.Credentials[credentialIndex].SetCheckResult(checkedAt, identity, quota, quotaErr, err)
 			mu.Unlock()
 		}(index)
 	}
@@ -299,16 +306,20 @@ func GetAWSAccount(c *gin.Context) {
 		return
 	}
 
+	quota, quotaErr := awscloud.GetEC2QuotaSummary(ctx, credential, region)
+
 	if identity != nil {
-		credential.SetCheckResult(time.Now(), identity, nil)
+		credential.SetCheckResult(time.Now(), identity, quota, quotaErr, nil)
 		_ = saveAWSAddition(addition)
 	}
 
 	api.RespondSuccess(c, awsAccountView{
-		AccountID: identity.AccountID,
-		ARN:       identity.ARN,
-		UserID:    identity.UserID,
-		Region:    region,
+		AccountID:     identity.AccountID,
+		ARN:           identity.ARN,
+		UserID:        identity.UserID,
+		Region:        region,
+		EC2Quota:      quota,
+		EC2QuotaError: errorString(quotaErr),
 	})
 }
 
@@ -886,6 +897,13 @@ func respondAWSError(c *gin.Context, err error) {
 	}
 
 	api.RespondError(c, http.StatusBadRequest, err.Error())
+}
+
+func errorString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
 
 func loadAWSAddition(allowMissing bool) (*models.CloudProvider, *awscloud.Addition, error) {

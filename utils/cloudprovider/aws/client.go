@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -21,6 +22,14 @@ type Identity struct {
 	AccountID string `json:"account_id"`
 	ARN       string `json:"arn"`
 	UserID    string `json:"user_id"`
+}
+
+type EC2QuotaSummary struct {
+	Region                           string `json:"region,omitempty"`
+	MaxInstances                     int    `json:"max_instances,omitempty"`
+	MaxElasticIPs                    int    `json:"max_elastic_ips,omitempty"`
+	VPCMaxElasticIPs                 int    `json:"vpc_max_elastic_ips,omitempty"`
+	VPCMaxSecurityGroupsPerInterface int    `json:"vpc_max_security_groups_per_interface,omitempty"`
 }
 
 type Region struct {
@@ -144,6 +153,57 @@ func GetIdentity(ctx context.Context, credential *CredentialRecord, region strin
 		ARN:       awssdk.ToString(output.Arn),
 		UserID:    awssdk.ToString(output.UserId),
 	}, nil
+}
+
+func GetEC2QuotaSummary(ctx context.Context, credential *CredentialRecord, region string) (*EC2QuotaSummary, error) {
+	cfg, err := buildConfig(ctx, credential, region)
+	if err != nil {
+		return nil, err
+	}
+
+	client := ec2.NewFromConfig(cfg)
+	output, err := client.DescribeAccountAttributes(ctx, &ec2.DescribeAccountAttributesInput{
+		AttributeNames: []ec2types.AccountAttributeName{
+			ec2types.AccountAttributeName("max-instances"),
+			ec2types.AccountAttributeName("max-elastic-ips"),
+			ec2types.AccountAttributeName("vpc-max-elastic-ips"),
+			ec2types.AccountAttributeName("vpc-max-security-groups-per-interface"),
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	summary := &EC2QuotaSummary{
+		Region: normalizeRegion(firstNonEmpty(strings.TrimSpace(region), credential.DefaultRegion)),
+	}
+	for _, attribute := range output.AccountAttributes {
+		name := strings.TrimSpace(awssdk.ToString(attribute.AttributeName))
+		value, ok := parseAccountAttributeInt(attribute.AttributeValues)
+		if !ok {
+			continue
+		}
+
+		switch name {
+		case "max-instances":
+			summary.MaxInstances = value
+		case "max-elastic-ips":
+			summary.MaxElasticIPs = value
+		case "vpc-max-elastic-ips":
+			summary.VPCMaxElasticIPs = value
+		case "vpc-max-security-groups-per-interface":
+			summary.VPCMaxSecurityGroupsPerInterface = value
+		}
+	}
+
+	if summary.MaxInstances == 0 &&
+		summary.MaxElasticIPs == 0 &&
+		summary.VPCMaxElasticIPs == 0 &&
+		summary.VPCMaxSecurityGroupsPerInterface == 0 {
+		return nil, nil
+	}
+
+	return summary, nil
 }
 
 func ListRegions(ctx context.Context, credential *CredentialRecord) ([]Region, error) {
@@ -609,4 +669,19 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func parseAccountAttributeInt(values []ec2types.AccountAttributeValue) (int, bool) {
+	for _, value := range values {
+		raw := strings.TrimSpace(awssdk.ToString(value.AttributeValue))
+		if raw == "" {
+			continue
+		}
+		parsed, err := strconv.Atoi(raw)
+		if err != nil {
+			continue
+		}
+		return parsed, true
+	}
+	return 0, false
 }

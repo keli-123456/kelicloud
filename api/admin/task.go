@@ -34,7 +34,7 @@ func GetTasks(c *gin.Context) {
 		responseTasks = append(responseTasks, gin.H{
 			"task_id": t.TaskId,
 			"clients": t.Clients,
-			"command": t.Command,
+			"command": "",
 			"results": filteredResults,
 		})
 	}
@@ -74,7 +74,7 @@ func GetTaskById(c *gin.Context) {
 	api.RespondSuccess(c, gin.H{
 		"task_id": task.TaskId,
 		"clients": task.Clients,
-		"command": task.Command,
+		"command": "",
 		"results": filteredResults,
 	})
 }
@@ -85,16 +85,24 @@ func GetTasksByClientId(c *gin.Context) {
 		api.RespondError(c, 400, "Client ID is required")
 		return
 	}
-	tasks, err := tasks.GetTasksByClientId(clientId)
+	taskList, err := tasks.GetTasksByClientId(clientId)
 	if err != nil {
 		api.RespondError(c, 500, "Failed to retrieve tasks: "+err.Error())
 		return
 	}
-	if len(tasks) == 0 {
+	if len(taskList) == 0 {
 		api.RespondError(c, 404, "No tasks found for this client")
 		return
 	}
-	api.RespondSuccess(c, tasks)
+	responseTasks := make([]gin.H, 0, len(taskList))
+	for _, task := range taskList {
+		responseTasks = append(responseTasks, gin.H{
+			"task_id": task.TaskId,
+			"clients": task.Clients,
+			"command": "",
+		})
+	}
+	api.RespondSuccess(c, responseTasks)
 }
 
 func GetSpecificTaskResult(c *gin.Context) {

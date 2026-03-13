@@ -7,13 +7,13 @@ import (
 	"github.com/komari-monitor/komari/database/models"
 )
 
-func CreateTask(taskId string, clients []string, command string) error {
+func CreateTask(taskId string, clients []string) error {
 	db := dbcore.GetDBInstance()
-	// Create a new task in the database with clients as JSON array
+	// Persist task metadata without storing the raw command payload.
 	task := models.Task{
 		TaskId:  taskId,
 		Clients: models.StringArray(clients),
-		Command: command,
+		Command: "",
 	}
 	if err := db.Create(&task).Error; err != nil {
 		return err

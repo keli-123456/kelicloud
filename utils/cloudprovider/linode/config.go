@@ -1,6 +1,7 @@
 package linode
 
 import (
+	"errors"
 	"strings"
 	"time"
 
@@ -481,6 +482,9 @@ func (t *TokenRecord) SetCheckResult(checkedAt time.Time, profile *Profile, acco
 	}
 
 	t.LastCheckedAt = checkedAt.UTC().Format(time.RFC3339)
+	if err == nil {
+		err = profileAvailabilityError(profile)
+	}
 	if err != nil {
 		t.LastStatus = TokenStatusError
 		t.LastError = err.Error()
@@ -502,6 +506,16 @@ func (t *TokenRecord) SetCheckResult(checkedAt time.Time, profile *Profile, acco
 			t.ProfileEmail = strings.TrimSpace(account.Email)
 		}
 	}
+}
+
+func profileAvailabilityError(profile *Profile) error {
+	if profile == nil {
+		return nil
+	}
+	if profile.Restricted {
+		return errors.New("linode profile is restricted")
+	}
+	return nil
 }
 
 func normalizeTokenStatus(status string) string {

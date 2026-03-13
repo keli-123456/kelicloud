@@ -257,7 +257,7 @@ func resolveDigitalOceanActiveResource(resourceID string) (*AdminResourceState, 
 		CredentialID:          token.ID,
 		CredentialName:        token.Name,
 		CanSharePassword:      token.HasSavedDropletPassword(dropletID),
-		CanShareManagedSSHKey: token.HasManagedSSHKeyMaterial(),
+		CanShareManagedSSHKey: addition.HasManagedSSHKeyMaterial(),
 	}, nil
 }
 
@@ -422,7 +422,7 @@ func resolvePublicDigitalOceanShare(share *models.CloudInstanceShare, resourceID
 		}
 	}
 	if share.ShareManagedSSHKey {
-		view.ManagedSSHKey = token.ManagedSSHKeyMaterialView()
+		view.ManagedSSHKey = addition.ManagedSSHKeyMaterialViewForToken(token)
 	}
 
 	return view, nil

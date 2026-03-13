@@ -36,10 +36,11 @@ type createLinodeInstancePayload struct {
 }
 
 type linodeAccountView struct {
-	Username string  `json:"username"`
-	Email    string  `json:"email"`
-	Company  string  `json:"company"`
-	Balance  float64 `json:"balance"`
+	Username   string  `json:"username"`
+	Email      string  `json:"email"`
+	Company    string  `json:"company"`
+	Balance    float64 `json:"balance"`
+	Restricted bool    `json:"restricted"`
 }
 
 type linodeInstanceView struct {
@@ -330,10 +331,11 @@ func GetLinodeAccount(c *gin.Context) {
 	}
 
 	api.RespondSuccess(c, linodeAccountView{
-		Username: profile.Username,
-		Email:    firstNonEmpty(profile.Email, account.Email),
-		Company:  account.Company,
-		Balance:  account.Balance,
+		Username:   profile.Username,
+		Email:      firstNonEmpty(profile.Email, account.Email),
+		Company:    account.Company,
+		Balance:    account.Balance,
+		Restricted: profile.Restricted,
 	})
 }
 

@@ -25,18 +25,20 @@ type Addition struct {
 }
 
 type CredentialRecord struct {
-	ID              string `json:"id"`
-	Name            string `json:"name"`
-	AccessKeyID     string `json:"access_key_id"`
-	SecretAccessKey string `json:"secret_access_key"`
-	SessionToken    string `json:"session_token,omitempty"`
-	DefaultRegion   string `json:"default_region,omitempty"`
-	AccountID       string `json:"account_id,omitempty"`
-	ARN             string `json:"arn,omitempty"`
-	UserID          string `json:"user_id,omitempty"`
-	LastStatus      string `json:"last_status,omitempty"`
-	LastError       string `json:"last_error,omitempty"`
-	LastCheckedAt   string `json:"last_checked_at,omitempty"`
+	ID              string           `json:"id"`
+	Name            string           `json:"name"`
+	AccessKeyID     string           `json:"access_key_id"`
+	SecretAccessKey string           `json:"secret_access_key"`
+	SessionToken    string           `json:"session_token,omitempty"`
+	DefaultRegion   string           `json:"default_region,omitempty"`
+	AccountID       string           `json:"account_id,omitempty"`
+	ARN             string           `json:"arn,omitempty"`
+	UserID          string           `json:"user_id,omitempty"`
+	EC2Quota        *EC2QuotaSummary `json:"ec2_quota,omitempty"`
+	EC2QuotaError   string           `json:"ec2_quota_error,omitempty"`
+	LastStatus      string           `json:"last_status,omitempty"`
+	LastError       string           `json:"last_error,omitempty"`
+	LastCheckedAt   string           `json:"last_checked_at,omitempty"`
 }
 
 type CredentialImport struct {
@@ -49,17 +51,19 @@ type CredentialImport struct {
 }
 
 type CredentialView struct {
-	ID                string `json:"id"`
-	Name              string `json:"name"`
-	MaskedAccessKeyID string `json:"masked_access_key_id"`
-	DefaultRegion     string `json:"default_region"`
-	AccountID         string `json:"account_id,omitempty"`
-	ARN               string `json:"arn,omitempty"`
-	UserID            string `json:"user_id,omitempty"`
-	LastStatus        string `json:"last_status"`
-	LastError         string `json:"last_error,omitempty"`
-	LastCheckedAt     string `json:"last_checked_at,omitempty"`
-	IsActive          bool   `json:"is_active"`
+	ID                string           `json:"id"`
+	Name              string           `json:"name"`
+	MaskedAccessKeyID string           `json:"masked_access_key_id"`
+	DefaultRegion     string           `json:"default_region"`
+	AccountID         string           `json:"account_id,omitempty"`
+	ARN               string           `json:"arn,omitempty"`
+	UserID            string           `json:"user_id,omitempty"`
+	EC2Quota          *EC2QuotaSummary `json:"ec2_quota,omitempty"`
+	EC2QuotaError     string           `json:"ec2_quota_error,omitempty"`
+	LastStatus        string           `json:"last_status"`
+	LastError         string           `json:"last_error,omitempty"`
+	LastCheckedAt     string           `json:"last_checked_at,omitempty"`
+	IsActive          bool             `json:"is_active"`
 }
 
 type CredentialPoolView struct {
@@ -69,16 +73,18 @@ type CredentialPoolView struct {
 }
 
 type CredentialSecretView struct {
-	CredentialID      string `json:"credential_id"`
-	CredentialName    string `json:"credential_name"`
-	AccessKeyID       string `json:"access_key_id"`
-	SecretAccessKey   string `json:"secret_access_key"`
-	SessionToken      string `json:"session_token,omitempty"`
-	MaskedAccessKeyID string `json:"masked_access_key_id"`
-	DefaultRegion     string `json:"default_region"`
-	AccountID         string `json:"account_id,omitempty"`
-	ARN               string `json:"arn,omitempty"`
-	UserID            string `json:"user_id,omitempty"`
+	CredentialID      string           `json:"credential_id"`
+	CredentialName    string           `json:"credential_name"`
+	AccessKeyID       string           `json:"access_key_id"`
+	SecretAccessKey   string           `json:"secret_access_key"`
+	SessionToken      string           `json:"session_token,omitempty"`
+	MaskedAccessKeyID string           `json:"masked_access_key_id"`
+	DefaultRegion     string           `json:"default_region"`
+	AccountID         string           `json:"account_id,omitempty"`
+	ARN               string           `json:"arn,omitempty"`
+	UserID            string           `json:"user_id,omitempty"`
+	EC2Quota          *EC2QuotaSummary `json:"ec2_quota,omitempty"`
+	EC2QuotaError     string           `json:"ec2_quota_error,omitempty"`
 }
 
 func (a *Addition) Normalize() {
@@ -121,6 +127,8 @@ func (a *Addition) Normalize() {
 		credential.AccountID = strings.TrimSpace(credential.AccountID)
 		credential.ARN = strings.TrimSpace(credential.ARN)
 		credential.UserID = strings.TrimSpace(credential.UserID)
+		credential.EC2Quota = normalizeEC2QuotaSummary(credential.EC2Quota)
+		credential.EC2QuotaError = strings.TrimSpace(credential.EC2QuotaError)
 		credential.LastStatus = normalizeCredentialStatus(credential.LastStatus)
 		credential.LastError = strings.TrimSpace(credential.LastError)
 		credential.LastCheckedAt = strings.TrimSpace(credential.LastCheckedAt)
@@ -167,6 +175,8 @@ func (a *Addition) Normalize() {
 				merged.LastCheckedAt = credential.LastCheckedAt
 				merged.LastStatus = credential.LastStatus
 				merged.LastError = credential.LastError
+				merged.EC2Quota = normalizeEC2QuotaSummary(credential.EC2Quota)
+				merged.EC2QuotaError = credential.EC2QuotaError
 			}
 			normalized[existingIndex] = merged
 			if a.ActiveCredentialID == credential.ID {
@@ -361,6 +371,8 @@ func (a *Addition) ToPoolView() CredentialPoolView {
 			AccountID:         credential.AccountID,
 			ARN:               credential.ARN,
 			UserID:            credential.UserID,
+			EC2Quota:          normalizeEC2QuotaSummary(credential.EC2Quota),
+			EC2QuotaError:     credential.EC2QuotaError,
 			LastStatus:        normalizeCredentialStatus(credential.LastStatus),
 			LastError:         credential.LastError,
 			LastCheckedAt:     credential.LastCheckedAt,
@@ -385,10 +397,12 @@ func (c *CredentialRecord) SecretView() *CredentialSecretView {
 		AccountID:         c.AccountID,
 		ARN:               c.ARN,
 		UserID:            c.UserID,
+		EC2Quota:          normalizeEC2QuotaSummary(c.EC2Quota),
+		EC2QuotaError:     c.EC2QuotaError,
 	}
 }
 
-func (c *CredentialRecord) SetCheckResult(checkedAt time.Time, identity *Identity, err error) {
+func (c *CredentialRecord) SetCheckResult(checkedAt time.Time, identity *Identity, quota *EC2QuotaSummary, quotaErr error, err error) {
 	if c == nil {
 		return
 	}
@@ -400,11 +414,19 @@ func (c *CredentialRecord) SetCheckResult(checkedAt time.Time, identity *Identit
 		c.AccountID = ""
 		c.ARN = ""
 		c.UserID = ""
+		c.EC2Quota = nil
+		c.EC2QuotaError = ""
 		return
 	}
 
 	c.LastStatus = CredentialStatusHealthy
 	c.LastError = ""
+	c.EC2Quota = normalizeEC2QuotaSummary(quota)
+	if quotaErr != nil {
+		c.EC2QuotaError = quotaErr.Error()
+	} else {
+		c.EC2QuotaError = ""
+	}
 	if identity != nil {
 		c.AccountID = strings.TrimSpace(identity.AccountID)
 		c.ARN = strings.TrimSpace(identity.ARN)
@@ -443,4 +465,21 @@ func maskAccessKeyID(accessKeyID string) string {
 		return accessKeyID[:2] + strings.Repeat("*", len(accessKeyID)-4) + accessKeyID[len(accessKeyID)-2:]
 	}
 	return accessKeyID[:4] + strings.Repeat("*", len(accessKeyID)-8) + accessKeyID[len(accessKeyID)-4:]
+}
+
+func normalizeEC2QuotaSummary(summary *EC2QuotaSummary) *EC2QuotaSummary {
+	if summary == nil {
+		return nil
+	}
+
+	if summary.MaxInstances == 0 &&
+		summary.MaxElasticIPs == 0 &&
+		summary.VPCMaxElasticIPs == 0 &&
+		summary.VPCMaxSecurityGroupsPerInterface == 0 {
+		return nil
+	}
+
+	normalized := *summary
+	normalized.Region = normalizeRegion(summary.Region)
+	return &normalized
 }

@@ -1,6 +1,7 @@
 package digitalocean
 
 import (
+	"errors"
 	"strings"
 	"time"
 
@@ -14,9 +15,22 @@ const (
 )
 
 type Addition struct {
-	Token         string        `json:"token,omitempty"`
-	ActiveTokenID string        `json:"active_token_id,omitempty"`
-	Tokens        []TokenRecord `json:"tokens,omitempty"`
+	Token                    string                       `json:"token,omitempty"`
+	ActiveTokenID            string                       `json:"active_token_id,omitempty"`
+	ManagedSSHKeyName        string                       `json:"managed_ssh_key_name,omitempty"`
+	ManagedSSHKeyFingerprint string                       `json:"managed_ssh_key_fingerprint,omitempty"`
+	ManagedSSHPrivateKey     string                       `json:"managed_ssh_private_key,omitempty"`
+	ManagedSSHPublicKey      string                       `json:"managed_ssh_public_key,omitempty"`
+	ManagedSSHAccounts       []ManagedSSHKeyAccountRecord `json:"managed_ssh_accounts,omitempty"`
+	Tokens                   []TokenRecord                `json:"tokens,omitempty"`
+}
+
+type ManagedSSHKeyAccountRecord struct {
+	AccountUUID  string `json:"account_uuid,omitempty"`
+	AccountEmail string `json:"account_email,omitempty"`
+	KeyID        int    `json:"key_id,omitempty"`
+	KeyName      string `json:"key_name,omitempty"`
+	Fingerprint  string `json:"fingerprint,omitempty"`
 }
 
 type TokenRecord struct {
@@ -108,6 +122,11 @@ func (a *Addition) Normalize() {
 
 	a.Token = strings.TrimSpace(a.Token)
 	a.ActiveTokenID = strings.TrimSpace(a.ActiveTokenID)
+	a.ManagedSSHKeyName = strings.TrimSpace(a.ManagedSSHKeyName)
+	a.ManagedSSHKeyFingerprint = strings.TrimSpace(a.ManagedSSHKeyFingerprint)
+	a.ManagedSSHPrivateKey = strings.TrimSpace(a.ManagedSSHPrivateKey)
+	a.ManagedSSHPublicKey = strings.TrimSpace(a.ManagedSSHPublicKey)
+	a.ManagedSSHAccounts = normalizeManagedSSHKeyAccounts(a.ManagedSSHAccounts)
 
 	if len(a.Tokens) == 0 && a.Token != "" {
 		a.Tokens = []TokenRecord{
@@ -200,6 +219,54 @@ func (a *Addition) Normalize() {
 	}
 
 	a.Tokens = normalized
+
+	if !a.HasManagedSSHKeyMaterial() {
+		for _, token := range a.Tokens {
+			if strings.TrimSpace(token.ManagedSSHPrivateKey) == "" || strings.TrimSpace(token.ManagedSSHPublicKey) == "" {
+				continue
+			}
+
+			a.ManagedSSHPrivateKey = strings.TrimSpace(token.ManagedSSHPrivateKey)
+			a.ManagedSSHPublicKey = strings.TrimSpace(token.ManagedSSHPublicKey)
+			a.ManagedSSHKeyName = firstNonEmpty(
+				a.ManagedSSHKeyName,
+				strings.TrimSpace(token.ManagedSSHKeyName),
+				ManagedSSHKeyName(nil),
+			)
+			a.ManagedSSHKeyFingerprint = firstNonEmpty(
+				a.ManagedSSHKeyFingerprint,
+				strings.TrimSpace(token.ManagedSSHKeyFingerprint),
+			)
+			break
+		}
+	}
+	if a.HasManagedSSHKeyMaterial() && a.ManagedSSHKeyName == "" {
+		a.ManagedSSHKeyName = ManagedSSHKeyName(nil)
+	}
+	if a.HasManagedSSHKeyMaterial() {
+		for _, token := range a.Tokens {
+			if token.ManagedSSHKeyID <= 0 {
+				continue
+			}
+			if token.AccountUUID == "" && token.AccountEmail == "" {
+				continue
+			}
+			if token.ManagedSSHPublicKey != "" && strings.TrimSpace(token.ManagedSSHPublicKey) != a.ManagedSSHPublicKey {
+				continue
+			}
+			a.upsertManagedSSHKeyAccountRecord(ManagedSSHKeyAccountRecord{
+				AccountUUID:  token.AccountUUID,
+				AccountEmail: token.AccountEmail,
+				KeyID:        token.ManagedSSHKeyID,
+				KeyName:      firstNonEmpty(token.ManagedSSHKeyName, a.ManagedSSHKeyName),
+				Fingerprint:  firstNonEmpty(token.ManagedSSHKeyFingerprint, a.ManagedSSHKeyFingerprint),
+			})
+			if a.ManagedSSHKeyFingerprint == "" && token.ManagedSSHKeyFingerprint != "" {
+				a.ManagedSSHKeyFingerprint = strings.TrimSpace(token.ManagedSSHKeyFingerprint)
+			}
+		}
+		a.ManagedSSHAccounts = normalizeManagedSSHKeyAccounts(a.ManagedSSHAccounts)
+	}
 
 	if a.ActiveTokenID == "" && len(a.Tokens) > 0 {
 		a.ActiveTokenID = a.Tokens[0].ID
@@ -350,6 +417,7 @@ func (a *Addition) ToPoolView() TokenPoolView {
 		Tokens:                 make([]TokenView, 0, len(a.Tokens)),
 	}
 	for _, token := range a.Tokens {
+		material := a.ManagedSSHKeyMaterialViewForToken(&token)
 		view.Tokens = append(view.Tokens, TokenView{
 			ID:                       token.ID,
 			Name:                     token.Name,
@@ -360,13 +428,115 @@ func (a *Addition) ToPoolView() TokenPoolView {
 			LastStatus:               normalizeTokenStatus(token.LastStatus),
 			LastError:                token.LastError,
 			LastCheckedAt:            token.LastCheckedAt,
-			ManagedSSHKeyName:        token.ManagedSSHKeyName,
-			ManagedSSHKeyFingerprint: token.ManagedSSHKeyFingerprint,
-			ManagedSSHKeyReady:       token.HasManagedSSHKeyMaterial(),
+			ManagedSSHKeyName:        managedSSHKeyNameFromMaterial(material),
+			ManagedSSHKeyFingerprint: managedSSHKeyFingerprintFromMaterial(material),
+			ManagedSSHKeyReady:       material != nil,
 			IsActive:                 token.ID == a.ActiveTokenID,
 		})
 	}
 	return view
+}
+
+func (a *Addition) HasManagedSSHKeyMaterial() bool {
+	if a == nil {
+		return false
+	}
+	return strings.TrimSpace(a.ManagedSSHPrivateKey) != "" && strings.TrimSpace(a.ManagedSSHPublicKey) != ""
+}
+
+func (a *Addition) ManagedSSHKeyMaterialViewForToken(token *TokenRecord) *ManagedSSHKeyMaterialView {
+	if a != nil && a.HasManagedSSHKeyMaterial() {
+		view := &ManagedSSHKeyMaterialView{
+			Name:        firstNonEmpty(a.ManagedSSHKeyName, ManagedSSHKeyName(nil)),
+			Fingerprint: a.ManagedSSHKeyFingerprint,
+			PublicKey:   a.ManagedSSHPublicKey,
+			PrivateKey:  a.ManagedSSHPrivateKey,
+		}
+		if token != nil {
+			view.TokenID = token.ID
+			view.TokenName = token.Name
+			if account := a.FindManagedSSHKeyAccount(token.AccountUUID, token.AccountEmail); account != nil {
+				view.KeyID = account.KeyID
+				view.Name = firstNonEmpty(account.KeyName, view.Name)
+				view.Fingerprint = firstNonEmpty(account.Fingerprint, view.Fingerprint)
+			}
+		}
+		return view
+	}
+	if token != nil && token.HasManagedSSHKeyMaterial() {
+		return token.ManagedSSHKeyMaterialView()
+	}
+	return nil
+}
+
+func (a *Addition) FindManagedSSHKeyAccount(accountUUID, accountEmail string) *ManagedSSHKeyAccountRecord {
+	if a == nil || len(a.ManagedSSHAccounts) == 0 {
+		return nil
+	}
+
+	lookupKey := managedSSHKeyAccountLookupKey(accountUUID, accountEmail)
+	if lookupKey == "" {
+		return nil
+	}
+
+	for index := range a.ManagedSSHAccounts {
+		if managedSSHKeyAccountLookupKey(a.ManagedSSHAccounts[index].AccountUUID, a.ManagedSSHAccounts[index].AccountEmail) == lookupKey {
+			return &a.ManagedSSHAccounts[index]
+		}
+	}
+	return nil
+}
+
+func (a *Addition) UpsertManagedSSHKeyAccount(accountUUID, accountEmail string, sshKey *SSHKey) bool {
+	if a == nil || sshKey == nil || sshKey.ID <= 0 {
+		return false
+	}
+	return a.upsertManagedSSHKeyAccountRecord(ManagedSSHKeyAccountRecord{
+		AccountUUID:  accountUUID,
+		AccountEmail: accountEmail,
+		KeyID:        sshKey.ID,
+		KeyName:      sshKey.Name,
+		Fingerprint:  sshKey.Fingerprint,
+	})
+}
+
+func (a *Addition) upsertManagedSSHKeyAccountRecord(record ManagedSSHKeyAccountRecord) bool {
+	if a == nil {
+		return false
+	}
+
+	record, ok := normalizeManagedSSHKeyAccountRecord(record)
+	if !ok {
+		return false
+	}
+
+	if existing := a.FindManagedSSHKeyAccount(record.AccountUUID, record.AccountEmail); existing != nil {
+		changed := false
+		if existing.KeyID != record.KeyID {
+			existing.KeyID = record.KeyID
+			changed = true
+		}
+		if existing.KeyName != record.KeyName {
+			existing.KeyName = record.KeyName
+			changed = true
+		}
+		if existing.Fingerprint != record.Fingerprint {
+			existing.Fingerprint = record.Fingerprint
+			changed = true
+		}
+		if existing.AccountUUID != record.AccountUUID {
+			existing.AccountUUID = record.AccountUUID
+			changed = true
+		}
+		if existing.AccountEmail != record.AccountEmail {
+			existing.AccountEmail = record.AccountEmail
+			changed = true
+		}
+		return changed
+	}
+
+	a.ManagedSSHAccounts = append(a.ManagedSSHAccounts, record)
+	return true
 }
 
 func (t *TokenRecord) HasManagedSSHKeyMaterial() bool {
@@ -544,6 +714,9 @@ func (t *TokenRecord) SetCheckResult(checkedAt time.Time, account *Account, err 
 	}
 
 	t.LastCheckedAt = checkedAt.UTC().Format(time.RFC3339)
+	if err == nil {
+		err = accountAvailabilityError(account)
+	}
 	if err != nil {
 		t.LastStatus = TokenStatusError
 		t.LastError = err.Error()
@@ -560,6 +733,28 @@ func (t *TokenRecord) SetCheckResult(checkedAt time.Time, account *Account, err 
 		t.AccountUUID = strings.TrimSpace(account.UUID)
 		t.DropletLimit = account.DropletLimit
 	}
+}
+
+func accountAvailabilityError(account *Account) error {
+	if account == nil {
+		return nil
+	}
+
+	status := strings.ToLower(strings.TrimSpace(account.Status))
+	message := strings.TrimSpace(account.StatusMessage)
+	if status == "locked" {
+		if message == "" {
+			message = "digitalocean account is locked"
+		}
+		return errors.New(message)
+	}
+
+	lowerMessage := strings.ToLower(message)
+	if strings.Contains(lowerMessage, "lock on the account") || strings.Contains(lowerMessage, "contact support") {
+		return errors.New(message)
+	}
+
+	return nil
 }
 
 func normalizeTokenStatus(status string) string {
@@ -585,6 +780,90 @@ func maskToken(token string) string {
 		return token[:2] + strings.Repeat("*", len(token)-4) + token[len(token)-2:]
 	}
 	return token[:4] + strings.Repeat("*", len(token)-8) + token[len(token)-4:]
+}
+
+func normalizeManagedSSHKeyAccounts(records []ManagedSSHKeyAccountRecord) []ManagedSSHKeyAccountRecord {
+	if len(records) == 0 {
+		return nil
+	}
+
+	normalized := make([]ManagedSSHKeyAccountRecord, 0, len(records))
+	seen := make(map[string]int, len(records))
+	for _, record := range records {
+		record, ok := normalizeManagedSSHKeyAccountRecord(record)
+		if !ok {
+			continue
+		}
+
+		key := managedSSHKeyAccountLookupKey(record.AccountUUID, record.AccountEmail)
+		if existingIndex, exists := seen[key]; exists {
+			merged := normalized[existingIndex]
+			merged.KeyID = record.KeyID
+			merged.KeyName = firstNonEmpty(record.KeyName, merged.KeyName)
+			merged.Fingerprint = firstNonEmpty(record.Fingerprint, merged.Fingerprint)
+			merged.AccountUUID = firstNonEmpty(record.AccountUUID, merged.AccountUUID)
+			merged.AccountEmail = firstNonEmpty(record.AccountEmail, merged.AccountEmail)
+			normalized[existingIndex] = merged
+			continue
+		}
+
+		seen[key] = len(normalized)
+		normalized = append(normalized, record)
+	}
+
+	return normalized
+}
+
+func normalizeManagedSSHKeyAccountRecord(record ManagedSSHKeyAccountRecord) (ManagedSSHKeyAccountRecord, bool) {
+	record.AccountUUID = strings.TrimSpace(record.AccountUUID)
+	record.AccountEmail = strings.ToLower(strings.TrimSpace(record.AccountEmail))
+	record.KeyName = strings.TrimSpace(record.KeyName)
+	record.Fingerprint = strings.TrimSpace(record.Fingerprint)
+	if record.KeyID <= 0 {
+		return ManagedSSHKeyAccountRecord{}, false
+	}
+	if record.AccountUUID == "" && record.AccountEmail == "" {
+		return ManagedSSHKeyAccountRecord{}, false
+	}
+	return record, true
+}
+
+func managedSSHKeyAccountLookupKey(accountUUID, accountEmail string) string {
+	accountUUID = strings.TrimSpace(accountUUID)
+	if accountUUID != "" {
+		return "uuid:" + accountUUID
+	}
+
+	accountEmail = strings.ToLower(strings.TrimSpace(accountEmail))
+	if accountEmail != "" {
+		return "email:" + accountEmail
+	}
+
+	return ""
+}
+
+func managedSSHKeyNameFromMaterial(material *ManagedSSHKeyMaterialView) string {
+	if material == nil {
+		return ""
+	}
+	return strings.TrimSpace(material.Name)
+}
+
+func managedSSHKeyFingerprintFromMaterial(material *ManagedSSHKeyMaterialView) string {
+	if material == nil {
+		return ""
+	}
+	return strings.TrimSpace(material.Fingerprint)
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func (t *TokenRecord) findDropletCredential(dropletID int) *DropletCredentialRecord {
