@@ -19,6 +19,7 @@ import (
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/utils/cloudprovider/digitalocean"
 	"github.com/komari-monitor/komari/utils/cloudprovider/factory"
+	"gorm.io/gorm"
 )
 
 const digitalOceanProviderName = "digitalocean"
@@ -67,7 +68,14 @@ func GetCloudProvider(c *gin.Context) {
 
 	config, err := database.GetCloudProviderConfigByName(providerName)
 	if err != nil {
-		api.RespondError(c, http.StatusNotFound, "Cloud provider not configured: "+providerName)
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			api.RespondSuccess(c, &models.CloudProvider{
+				Name:     providerName,
+				Addition: "{}",
+			})
+			return
+		}
+		api.RespondError(c, http.StatusInternalServerError, "Failed to load cloud provider configuration: "+err.Error())
 		return
 	}
 
