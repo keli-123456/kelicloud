@@ -107,3 +107,70 @@ func TestTokenRecordSaveInstancePasswordAutoCreatesVaultSecret(t *testing.T) {
 	_, statErr := os.Stat("./data/cloud_secret.key")
 	require.NoError(t, statErr)
 }
+
+func TestTokenRecordPruneInstanceCredentialsKeepsRecentMissingCredential(t *testing.T) {
+	t.Setenv(RootPasswordVaultKeyEnv, "komari-test-secret")
+
+	token := &TokenRecord{
+		ID:    "token-1",
+		Name:  "primary",
+		Token: "linode-token",
+	}
+
+	err := token.SaveInstancePassword(2001, "web-01", "custom", "Secret!123", time.Now().UTC())
+	require.NoError(t, err)
+
+	changed := token.PruneInstanceCredentials(map[int]struct{}{})
+	require.False(t, changed)
+	require.True(t, token.HasSavedInstancePassword(2001))
+}
+
+func TestTokenRecordPruneInstanceCredentialsDropsStaleMissingCredential(t *testing.T) {
+	t.Setenv(RootPasswordVaultKeyEnv, "komari-test-secret")
+
+	token := &TokenRecord{
+		ID:    "token-1",
+		Name:  "primary",
+		Token: "linode-token",
+	}
+
+	err := token.SaveInstancePassword(2001, "web-01", "custom", "Secret!123", time.Now().UTC().Add(-25*time.Hour))
+	require.NoError(t, err)
+
+	changed := token.PruneInstanceCredentials(map[int]struct{}{})
+	require.True(t, changed)
+	require.False(t, token.HasSavedInstancePassword(2001))
+}
+
+func TestAdditionMergePersistentStateFromPreservesSavedInstancePassword(t *testing.T) {
+	t.Setenv(RootPasswordVaultKeyEnv, "komari-test-secret")
+
+	previous := &Addition{
+		Tokens: []TokenRecord{
+			{
+				ID:    "token-1",
+				Name:  "primary",
+				Token: "linode-token",
+			},
+		},
+	}
+	require.NoError(t, previous.Tokens[0].SaveInstancePassword(2001, "web-01", "custom", "Secret!123", time.Unix(1710000000, 0)))
+
+	current := &Addition{
+		ActiveTokenID: "token-1",
+		Tokens: []TokenRecord{
+			{
+				ID:    "token-1",
+				Name:  "primary",
+				Token: "linode-token",
+			},
+		},
+	}
+
+	current.MergePersistentStateFrom(previous)
+
+	require.True(t, current.Tokens[0].HasSavedInstancePassword(2001))
+	passwordView, err := current.Tokens[0].RevealInstancePassword(2001)
+	require.NoError(t, err)
+	require.Equal(t, "Secret!123", passwordView.RootPassword)
+}

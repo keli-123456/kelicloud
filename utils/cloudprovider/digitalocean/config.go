@@ -13,6 +13,8 @@ const (
 	TokenStatusUnknown = "unknown"
 	TokenStatusHealthy = "healthy"
 	TokenStatusError   = "error"
+
+	missingDropletCredentialRetention = 24 * time.Hour
 )
 
 type Addition struct {
@@ -326,6 +328,62 @@ func (a *Addition) SetActiveToken(id string) bool {
 	return true
 }
 
+func (a *Addition) MergePersistentStateFrom(previous *Addition) {
+	if a == nil || previous == nil {
+		return
+	}
+
+	a.Normalize()
+	previous.Normalize()
+
+	a.ManagedSSHKeyName = firstNonEmpty(a.ManagedSSHKeyName, previous.ManagedSSHKeyName)
+	a.ManagedSSHKeyFingerprint = firstNonEmpty(a.ManagedSSHKeyFingerprint, previous.ManagedSSHKeyFingerprint)
+	a.ManagedSSHPrivateKey = firstNonEmpty(a.ManagedSSHPrivateKey, previous.ManagedSSHPrivateKey)
+	a.ManagedSSHPublicKey = firstNonEmpty(a.ManagedSSHPublicKey, previous.ManagedSSHPublicKey)
+	a.ManagedSSHAccounts = normalizeManagedSSHKeyAccounts(
+		append(
+			append(
+				make([]ManagedSSHKeyAccountRecord, 0, len(previous.ManagedSSHAccounts)+len(a.ManagedSSHAccounts)),
+				previous.ManagedSSHAccounts...,
+			),
+			a.ManagedSSHAccounts...,
+		),
+	)
+
+	for index := range a.Tokens {
+		previousToken := previous.findTokenForPersistentStateMerge(a.Tokens[index].ID, a.Tokens[index].Token)
+		if previousToken == nil {
+			continue
+		}
+
+		if a.Tokens[index].ManagedSSHKeyID <= 0 {
+			a.Tokens[index].ManagedSSHKeyID = previousToken.ManagedSSHKeyID
+		}
+		a.Tokens[index].ManagedSSHKeyName = firstNonEmpty(
+			a.Tokens[index].ManagedSSHKeyName,
+			previousToken.ManagedSSHKeyName,
+		)
+		a.Tokens[index].ManagedSSHKeyFingerprint = firstNonEmpty(
+			a.Tokens[index].ManagedSSHKeyFingerprint,
+			previousToken.ManagedSSHKeyFingerprint,
+		)
+		a.Tokens[index].ManagedSSHPrivateKey = firstNonEmpty(
+			a.Tokens[index].ManagedSSHPrivateKey,
+			previousToken.ManagedSSHPrivateKey,
+		)
+		a.Tokens[index].ManagedSSHPublicKey = firstNonEmpty(
+			a.Tokens[index].ManagedSSHPublicKey,
+			previousToken.ManagedSSHPublicKey,
+		)
+		a.Tokens[index].DropletCredentials = mergeDropletCredentials(
+			previousToken.DropletCredentials,
+			a.Tokens[index].DropletCredentials,
+		)
+	}
+
+	a.Normalize()
+}
+
 func (a *Addition) UpsertTokens(inputs []TokenImport) int {
 	if a == nil {
 		return 0
@@ -421,6 +479,32 @@ func (a *Addition) RemoveToken(id string) bool {
 	}
 	a.Normalize()
 	return true
+}
+
+func (a *Addition) findTokenForPersistentStateMerge(id, tokenValue string) *TokenRecord {
+	if a == nil {
+		return nil
+	}
+
+	id = strings.TrimSpace(id)
+	if id != "" {
+		if token := a.FindToken(id); token != nil {
+			return token
+		}
+	}
+
+	tokenValue = strings.TrimSpace(tokenValue)
+	if tokenValue == "" {
+		return nil
+	}
+
+	for index := range a.Tokens {
+		if a.Tokens[index].Token == tokenValue {
+			return &a.Tokens[index]
+		}
+	}
+
+	return nil
 }
 
 func (a *Addition) ToPoolView() TokenPoolView {
@@ -712,10 +796,15 @@ func (t *TokenRecord) PruneDropletCredentials(validDropletIDs map[int]struct{}) 
 		return false
 	}
 
+	cutoff := time.Now().UTC().Add(-missingDropletCredentialRetention)
 	next := make([]DropletCredentialRecord, 0, len(t.DropletCredentials))
 	changed := false
 	for _, credential := range t.DropletCredentials {
 		if _, exists := validDropletIDs[credential.DropletID]; exists {
+			next = append(next, credential)
+			continue
+		}
+		if shouldRetainMissingDropletCredential(credential, cutoff) {
 			next = append(next, credential)
 			continue
 		}
@@ -943,4 +1032,18 @@ func normalizeDropletCredentials(records []DropletCredentialRecord) []DropletCre
 		return nil
 	}
 	return normalized
+}
+
+func shouldRetainMissingDropletCredential(record DropletCredentialRecord, cutoff time.Time) bool {
+	updatedAt := strings.TrimSpace(record.UpdatedAt)
+	if updatedAt == "" {
+		return false
+	}
+
+	parsed, err := time.Parse(time.RFC3339, updatedAt)
+	if err != nil {
+		return false
+	}
+
+	return parsed.After(cutoff)
 }

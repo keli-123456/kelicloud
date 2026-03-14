@@ -156,7 +156,7 @@ func SaveDigitalOceanTokens(c *gin.Context) {
 		}
 	}
 
-	if err := saveDigitalOceanAddition(addition); err != nil {
+	if err := saveDigitalOceanAdditionPreservingSecrets(addition); err != nil {
 		api.RespondError(c, http.StatusInternalServerError, "Failed to save DigitalOcean tokens: "+err.Error())
 		return
 	}
@@ -185,7 +185,7 @@ func SetDigitalOceanActiveToken(c *gin.Context) {
 		return
 	}
 
-	if err := saveDigitalOceanAddition(addition); err != nil {
+	if err := saveDigitalOceanAdditionPreservingSecrets(addition); err != nil {
 		api.RespondError(c, http.StatusInternalServerError, "Failed to update active token: "+err.Error())
 		return
 	}
@@ -263,7 +263,7 @@ func CheckDigitalOceanTokens(c *gin.Context) {
 
 	wg.Wait()
 
-	if err := saveDigitalOceanAddition(addition); err != nil {
+	if err := saveDigitalOceanAdditionPreservingSecrets(addition); err != nil {
 		api.RespondError(c, http.StatusInternalServerError, "Failed to save token health: "+err.Error())
 		return
 	}
@@ -619,7 +619,7 @@ func CreateDigitalOceanDroplet(c *gin.Context) {
 	if passwordMode != "ssh" && droplet != nil && resolvedRootPassword != "" && activeToken != nil {
 		if saveErr := activeToken.SaveDropletPassword(droplet.ID, droplet.Name, passwordMode, resolvedRootPassword, time.Now()); saveErr != nil {
 			passwordSaveError = saveErr.Error()
-		} else if saveErr := saveDigitalOceanAddition(addition); saveErr != nil {
+		} else if saveErr := saveDigitalOceanAdditionPreservingSecrets(addition); saveErr != nil {
 			activeToken.RemoveSavedDropletPassword(droplet.ID)
 			passwordSaveError = "Failed to save root password: " + saveErr.Error()
 		} else {
@@ -871,7 +871,7 @@ func ensureManagedDigitalOceanSSHKey(ctx context.Context, addition *digitalocean
 				changed = true
 			}
 			if changed {
-				if err := saveDigitalOceanAddition(addition); err != nil {
+				if err := saveDigitalOceanAdditionPreservingSecrets(addition); err != nil {
 					return nil, err
 				}
 			}
@@ -891,7 +891,7 @@ func ensureManagedDigitalOceanSSHKey(ctx context.Context, addition *digitalocean
 			changed = true
 		}
 		if changed {
-			if err := saveDigitalOceanAddition(addition); err != nil {
+			if err := saveDigitalOceanAdditionPreservingSecrets(addition); err != nil {
 				return nil, err
 			}
 		}
@@ -914,7 +914,7 @@ func ensureManagedDigitalOceanSSHKey(ctx context.Context, addition *digitalocean
 		changed = true
 	}
 	if changed {
-		if err := saveDigitalOceanAddition(addition); err != nil {
+		if err := saveDigitalOceanAdditionPreservingSecrets(addition); err != nil {
 			return nil, err
 		}
 	}
@@ -987,6 +987,18 @@ func saveDigitalOceanAddition(addition *digitalocean.Addition) error {
 		Name:     digitalOceanProviderName,
 		Addition: string(payload),
 	})
+}
+
+func saveDigitalOceanAdditionPreservingSecrets(addition *digitalocean.Addition) error {
+	if addition == nil {
+		addition = &digitalocean.Addition{}
+	}
+
+	if _, current, err := loadDigitalOceanAddition(true); err == nil {
+		addition.MergePersistentStateFrom(current)
+	}
+
+	return saveDigitalOceanAddition(addition)
 }
 
 func logCloudAudit(c *gin.Context, message string) {

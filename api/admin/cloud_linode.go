@@ -109,7 +109,7 @@ func SaveLinodeTokens(c *gin.Context) {
 		}
 	}
 
-	if err := saveLinodeAddition(addition); err != nil {
+	if err := saveLinodeAdditionPreservingSecrets(addition); err != nil {
 		api.RespondError(c, http.StatusInternalServerError, "Failed to save Linode tokens: "+err.Error())
 		return
 	}
@@ -138,7 +138,7 @@ func SetLinodeActiveToken(c *gin.Context) {
 		return
 	}
 
-	if err := saveLinodeAddition(addition); err != nil {
+	if err := saveLinodeAdditionPreservingSecrets(addition); err != nil {
 		api.RespondError(c, http.StatusInternalServerError, "Failed to update active token: "+err.Error())
 		return
 	}
@@ -220,7 +220,7 @@ func CheckLinodeTokens(c *gin.Context) {
 
 	wg.Wait()
 
-	if err := saveLinodeAddition(addition); err != nil {
+	if err := saveLinodeAdditionPreservingSecrets(addition); err != nil {
 		api.RespondError(c, http.StatusInternalServerError, "Failed to save token health: "+err.Error())
 		return
 	}
@@ -593,7 +593,7 @@ func CreateLinodeInstance(c *gin.Context) {
 	if instance != nil && rootPassword != "" && activeToken != nil {
 		if saveErr := activeToken.SaveInstancePassword(instance.ID, instance.Label, passwordMode, rootPassword, time.Now()); saveErr != nil {
 			passwordSaveError = saveErr.Error()
-		} else if saveErr := saveLinodeAddition(addition); saveErr != nil {
+		} else if saveErr := saveLinodeAdditionPreservingSecrets(addition); saveErr != nil {
 			activeToken.RemoveSavedInstancePassword(instance.ID)
 			passwordSaveError = "Failed to save root password: " + saveErr.Error()
 		} else {
@@ -723,7 +723,7 @@ func PostLinodeInstanceAction(c *gin.Context) {
 			if saveErr := activeToken.SaveInstancePassword(instanceID, label, passwordMode, rootPassword, time.Now()); saveErr != nil {
 				response["password_saved"] = false
 				response["password_save_error"] = saveErr.Error()
-			} else if saveErr := saveLinodeAddition(addition); saveErr != nil {
+			} else if saveErr := saveLinodeAdditionPreservingSecrets(addition); saveErr != nil {
 				activeToken.RemoveSavedInstancePassword(instanceID)
 				response["password_saved"] = false
 				response["password_save_error"] = "Failed to save root password: " + saveErr.Error()
@@ -781,7 +781,7 @@ func PostLinodeInstanceAction(c *gin.Context) {
 			if saveErr := activeToken.SaveInstancePassword(instanceID, label, passwordMode, rootPassword, time.Now()); saveErr != nil {
 				response["password_saved"] = false
 				response["password_save_error"] = saveErr.Error()
-			} else if saveErr := saveLinodeAddition(addition); saveErr != nil {
+			} else if saveErr := saveLinodeAdditionPreservingSecrets(addition); saveErr != nil {
 				activeToken.RemoveSavedInstancePassword(instanceID)
 				response["password_saved"] = false
 				response["password_save_error"] = "Failed to save root password: " + saveErr.Error()
@@ -897,6 +897,18 @@ func saveLinodeAddition(addition *linodecloud.Addition) error {
 		Name:     linodeProviderName,
 		Addition: string(payload),
 	})
+}
+
+func saveLinodeAdditionPreservingSecrets(addition *linodecloud.Addition) error {
+	if addition == nil {
+		addition = &linodecloud.Addition{}
+	}
+
+	if _, current, err := loadLinodeAddition(true); err == nil {
+		addition.MergePersistentStateFrom(current)
+	}
+
+	return saveLinodeAddition(addition)
 }
 
 func normalizeLinodeRootPasswordMode(mode string) string {

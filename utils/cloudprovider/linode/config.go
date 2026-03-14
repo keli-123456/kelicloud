@@ -13,6 +13,8 @@ const (
 	TokenStatusUnknown = "unknown"
 	TokenStatusHealthy = "healthy"
 	TokenStatusError   = "error"
+
+	missingInstanceCredentialRetention = 24 * time.Hour
 )
 
 type Addition struct {
@@ -225,6 +227,29 @@ func (a *Addition) SetActiveToken(id string) bool {
 	return true
 }
 
+func (a *Addition) MergePersistentStateFrom(previous *Addition) {
+	if a == nil || previous == nil {
+		return
+	}
+
+	a.Normalize()
+	previous.Normalize()
+
+	for index := range a.Tokens {
+		previousToken := previous.findTokenForPersistentStateMerge(a.Tokens[index].ID, a.Tokens[index].Token)
+		if previousToken == nil {
+			continue
+		}
+
+		a.Tokens[index].InstanceCredentials = mergeInstanceCredentials(
+			previousToken.InstanceCredentials,
+			a.Tokens[index].InstanceCredentials,
+		)
+	}
+
+	a.Normalize()
+}
+
 func (a *Addition) UpsertTokens(inputs []TokenImport) int {
 	if a == nil {
 		return 0
@@ -320,6 +345,32 @@ func (a *Addition) RemoveToken(id string) bool {
 	}
 	a.Normalize()
 	return true
+}
+
+func (a *Addition) findTokenForPersistentStateMerge(id, tokenValue string) *TokenRecord {
+	if a == nil {
+		return nil
+	}
+
+	id = strings.TrimSpace(id)
+	if id != "" {
+		if token := a.FindToken(id); token != nil {
+			return token
+		}
+	}
+
+	tokenValue = strings.TrimSpace(tokenValue)
+	if tokenValue == "" {
+		return nil
+	}
+
+	for index := range a.Tokens {
+		if a.Tokens[index].Token == tokenValue {
+			return &a.Tokens[index]
+		}
+	}
+
+	return nil
 }
 
 func (a *Addition) ToPoolView() TokenPoolView {
@@ -480,10 +531,15 @@ func (t *TokenRecord) PruneInstanceCredentials(validInstanceIDs map[int]struct{}
 		return false
 	}
 
+	cutoff := time.Now().UTC().Add(-missingInstanceCredentialRetention)
 	next := make([]InstanceCredentialRecord, 0, len(t.InstanceCredentials))
 	changed := false
 	for _, credential := range t.InstanceCredentials {
 		if _, exists := validInstanceIDs[credential.InstanceID]; exists {
+			next = append(next, credential)
+			continue
+		}
+		if shouldRetainMissingInstanceCredential(credential, cutoff) {
 			next = append(next, credential)
 			continue
 		}
@@ -617,4 +673,18 @@ func normalizeInstanceCredentials(records []InstanceCredentialRecord) []Instance
 		return nil
 	}
 	return normalized
+}
+
+func shouldRetainMissingInstanceCredential(record InstanceCredentialRecord, cutoff time.Time) bool {
+	updatedAt := strings.TrimSpace(record.UpdatedAt)
+	if updatedAt == "" {
+		return false
+	}
+
+	parsed, err := time.Parse(time.RFC3339, updatedAt)
+	if err != nil {
+		return false
+	}
+
+	return parsed.After(cutoff)
 }

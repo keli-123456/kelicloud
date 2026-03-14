@@ -254,3 +254,75 @@ func TestTokenRecordSaveDropletPasswordAutoCreatesVaultSecret(t *testing.T) {
 	_, statErr := os.Stat("./data/cloud_secret.key")
 	require.NoError(t, statErr)
 }
+
+func TestTokenRecordPruneDropletCredentialsKeepsRecentMissingCredential(t *testing.T) {
+	t.Setenv(DropletPasswordVaultKeyEnv, "komari-test-secret")
+
+	token := &TokenRecord{
+		ID:    "token-1",
+		Name:  "primary",
+		Token: "dop_v1_token",
+	}
+
+	err := token.SaveDropletPassword(1001, "web-01", "custom", "Secret!123", time.Now().UTC())
+	require.NoError(t, err)
+
+	changed := token.PruneDropletCredentials(map[int]struct{}{})
+	require.False(t, changed)
+	require.True(t, token.HasSavedDropletPassword(1001))
+}
+
+func TestTokenRecordPruneDropletCredentialsDropsStaleMissingCredential(t *testing.T) {
+	t.Setenv(DropletPasswordVaultKeyEnv, "komari-test-secret")
+
+	token := &TokenRecord{
+		ID:    "token-1",
+		Name:  "primary",
+		Token: "dop_v1_token",
+	}
+
+	err := token.SaveDropletPassword(1001, "web-01", "custom", "Secret!123", time.Now().UTC().Add(-25*time.Hour))
+	require.NoError(t, err)
+
+	changed := token.PruneDropletCredentials(map[int]struct{}{})
+	require.True(t, changed)
+	require.False(t, token.HasSavedDropletPassword(1001))
+}
+
+func TestAdditionMergePersistentStateFromPreservesSavedDropletPassword(t *testing.T) {
+	t.Setenv(DropletPasswordVaultKeyEnv, "komari-test-secret")
+
+	previous := &Addition{
+		ManagedSSHKeyName:    "komari-managed",
+		ManagedSSHPrivateKey: "private-key",
+		ManagedSSHPublicKey:  "ssh-ed25519 AAAATEST",
+		Tokens: []TokenRecord{
+			{
+				ID:    "token-1",
+				Name:  "primary",
+				Token: "dop_v1_token",
+			},
+		},
+	}
+	require.NoError(t, previous.Tokens[0].SaveDropletPassword(1001, "web-01", "custom", "Secret!123", time.Unix(1710000000, 0)))
+
+	current := &Addition{
+		ActiveTokenID: "token-1",
+		Tokens: []TokenRecord{
+			{
+				ID:    "token-1",
+				Name:  "primary",
+				Token: "dop_v1_token",
+			},
+		},
+	}
+
+	current.MergePersistentStateFrom(previous)
+
+	require.Equal(t, "komari-managed", current.ManagedSSHKeyName)
+	require.Equal(t, "private-key", current.ManagedSSHPrivateKey)
+	require.True(t, current.Tokens[0].HasSavedDropletPassword(1001))
+	passwordView, err := current.Tokens[0].RevealDropletPassword(1001)
+	require.NoError(t, err)
+	require.Equal(t, "Secret!123", passwordView.RootPassword)
+}
