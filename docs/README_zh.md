@@ -38,6 +38,8 @@ sudo ./install-komari.sh
 
 ### 2. Docker 部署
 
+#### 方式 A：单容器 SQLite
+
 1. 创建数据目录：
    ```bash
    mkdir -p ./data
@@ -58,6 +60,29 @@ sudo ./install-komari.sh
 
 > [!NOTE]
 > 你也可以通过环境变量 `ADMIN_USERNAME` 和 `ADMIN_PASSWORD` 自定义初始用户名和密码。
+
+#### 方式 B：Docker Compose + MySQL
+
+1. 准备环境变量文件：
+   ```bash
+   cp .env.example .env
+   ```
+2. 创建数据目录：
+   ```bash
+   mkdir -p ./data
+   ```
+3. 同时启动 Komari 和 MySQL：
+   ```bash
+   docker compose up -d --build
+   ```
+4. 查看初始账号输出：
+   ```bash
+   docker compose logs -f komari
+   ```
+5. 在浏览器中访问 `http://<your_server_ip>:25774`。
+
+> [!NOTE]
+> 仓库内置的 `docker-compose.yml` 会基于当前仓库本地构建镜像，并默认使用 MySQL。数据库备份请使用 `mysqldump` 或直接备份 MySQL volume；面板内的数据库下载备份目前仅支持 SQLite。
 
 ### 3. 二进制文件部署
 

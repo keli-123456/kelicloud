@@ -1,0 +1,51 @@
+services:
+  mysql:
+    image: mysql:8.4
+    restart: unless-stopped
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-change-me-root}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-komari}
+      MYSQL_USER: ${MYSQL_USER:-komari}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-change-me}
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD --silent",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  komari:
+    build:
+      context: .
+      dockerfile: Dockerfile.compose
+    image: komari-local:latest
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+    ports:
+      - "${KOMARI_PORT:-25774}:25774"
+    environment:
+      KOMARI_DB_TYPE: mysql
+      KOMARI_DB_HOST: mysql
+      KOMARI_DB_PORT: 3306
+      KOMARI_DB_USER: ${MYSQL_USER:-komari}
+      KOMARI_DB_PASS: ${MYSQL_PASSWORD:-change-me}
+      KOMARI_DB_NAME: ${MYSQL_DATABASE:-komari}
+      KOMARI_LISTEN: 0.0.0.0:25774
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+    volumes:
+      - ./data:/app/data
+
+volumes:
+  mysql-data:

@@ -41,6 +41,8 @@ sudo ./install-komari.sh
 
 ### 2. Docker Deployment
 
+#### Option A: Single container with SQLite
+
 1. Create a data directory:
    ```bash
    mkdir -p ./data
@@ -61,6 +63,29 @@ sudo ./install-komari.sh
 
 > [!NOTE]
 > You can also customize the initial username and password through the environment variables `ADMIN_USERNAME` and `ADMIN_PASSWORD`.
+
+#### Option B: Docker Compose with MySQL
+
+1. Prepare the environment file:
+   ```bash
+   cp .env.example .env
+   ```
+2. Create the data directory:
+   ```bash
+   mkdir -p ./data
+   ```
+3. Start Komari and MySQL together:
+   ```bash
+   docker compose up -d --build
+   ```
+4. View the initial account output:
+   ```bash
+   docker compose logs -f komari
+   ```
+5. Access `http://<your_server_ip>:25774` in your browser.
+
+> [!NOTE]
+> The bundled `docker-compose.yml` builds the current repository into a local image and uses MySQL by default. For database backups, use `mysqldump` or snapshot the MySQL volume. The web panel backup endpoint currently only supports SQLite.
 
 ### 3. Binary File Deployment
 

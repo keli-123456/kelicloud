@@ -128,6 +128,13 @@ func DownloadBackup(c *gin.Context) {
 			api.RespondError(c, http.StatusInternalServerError, fmt.Sprintf("Error backing up sqlite database: %v", err))
 			return
 		}
+	} else if flags.DatabaseType == "mysql" {
+		api.RespondError(
+			c,
+			http.StatusNotImplemented,
+			"MySQL backup is not available from the web panel yet. Please use mysqldump or a database volume snapshot.",
+		)
+		return
 	} else if dbFilePath != "" {
 		// 非 sqlite 的情况：若配置了文件路径且存在，则直接复制（按用户需求仍然将名称固定为 komari.db）
 		if _, err := os.Stat(dbFilePath); err == nil {
