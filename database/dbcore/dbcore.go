@@ -354,6 +354,19 @@ func MergeDatabase(db *gorm.DB) {
 	}
 }
 
+func prepareMySQLSchemaCompatibility(db *gorm.DB) {
+	if db == nil || db.Dialector.Name() != "mysql" {
+		return
+	}
+
+	migrator := db.Migrator()
+	if migrator.HasTable(&models.OfflineNotification{}) && migrator.HasIndex(&models.OfflineNotification{}, "uni_offline_notifications_client") {
+		if err := migrator.DropIndex(&models.OfflineNotification{}, "uni_offline_notifications_client"); err != nil {
+			log.Printf("Failed to drop legacy MySQL offline notification index: %v", err)
+		}
+	}
+}
+
 var (
 	instance *gorm.DB
 	once     sync.Once
@@ -463,6 +476,7 @@ func GetDBInstance() *gorm.DB {
 		}
 		config.SetDb(instance)
 		MergeDatabase(instance)
+		prepareMySQLSchemaCompatibility(instance)
 		// 自动迁移模型
 		err = instance.AutoMigrate(
 			&models.User{},
