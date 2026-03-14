@@ -28,7 +28,6 @@ type createDigitalOceanDropletPayload struct {
 	Region           string   `json:"region" binding:"required"`
 	Size             string   `json:"size" binding:"required"`
 	Image            string   `json:"image" binding:"required"`
-	SSHKeys          []int    `json:"ssh_keys,omitempty"`
 	Backups          bool     `json:"backups"`
 	IPv6             bool     `json:"ipv6"`
 	Monitoring       bool     `json:"monitoring"`
@@ -549,7 +548,7 @@ func CreateDigitalOceanDroplet(c *gin.Context) {
 			Group:             payload.AutoConnectGroup,
 			Provider:          digitalOceanProviderName,
 			CredentialName:    activeToken.Name,
-			WrapInShellScript: passwordMode == "ssh",
+			WrapInShellScript: false,
 		})
 		if err != nil {
 			api.RespondError(c, http.StatusBadRequest, err.Error())
@@ -562,7 +561,6 @@ func CreateDigitalOceanDroplet(c *gin.Context) {
 		Region:     payload.Region,
 		Size:       payload.Size,
 		Image:      payload.Image,
-		SSHKeys:    uniqueIntSlice(payload.SSHKeys),
 		Backups:    payload.Backups,
 		IPv6:       payload.IPv6,
 		Monitoring: payload.Monitoring,
@@ -573,39 +571,35 @@ func CreateDigitalOceanDroplet(c *gin.Context) {
 
 	var generatedPassword string
 	var managedSSHKey *digitalocean.ManagedSSHKeyMaterialView
-	var resolvedRootPassword string
-	if passwordMode != "ssh" {
-		rootPassword := payload.RootPassword
-		if passwordMode == "random" {
-			rootPassword, err = digitalocean.GenerateRandomPassword(20)
-			if err != nil {
-				api.RespondError(c, http.StatusInternalServerError, "Failed to generate root password: "+err.Error())
-				return
-			}
-			generatedPassword = rootPassword
-		} else if rootPassword == "" {
-			api.RespondError(c, http.StatusBadRequest, "Custom root password cannot be empty")
-			return
-		}
-		resolvedRootPassword = rootPassword
-
-		managedSSHKey, err = ensureManagedDigitalOceanSSHKey(ctx, addition, activeToken, client)
+	rootPassword := payload.RootPassword
+	if passwordMode == "random" {
+		rootPassword, err = digitalocean.GenerateRandomPassword(20)
 		if err != nil {
-			var apiErr *digitalocean.APIError
-			if errors.As(err, &apiErr) {
-				respondCloudError(c, err)
-			} else {
-				api.RespondError(c, http.StatusInternalServerError, "Failed to prepare managed SSH key: "+err.Error())
-			}
+			api.RespondError(c, http.StatusInternalServerError, "Failed to generate root password: "+err.Error())
 			return
 		}
+		generatedPassword = rootPassword
+	} else if rootPassword == "" {
+		api.RespondError(c, http.StatusBadRequest, "Custom root password cannot be empty")
+		return
+	}
 
-		request.SSHKeys = appendUniqueInt(request.SSHKeys, managedSSHKey.KeyID)
-		request.UserData, err = digitalocean.BuildRootPasswordUserData(rootPassword, request.UserData)
-		if err != nil {
-			api.RespondError(c, http.StatusBadRequest, err.Error())
-			return
+	managedSSHKey, err = ensureManagedDigitalOceanSSHKey(ctx, addition, activeToken, client)
+	if err != nil {
+		var apiErr *digitalocean.APIError
+		if errors.As(err, &apiErr) {
+			respondCloudError(c, err)
+		} else {
+			api.RespondError(c, http.StatusInternalServerError, "Failed to prepare managed SSH key: "+err.Error())
 		}
+		return
+	}
+
+	request.SSHKeys = appendUniqueInt(request.SSHKeys, managedSSHKey.KeyID)
+	request.UserData, err = digitalocean.BuildRootPasswordUserData(rootPassword, request.UserData)
+	if err != nil {
+		api.RespondError(c, http.StatusBadRequest, err.Error())
+		return
 	}
 
 	droplet, err := client.CreateDroplet(ctx, request)
@@ -616,8 +610,8 @@ func CreateDigitalOceanDroplet(c *gin.Context) {
 
 	passwordSaved := false
 	passwordSaveError := ""
-	if passwordMode != "ssh" && droplet != nil && resolvedRootPassword != "" && activeToken != nil {
-		if saveErr := activeToken.SaveDropletPassword(droplet.ID, droplet.Name, passwordMode, resolvedRootPassword, time.Now()); saveErr != nil {
+	if droplet != nil && rootPassword != "" && activeToken != nil {
+		if saveErr := activeToken.SaveDropletPassword(droplet.ID, droplet.Name, passwordMode, rootPassword, time.Now()); saveErr != nil {
 			passwordSaveError = saveErr.Error()
 		} else if saveErr := saveDigitalOceanAdditionPreservingSecrets(addition); saveErr != nil {
 			activeToken.RemoveSavedDropletPassword(droplet.ID)
@@ -766,12 +760,10 @@ func trimStringSlice(values []string) []string {
 
 func normalizeRootPasswordMode(mode string) string {
 	switch strings.ToLower(strings.TrimSpace(mode)) {
-	case "", "ssh", "ssh_key", "ssh_only":
-		return "ssh"
+	case "", "random":
+		return "random"
 	case "custom":
 		return "custom"
-	case "random":
-		return "random"
 	default:
 		return ""
 	}
