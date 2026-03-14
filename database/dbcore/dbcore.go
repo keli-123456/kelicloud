@@ -219,11 +219,13 @@ func mergeClientInfo(db *gorm.DB) {
 }
 
 func MergeDatabase(db *gorm.DB) {
+	legacyConfigTableExists := db.Migrator().HasTable("configs") && db.Migrator().HasColumn(&models.Config{}, "id")
+
 	if db.Migrator().HasTable("client_infos") {
 		log.Println("[>0.0.5] Legacy ClientInfo table detected, starting data migration...")
 		mergeClientInfo(db)
 	}
-	if db.Migrator().HasColumn(&models.Config{}, "allow_cros") {
+	if legacyConfigTableExists && db.Migrator().HasColumn(&models.Config{}, "allow_cros") {
 		log.Println("[>0.0.5a] Renaming column 'allow_cros' to 'allow_cors' in config table...")
 		db.Migrator().RenameColumn(&models.Config{}, "allow_cros", "allow_cors")
 	}
@@ -231,7 +233,7 @@ func MergeDatabase(db *gorm.DB) {
 		log.Println("[>0.1.4] Rebuilding LoadNotification table....")
 		db.Migrator().DropTable(&models.LoadNotification{})
 	}
-	if !db.Migrator().HasTable(&models.OidcProvider{}) && db.Migrator().HasTable(&models.Config{}) {
+	if !db.Migrator().HasTable(&models.OidcProvider{}) && legacyConfigTableExists {
 		log.Println("[>1.0.2] Merge OidcProvider table....")
 		var config struct {
 			OAuthClientID     string `json:"o_auth_client_id" gorm:"type:varchar(255)"`
@@ -256,7 +258,7 @@ func MergeDatabase(db *gorm.DB) {
 		db.AutoMigrate(&models.Config{})
 		db.Model(&models.Config{}).Where("id = 1").Update("o_auth_provider", "github")
 	}
-	if !db.Migrator().HasTable(&models.MessageSenderProvider{}) && db.Migrator().HasTable(&models.Config{}) {
+	if !db.Migrator().HasTable(&models.MessageSenderProvider{}) && legacyConfigTableExists {
 		log.Println("[>1.0.2] Migrate MessageSender configuration....")
 		var config struct {
 			TelegramBotToken   string `json:"telegram_bot_token" gorm:"type:varchar(255)"`
@@ -360,9 +362,29 @@ func prepareMySQLSchemaCompatibility(db *gorm.DB) {
 	}
 
 	migrator := db.Migrator()
-	if migrator.HasTable(&models.OfflineNotification{}) && migrator.HasIndex(&models.OfflineNotification{}, "uni_offline_notifications_client") {
-		if err := migrator.DropIndex(&models.OfflineNotification{}, "uni_offline_notifications_client"); err != nil {
-			log.Printf("Failed to drop legacy MySQL offline notification index: %v", err)
+	if !migrator.HasTable(&models.OfflineNotification{}) {
+		return
+	}
+
+	for _, indexName := range []string{"uni_offline_notifications_client", "idx_offline_notifications_client"} {
+		if migrator.HasIndex(&models.OfflineNotification{}, indexName) {
+			if err := migrator.DropIndex(&models.OfflineNotification{}, indexName); err != nil {
+				log.Printf("Failed to drop legacy MySQL offline notification index %s: %v", indexName, err)
+			}
+		}
+	}
+
+	var primaryKeyCount int64
+	if err := db.Raw(
+		`SELECT COUNT(*) FROM information_schema.table_constraints WHERE table_schema = DATABASE() AND table_name = ? AND constraint_type = 'PRIMARY KEY'`,
+		"offline_notifications",
+	).Scan(&primaryKeyCount).Error; err != nil {
+		log.Printf("Failed to inspect MySQL offline notification primary key: %v", err)
+		return
+	}
+	if primaryKeyCount == 0 {
+		if err := db.Exec("ALTER TABLE `offline_notifications` ADD PRIMARY KEY (`client`)").Error; err != nil {
+			log.Printf("Failed to add MySQL offline notification primary key: %v", err)
 		}
 	}
 }

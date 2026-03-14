@@ -13,7 +13,7 @@ import (
 )
 
 type ConfigItem struct {
-	Key   string `gorm:"primaryKey;column:key;type:text"`
+	Key   string `gorm:"primaryKey;column:key;type:varchar(191)"`
 	Value string `gorm:"column:value;type:text"` // 存 JSON 字符串
 }
 
@@ -92,7 +92,9 @@ func migrateInPlace() {
 		}
 	}
 
-	db.AutoMigrate(&ConfigItem{})
+	if err := db.AutoMigrate(&ConfigItem{}); err != nil {
+		panic("failed " + err.Error())
+	}
 }
 
 // Get 获取原始值 (反序列化为 interface{})

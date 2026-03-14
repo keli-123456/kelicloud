@@ -2,7 +2,7 @@ package models
 
 // Notification 定义了通知相关的数据库模型
 type OfflineNotification struct {
-	Client     string `json:"client" gorm:"type:varchar(36);not null;uniqueIndex:idx_offline_notifications_client"`
+	Client     string `json:"client" gorm:"type:varchar(36);not null;primaryKey"`
 	ClientInfo Client `json:"client_info,omitempty" gorm:"foreignKey:Client;references:UUID;constraint:OnDelete:CASCADE,OnUpdate:CASCADE"`
 	Enable     bool   `json:"enable" gorm:"type:boolean;default:false"`
 	//Cooldown     int       `json:"cooldown" gorm:"type:int;not null;default:1800"`                // 冷却时间（秒），默认 30 分钟
