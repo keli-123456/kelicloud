@@ -64,28 +64,34 @@ sudo ./install-komari.sh
 > [!NOTE]
 > You can also customize the initial username and password through the environment variables `ADMIN_USERNAME` and `ADMIN_PASSWORD`.
 
-#### Option B: Docker Compose with MySQL
+#### Option B: Docker Compose with a remote MySQL server
 
 1. Prepare the environment file:
    ```bash
    cp .env.example .env
    ```
-2. Create the data directory:
+2. Edit `.env` and fill in your remote MySQL connection details:
+   - `KOMARI_DB_HOST`
+   - `KOMARI_DB_PORT`
+   - `KOMARI_DB_NAME`
+   - `KOMARI_DB_USER`
+   - `KOMARI_DB_PASS`
+3. Create the data directory:
    ```bash
    mkdir -p ./data
    ```
-3. Start Komari and MySQL together:
+4. Start Komari:
    ```bash
    docker compose up -d --build
    ```
-4. View the initial account output:
+5. View the initial account output:
    ```bash
    docker compose logs -f komari
    ```
-5. Access `http://<your_server_ip>:25774` in your browser.
+6. Access `http://<your_server_ip>:25774` in your browser.
 
 > [!NOTE]
-> The bundled `docker-compose.yml` builds the current repository into a local image and uses MySQL by default. For database backups, use `mysqldump` or snapshot the MySQL volume. The web panel backup endpoint currently only supports SQLite.
+> The bundled `docker-compose.yml` builds the current repository into a local image and connects to your existing MySQL server. For database backups, use `mysqldump` or your database provider's snapshot tooling. The web panel backup endpoint currently only supports SQLite.
 
 ### 3. Binary File Deployment
 
