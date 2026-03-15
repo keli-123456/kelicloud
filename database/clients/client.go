@@ -26,12 +26,51 @@ func DeleteClientConfig(clientUuid string) error {
 	return nil
 }
 func DeleteClient(clientUuid string) error {
-	db := dbcore.GetDBInstance()
-	err := db.Delete(&models.Client{}, "uuid = ?", clientUuid).Error
-	if err != nil {
-		return err
-	}
-	return nil
+	return deleteClientWithDB(dbcore.GetDBInstance(), clientUuid)
+}
+
+func deleteClientWithDB(db *gorm.DB, clientUuid string) error {
+	return db.Transaction(func(tx *gorm.DB) error {
+		cleanupModels := []struct {
+			model interface{}
+			query string
+		}{
+			{model: &common.ClientConfig{}, query: "client_uuid = ?"},
+			{model: &models.OfflineNotification{}, query: "client = ?"},
+			{model: &models.TaskResult{}, query: "client = ?"},
+			{model: &models.PingRecord{}, query: "client = ?"},
+			{model: &models.Record{}, query: "client = ?"},
+			{model: &models.GPURecord{}, query: "client = ?"},
+		}
+
+		for _, cleanup := range cleanupModels {
+			if !tx.Migrator().HasTable(cleanup.model) {
+				continue
+			}
+			if err := tx.Where(cleanup.query, clientUuid).Delete(cleanup.model).Error; err != nil {
+				return err
+			}
+		}
+
+		cleanupTables := []struct {
+			table string
+			model interface{}
+		}{
+			{table: "records_long_term", model: &models.Record{}},
+			{table: "gpu_records_long_term", model: &models.GPURecord{}},
+		}
+
+		for _, cleanup := range cleanupTables {
+			if !tx.Migrator().HasTable(cleanup.table) {
+				continue
+			}
+			if err := tx.Table(cleanup.table).Where("client = ?", clientUuid).Delete(cleanup.model).Error; err != nil {
+				return err
+			}
+		}
+
+		return tx.Where("uuid = ?", clientUuid).Delete(&models.Client{}).Error
+	})
 }
 
 // Deprecated: UpdateOrInsertBasicInfo is deprecated and will be removed in a future release. Use SaveClientInfo instead.
