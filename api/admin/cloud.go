@@ -69,54 +69,77 @@ func GetCloudProvider(c *gin.Context) {
 	config, err := database.GetCloudProviderConfigByName(providerName)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			api.RespondSuccess(c, &models.CloudProvider{
-				Name:     providerName,
-				Addition: "{}",
-			})
+			response, buildErr := buildCloudProviderResponse(providerName, nil)
+			if buildErr != nil {
+				api.RespondError(c, http.StatusInternalServerError, "Failed to build cloud provider response: "+buildErr.Error())
+				return
+			}
+			api.RespondSuccess(c, response)
 			return
 		}
 		api.RespondError(c, http.StatusInternalServerError, "Failed to load cloud provider configuration: "+err.Error())
 		return
 	}
 
-	api.RespondSuccess(c, config)
+	response, err := buildCloudProviderResponse(providerName, config)
+	if err != nil {
+		api.RespondError(c, http.StatusInternalServerError, "Failed to parse cloud provider configuration: "+err.Error())
+		return
+	}
+
+	api.RespondSuccess(c, response)
 }
 
 func SetCloudProvider(c *gin.Context) {
 	providerName := strings.TrimSpace(c.Param("provider"))
-	constructor, exists := factory.GetConstructor(providerName)
-	if !exists {
+	if _, exists := factory.GetConstructor(providerName); !exists {
 		api.RespondError(c, http.StatusNotFound, "Cloud provider not found: "+providerName)
 		return
 	}
 
-	var payload struct {
-		Addition string `json:"addition"`
-	}
+	var payload setCloudProviderPayload
 	if err := c.ShouldBindJSON(&payload); err != nil {
 		api.RespondError(c, http.StatusBadRequest, "Invalid configuration: "+err.Error())
 		return
 	}
-	if strings.TrimSpace(payload.Addition) == "" {
-		payload.Addition = "{}"
+
+	var entries []cloudProviderEntry
+	var err error
+	if payload.Entries != nil {
+		entries = payload.Entries
+	} else {
+		entries, err = convertLegacyAdditionToCloudProviderEntries(payload.Addition)
+		if err != nil {
+			api.RespondError(c, http.StatusBadRequest, "Invalid provider configuration: "+err.Error())
+			return
+		}
 	}
 
-	provider := constructor()
-	if err := json.Unmarshal([]byte(payload.Addition), provider.GetConfiguration()); err != nil {
+	entries, err = validateCloudProviderEntries(providerName, entries)
+	if err != nil {
 		api.RespondError(c, http.StatusBadRequest, "Invalid provider configuration: "+err.Error())
+		return
+	}
+
+	addition, err := marshalCloudProviderEntries(entries)
+	if err != nil {
+		api.RespondError(c, http.StatusInternalServerError, "Failed to encode cloud provider configuration: "+err.Error())
 		return
 	}
 
 	if err := database.SaveCloudProviderConfig(&models.CloudProvider{
 		Name:     providerName,
-		Addition: payload.Addition,
+		Addition: addition,
 	}); err != nil {
 		api.RespondError(c, http.StatusInternalServerError, "Failed to save cloud provider configuration: "+err.Error())
 		return
 	}
 
-	logCloudAudit(c, "update cloud provider config: "+providerName)
-	api.RespondSuccess(c, gin.H{"message": "Cloud provider configured successfully"})
+	logCloudAudit(c, fmt.Sprintf("update cloud provider config: %s (%d entries)", providerName, len(entries)))
+	api.RespondSuccess(c, &cloudProviderResponse{
+		Name:    providerName,
+		Entries: entries,
+	})
 }
 
 func GetDigitalOceanTokens(c *gin.Context) {
