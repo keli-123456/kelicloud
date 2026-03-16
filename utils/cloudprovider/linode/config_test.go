@@ -88,6 +88,24 @@ func TestAdditionUpsertTokensGeneratesUniqueDefaultNames(t *testing.T) {
 	require.Equal(t, "Token 3", addition.Tokens[2].Name)
 }
 
+func TestAdditionRemoveTokenClearsLegacyTokenWhenLastEntryDeleted(t *testing.T) {
+	addition := &Addition{
+		Token: "linode-token-legacy",
+	}
+
+	addition.Normalize()
+	require.Len(t, addition.Tokens, 1)
+
+	tokenID := addition.Tokens[0].ID
+	require.True(t, addition.RemoveToken(tokenID))
+	require.Empty(t, addition.Tokens)
+	require.Empty(t, addition.ActiveTokenID)
+	require.Empty(t, addition.Token)
+
+	addition.Normalize()
+	require.Empty(t, addition.Tokens)
+}
+
 func TestTokenRecordSaveInstancePasswordAutoCreatesVaultSecret(t *testing.T) {
 	t.Chdir(t.TempDir())
 

@@ -7,12 +7,14 @@ import (
 	"time"
 
 	"github.com/komari-monitor/komari/config"
+	"github.com/komari-monitor/komari/database"
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
 	messageevent "github.com/komari-monitor/komari/database/models/messageEvent"
 	"github.com/komari-monitor/komari/utils"
 	"github.com/komari-monitor/komari/utils/geoip"
 	"github.com/komari-monitor/komari/utils/messageSender"
+	"gorm.io/gorm"
 )
 
 // GetAllSessions 获取所有会话
@@ -25,19 +27,29 @@ func GetAllSessions() (sessions []models.Session, err error) {
 	return sessions, nil
 }
 
+func GetSessionsByUser(userUUID string) (sessions []models.Session, err error) {
+	db := dbcore.GetDBInstance()
+	return getSessionsByUserWithDB(db, userUUID)
+}
+
 // CreateSession 创建新会话
 func CreateSession(uuid string, expires int, userAgent, ip, login_method string) (string, error) {
 	db := dbcore.GetDBInstance()
 	session := utils.GenerateRandomString(32)
+	currentTenantID := ""
+	if tenant, _, resolveErr := database.ResolveAccessibleTenant(uuid, ""); resolveErr == nil && tenant != nil {
+		currentTenantID = tenant.ID
+	}
 
 	sessionRecord := models.Session{
-		UUID:         uuid,
-		Session:      session,
-		Expires:      models.FromTime(time.Now().Add(time.Duration(expires) * time.Second)),
-		UserAgent:    userAgent,
-		Ip:           ip,
-		LoginMethod:  login_method,
-		LatestOnline: models.FromTime(time.Now()),
+		UUID:            uuid,
+		Session:         session,
+		CurrentTenantID: currentTenantID,
+		Expires:         models.FromTime(time.Now().Add(time.Duration(expires) * time.Second)),
+		UserAgent:       userAgent,
+		Ip:              ip,
+		LoginMethod:     login_method,
+		LatestOnline:    models.FromTime(time.Now()),
 	}
 	go func() {
 		LoginNotification, _ := config.GetAs[bool](config.LoginNotificationKey, false)
@@ -66,20 +78,27 @@ func CreateSession(uuid string, expires int, userAgent, ip, login_method string)
 
 // GetSession 根据会话 ID 获取 UUID
 func GetSession(session string) (uuid string, err error) {
-	db := dbcore.GetDBInstance()
-	var sessionRecord models.Session
-	err = db.Where("session = ?", session).First(&sessionRecord).Error
+	sessionRecord, err := GetSessionRecord(session)
 	if err != nil {
 		return "", err
 	}
+	return sessionRecord.UUID, nil
+}
 
-	if time.Now().After(sessionRecord.Expires.ToTime()) {
-		// 会话已过期，删除它
-		_ = DeleteSession(session)
-		return "", errors.New("session expired")
+func GetSessionRecord(session string) (models.Session, error) {
+	db := dbcore.GetDBInstance()
+	var sessionRecord models.Session
+	err := db.Where("session = ?", session).First(&sessionRecord).Error
+	if err != nil {
+		return models.Session{}, err
 	}
 
-	return sessionRecord.UUID, nil
+	if time.Now().After(sessionRecord.Expires.ToTime()) {
+		_ = DeleteSession(session)
+		return models.Session{}, errors.New("session expired")
+	}
+
+	return sessionRecord, nil
 }
 
 func GetUserBySession(session string) (models.User, error) {
@@ -102,6 +121,11 @@ func DeleteSession(session string) (err error) {
 	return nil
 }
 
+func DeleteSessionByUser(userUUID, session string) error {
+	db := dbcore.GetDBInstance()
+	return deleteSessionByUserWithDB(db, userUUID, session)
+}
+
 func DeleteAllSessions() error {
 	db := dbcore.GetDBInstance()
 	result := db.Where("1 = 1").Delete(&models.Session{})
@@ -109,6 +133,63 @@ func DeleteAllSessions() error {
 		return result.Error
 	}
 	return nil
+}
+
+func DeleteAllSessionsByUser(userUUID string) error {
+	db := dbcore.GetDBInstance()
+	return deleteAllSessionsByUserWithDB(db, userUUID)
+}
+
+func ResolveTenantScope(session string) (tenantID string, loggedIn bool, err error) {
+	defaultTenantID, defaultErr := database.GetDefaultTenantID()
+	if session == "" {
+		return defaultTenantID, false, defaultErr
+	}
+
+	sessionRecord, sessionErr := GetSessionRecord(session)
+	if sessionErr != nil {
+		return defaultTenantID, false, defaultErr
+	}
+
+	currentTenant, _, resolveErr := database.ResolveAccessibleTenant(sessionRecord.UUID, sessionRecord.CurrentTenantID)
+	if resolveErr != nil || currentTenant == nil {
+		return defaultTenantID, false, defaultErr
+	}
+
+	if currentTenant.ID != sessionRecord.CurrentTenantID {
+		_ = SetSessionCurrentTenant(session, currentTenant.ID)
+	}
+
+	return currentTenant.ID, true, nil
+}
+
+func getSessionsByUserWithDB(db *gorm.DB, userUUID string) (sessions []models.Session, err error) {
+	err = db.Where("uuid = ?", userUUID).Find(&sessions).Error
+	if err != nil {
+		return nil, err
+	}
+	return sessions, nil
+}
+
+func deleteSessionByUserWithDB(db *gorm.DB, userUUID, session string) error {
+	result := db.Where("uuid = ? AND session = ?", userUUID, session).Delete(&models.Session{})
+	if result.Error != nil {
+		return result.Error
+	}
+	return nil
+}
+
+func deleteAllSessionsByUserWithDB(db *gorm.DB, userUUID string) error {
+	result := db.Where("uuid = ?", userUUID).Delete(&models.Session{})
+	if result.Error != nil {
+		return result.Error
+	}
+	return nil
+}
+
+func SetSessionCurrentTenant(session, tenantID string) error {
+	db := dbcore.GetDBInstance()
+	return db.Model(&models.Session{}).Where("session = ?", session).Update("current_tenant_id", tenantID).Error
 }
 
 func UpdateLatestOnline(session string) error {

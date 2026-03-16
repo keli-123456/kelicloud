@@ -24,7 +24,13 @@ func AddPingTask(c *gin.Context) {
 		return
 	}
 
-	if taskID, err := tasks.AddPingTask(req.Clients, req.Name, req.Target, req.TaskType, req.Interval); err != nil {
+	tenantID, ok := currentTenantID(c)
+	if !ok {
+		api.RespondError(c, http.StatusForbidden, "Tenant context is required")
+		return
+	}
+
+	if taskID, err := tasks.AddPingTaskForTenant(tenantID, req.Clients, req.Name, req.Target, req.TaskType, req.Interval); err != nil {
 		api.RespondError(c, http.StatusInternalServerError, err.Error())
 	} else {
 		api.RespondSuccess(c, gin.H{"task_id": taskID})
@@ -41,7 +47,13 @@ func DeletePingTask(c *gin.Context) {
 		return
 	}
 
-	if err := tasks.DeletePingTask(req.ID); err != nil {
+	tenantID, ok := currentTenantID(c)
+	if !ok {
+		api.RespondError(c, http.StatusForbidden, "Tenant context is required")
+		return
+	}
+
+	if err := tasks.DeletePingTaskForTenant(tenantID, req.ID); err != nil {
 		api.RespondError(c, http.StatusInternalServerError, err.Error())
 	} else {
 		api.RespondSuccess(c, nil)
@@ -59,7 +71,13 @@ func EditPingTask(c *gin.Context) {
 		return
 	}
 
-	if err := tasks.EditPingTask(req.Tasks); err != nil {
+	tenantID, ok := currentTenantID(c)
+	if !ok {
+		api.RespondError(c, http.StatusForbidden, "Tenant context is required")
+		return
+	}
+
+	if err := tasks.EditPingTaskForTenant(tenantID, req.Tasks); err != nil {
 		api.RespondError(c, http.StatusInternalServerError, err.Error())
 	} else {
 		// for _, task := range req.Tasks {
@@ -70,7 +88,13 @@ func EditPingTask(c *gin.Context) {
 }
 
 func GetAllPingTasks(c *gin.Context) {
-	tasks, err := tasks.GetAllPingTasks()
+	tenantID, ok := currentTenantID(c)
+	if !ok {
+		api.RespondError(c, http.StatusForbidden, "Tenant context is required")
+		return
+	}
+
+	tasks, err := tasks.GetAllPingTasksByTenant(tenantID)
 	if err != nil {
 		api.RespondError(c, http.StatusInternalServerError, err.Error())
 		return

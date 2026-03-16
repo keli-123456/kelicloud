@@ -4,10 +4,11 @@ import "time"
 
 type CloudInstanceShare struct {
 	ID                 uint      `json:"id,omitempty" gorm:"primaryKey;autoIncrement"`
+	TenantID           string    `json:"tenant_id,omitempty" gorm:"type:varchar(36);uniqueIndex:idx_cloud_instance_shares_tenant_resource"`
 	ShareToken         string    `json:"share_token" gorm:"type:varchar(64);uniqueIndex;not null"`
-	Provider           string    `json:"provider" gorm:"type:varchar(32);uniqueIndex:idx_cloud_instance_shares_resource;not null"`
-	ResourceType       string    `json:"resource_type" gorm:"type:varchar(32);uniqueIndex:idx_cloud_instance_shares_resource;not null"`
-	ResourceID         string    `json:"resource_id" gorm:"type:varchar(191);uniqueIndex:idx_cloud_instance_shares_resource;not null"`
+	Provider           string    `json:"provider" gorm:"type:varchar(32);uniqueIndex:idx_cloud_instance_shares_tenant_resource;not null"`
+	ResourceType       string    `json:"resource_type" gorm:"type:varchar(32);uniqueIndex:idx_cloud_instance_shares_tenant_resource;not null"`
+	ResourceID         string    `json:"resource_id" gorm:"type:varchar(191);uniqueIndex:idx_cloud_instance_shares_tenant_resource;not null"`
 	ResourceName       string    `json:"resource_name" gorm:"type:varchar(255)"`
 	CredentialID       string    `json:"credential_id" gorm:"type:varchar(191);index"`
 	Region             string    `json:"region" gorm:"type:varchar(64)"`

@@ -13,14 +13,14 @@ import (
 	"github.com/komari-monitor/komari/database/models"
 )
 
-func GetPublicInfo() (map[string]interface{}, error) {
-	cstPtr, err := config.GetManyAs[config.Legacy]()
+func GetPublicInfo(tenantID string) (map[string]interface{}, error) {
+	cstPtr, err := config.GetManyAsForTenant[config.Legacy](tenantID)
 	if err != nil {
 		return nil, err
 	}
 	cst := *cstPtr
 
-	all, allErr := config.GetAll()
+	all, allErr := config.GetAllForTenant(tenantID)
 	hasKey := func(k string) bool {
 		if allErr != nil {
 			return false
@@ -64,7 +64,7 @@ func GetPublicInfo() (map[string]interface{}, error) {
 
 	db := dbcore.GetDBInstance()
 	tc := models.ThemeConfiguration{}
-	err = db.Model(&models.ThemeConfiguration{}).Where("short = ?", cst.Theme).First(&tc).Error
+	err = db.Model(&models.ThemeConfiguration{}).Where("tenant_id = ? AND short = ?", tenantID, cst.Theme).First(&tc).Error
 	if err != nil {
 		tc.Data = "{}"
 	}

@@ -2,9 +2,11 @@ package clients
 
 import (
 	"math"
+	"strings"
 	"time"
 
 	"github.com/komari-monitor/komari/common"
+	"github.com/komari-monitor/komari/database"
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/utils"
@@ -31,45 +33,59 @@ func DeleteClient(clientUuid string) error {
 
 func deleteClientWithDB(db *gorm.DB, clientUuid string) error {
 	return db.Transaction(func(tx *gorm.DB) error {
-		cleanupModels := []struct {
-			model interface{}
-			query string
-		}{
-			{model: &common.ClientConfig{}, query: "client_uuid = ?"},
-			{model: &models.OfflineNotification{}, query: "client = ?"},
-			{model: &models.TaskResult{}, query: "client = ?"},
-			{model: &models.PingRecord{}, query: "client = ?"},
-			{model: &models.Record{}, query: "client = ?"},
-			{model: &models.GPURecord{}, query: "client = ?"},
-		}
+		return deleteClientTx(tx, clientUuid)
+	})
+}
 
-		for _, cleanup := range cleanupModels {
-			if !tx.Migrator().HasTable(cleanup.model) {
-				continue
-			}
-			if err := tx.Where(cleanup.query, clientUuid).Delete(cleanup.model).Error; err != nil {
-				return err
-			}
-		}
+func deleteClientTx(tx *gorm.DB, clientUuid string) error {
+	cleanupModels := []struct {
+		model interface{}
+		query string
+	}{
+		{model: &common.ClientConfig{}, query: "client_uuid = ?"},
+		{model: &models.OfflineNotification{}, query: "client = ?"},
+		{model: &models.TaskResult{}, query: "client = ?"},
+		{model: &models.PingRecord{}, query: "client = ?"},
+		{model: &models.Record{}, query: "client = ?"},
+		{model: &models.GPURecord{}, query: "client = ?"},
+	}
 
-		cleanupTables := []struct {
-			table string
-			model interface{}
-		}{
-			{table: "records_long_term", model: &models.Record{}},
-			{table: "gpu_records_long_term", model: &models.GPURecord{}},
+	for _, cleanup := range cleanupModels {
+		if !tx.Migrator().HasTable(cleanup.model) {
+			continue
 		}
-
-		for _, cleanup := range cleanupTables {
-			if !tx.Migrator().HasTable(cleanup.table) {
-				continue
-			}
-			if err := tx.Table(cleanup.table).Where("client = ?", clientUuid).Delete(cleanup.model).Error; err != nil {
-				return err
-			}
+		if err := tx.Where(cleanup.query, clientUuid).Delete(cleanup.model).Error; err != nil {
+			return err
 		}
+	}
 
-		return tx.Where("uuid = ?", clientUuid).Delete(&models.Client{}).Error
+	cleanupTables := []struct {
+		table string
+		model interface{}
+	}{
+		{table: "records_long_term", model: &models.Record{}},
+		{table: "gpu_records_long_term", model: &models.GPURecord{}},
+	}
+
+	for _, cleanup := range cleanupTables {
+		if !tx.Migrator().HasTable(cleanup.table) {
+			continue
+		}
+		if err := tx.Table(cleanup.table).Where("client = ?", clientUuid).Delete(cleanup.model).Error; err != nil {
+			return err
+		}
+	}
+
+	return tx.Where("uuid = ?", clientUuid).Delete(&models.Client{}).Error
+}
+
+func DeleteClientForTenant(tenantID, clientUUID string) error {
+	db := dbcore.GetDBInstance()
+	return db.Transaction(func(tx *gorm.DB) error {
+		if _, err := getClientByUUIDForTenantWithDB(tx, clientUUID, tenantID); err != nil {
+			return err
+		}
+		return deleteClientTx(tx, clientUUID)
 	})
 }
 
@@ -143,6 +159,73 @@ func UpdateOrInsertBasicInfo(cbi common.ClientInfo) error {
 
 	if err != nil {
 		return err
+	}
+	return nil
+}
+
+func getClientByUUIDWithDB(db *gorm.DB, clientUUID string) (client models.Client, err error) {
+	err = db.Where("uuid = ?", clientUUID).First(&client).Error
+	if err != nil {
+		return models.Client{}, err
+	}
+	return client, nil
+}
+
+func getClientByUUIDForTenantWithDB(db *gorm.DB, clientUUID, tenantID string) (client models.Client, err error) {
+	err = db.Where("uuid = ? AND tenant_id = ?", clientUUID, tenantID).First(&client).Error
+	if err != nil {
+		return models.Client{}, err
+	}
+	return client, nil
+}
+
+func getAllClientBasicInfoWithDB(db *gorm.DB, tenantID string) (clients []models.Client, err error) {
+	err = db.Where("tenant_id = ?", tenantID).Find(&clients).Error
+	if err != nil {
+		return nil, err
+	}
+	return clients, nil
+}
+
+func saveClientWithDB(db *gorm.DB, updates map[string]interface{}) error {
+	clientUUID, ok := updates["uuid"].(string)
+	if !ok || clientUUID == "" {
+		return fmt.Errorf("invalid client UUID")
+	}
+
+	if len(updates) == 0 {
+		return fmt.Errorf("no fields to update")
+	}
+
+	updates["updated_at"] = time.Now()
+
+	err := db.Model(&models.Client{}).Where("uuid = ?", clientUUID).Updates(updates).Error
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func saveClientForTenantWithDB(db *gorm.DB, tenantID string, updates map[string]interface{}) error {
+	clientUUID, ok := updates["uuid"].(string)
+	if !ok || clientUUID == "" {
+		return fmt.Errorf("invalid client UUID")
+	}
+
+	if len(updates) == 0 {
+		return fmt.Errorf("no fields to update")
+	}
+
+	updates["updated_at"] = time.Now()
+
+	result := db.Model(&models.Client{}).
+		Where("uuid = ? AND tenant_id = ?", clientUUID, tenantID).
+		Updates(updates)
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return gorm.ErrRecordNotFound
 	}
 	return nil
 }
@@ -242,30 +325,42 @@ func EditClientToken(clientUUID, token string) error {
 
 // CreateClient 创建新客户端
 func CreateClient() (clientUUID, token string, err error) {
-	db := dbcore.GetDBInstance()
-	token = utils.GenerateToken()
-	clientUUID = uuid.New().String()
-
-	client := models.Client{
-		UUID:      clientUUID,
-		Token:     token,
-		Name:      "client_" + clientUUID[0:8],
-		CreatedAt: models.FromTime(time.Now()),
-		UpdatedAt: models.FromTime(time.Now()),
-	}
-
-	err = db.Create(&client).Error
+	tenantID, err := database.GetDefaultTenantID()
 	if err != nil {
 		return "", "", err
 	}
-	return clientUUID, token, nil
+	return CreateClientForTenant(tenantID)
 }
 
 func CreateClientWithName(name string) (clientUUID, token string, err error) {
-	return CreateClientWithNameAndGroup(name, "")
+	tenantID, err := database.GetDefaultTenantID()
+	if err != nil {
+		return "", "", err
+	}
+	return CreateClientWithNameForTenant(tenantID, name)
 }
 
 func CreateClientWithNameAndGroup(name, group string) (clientUUID, token string, err error) {
+	tenantID, err := database.GetDefaultTenantID()
+	if err != nil {
+		return "", "", err
+	}
+	return CreateClientWithNameAndGroupForTenant(tenantID, name, group)
+}
+
+func CreateClientForTenant(tenantID string) (clientUUID, token string, err error) {
+	return CreateClientWithNameAndGroupForTenant(tenantID, "", "")
+}
+
+func CreateClientWithNameForTenant(tenantID, name string) (clientUUID, token string, err error) {
+	return CreateClientWithNameAndGroupForTenant(tenantID, name, "")
+}
+
+func CreateClientWithNameAndGroupForTenant(tenantID, name, group string) (clientUUID, token string, err error) {
+	if tenantID == "" {
+		return "", "", fmt.Errorf("tenant id is required")
+	}
+
 	db := dbcore.GetDBInstance()
 	token = utils.GenerateToken()
 	clientUUID = uuid.New().String()
@@ -275,6 +370,7 @@ func CreateClientWithNameAndGroup(name, group string) (clientUUID, token string,
 	client := models.Client{
 		UUID:      clientUUID,
 		Token:     token,
+		TenantID:  tenantID,
 		Name:      name,
 		Group:     group,
 		CreatedAt: models.FromTime(time.Now()),
@@ -302,11 +398,12 @@ func CreateClientWithNameAndGroup(name, group string) (clientUUID, token string,
 */
 func GetClientByUUID(uuid string) (client models.Client, err error) {
 	db := dbcore.GetDBInstance()
-	err = db.Where("uuid = ?", uuid).First(&client).Error
-	if err != nil {
-		return models.Client{}, err
-	}
-	return client, nil
+	return getClientByUUIDWithDB(db, uuid)
+}
+
+func GetClientByUUIDForTenant(uuid, tenantID string) (client models.Client, err error) {
+	db := dbcore.GetDBInstance()
+	return getClientByUUIDForTenantWithDB(db, uuid, tenantID)
 }
 
 // GetClientBasicInfo 获取指定 UUID 的客户端基本信息
@@ -323,9 +420,15 @@ func GetClientBasicInfo(uuid string) (client models.Client, err error) {
 }
 
 func GetClientTokenByUUID(uuid string) (token string, err error) {
-	db := dbcore.GetDBInstance()
-	var client models.Client
-	err = db.Where("uuid = ?", uuid).First(&client).Error
+	client, err := GetClientByUUID(uuid)
+	if err != nil {
+		return "", err
+	}
+	return client.Token, nil
+}
+
+func GetClientTokenByUUIDForTenant(uuid, tenantID string) (token string, err error) {
+	client, err := GetClientByUUIDForTenant(uuid, tenantID)
 	if err != nil {
 		return "", err
 	}
@@ -341,23 +444,65 @@ func GetAllClientBasicInfo() (clients []models.Client, err error) {
 	return clients, nil
 }
 
+func GetAllClientBasicInfoByTenant(tenantID string) (clients []models.Client, err error) {
+	db := dbcore.GetDBInstance()
+	return getAllClientBasicInfoWithDB(db, tenantID)
+}
+
+func NormalizeClientUUIDsForTenant(tenantID string, clientUUIDs []string) ([]string, error) {
+	if tenantID == "" {
+		return nil, fmt.Errorf("tenant id is required")
+	}
+
+	normalized := make([]string, 0, len(clientUUIDs))
+	seen := make(map[string]struct{}, len(clientUUIDs))
+	for _, clientUUID := range clientUUIDs {
+		value := strings.TrimSpace(clientUUID)
+		if value == "" {
+			continue
+		}
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		normalized = append(normalized, value)
+	}
+
+	if len(normalized) == 0 {
+		return nil, fmt.Errorf("at least one client is required")
+	}
+
+	db := dbcore.GetDBInstance()
+	var matched []string
+	if err := db.Model(&models.Client{}).
+		Where("tenant_id = ? AND uuid IN ?", tenantID, normalized).
+		Pluck("uuid", &matched).Error; err != nil {
+		return nil, err
+	}
+
+	if len(matched) != len(normalized) {
+		valid := make(map[string]struct{}, len(matched))
+		for _, item := range matched {
+			valid[item] = struct{}{}
+		}
+		missing := make([]string, 0)
+		for _, item := range normalized {
+			if _, ok := valid[item]; !ok {
+				missing = append(missing, item)
+			}
+		}
+		return nil, fmt.Errorf("clients not found in current tenant: %s", strings.Join(missing, ", "))
+	}
+
+	return normalized, nil
+}
+
 func SaveClient(updates map[string]interface{}) error {
 	db := dbcore.GetDBInstance()
-	clientUUID, ok := updates["uuid"].(string)
-	if !ok || clientUUID == "" {
-		return fmt.Errorf("invalid client UUID")
-	}
+	return saveClientWithDB(db, updates)
+}
 
-	// 确保更新的字段不为空
-	if len(updates) == 0 {
-		return fmt.Errorf("no fields to update")
-	}
-
-	updates["updated_at"] = time.Now()
-
-	err := db.Model(&models.Client{}).Where("uuid = ?", clientUUID).Updates(updates).Error
-	if err != nil {
-		return err
-	}
-	return nil
+func SaveClientForTenant(tenantID string, updates map[string]interface{}) error {
+	db := dbcore.GetDBInstance()
+	return saveClientForTenantWithDB(db, tenantID, updates)
 }

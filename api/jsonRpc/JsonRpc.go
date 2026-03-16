@@ -12,6 +12,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/config"
+	"github.com/komari-monitor/komari/database"
 	"github.com/komari-monitor/komari/database/accounts"
 	"github.com/komari-monitor/komari/database/clients"
 	"github.com/komari-monitor/komari/utils/rpc"
@@ -23,8 +24,11 @@ import (
 // method: RPC 方法名 (如 "common:getNodes")
 // params: 方法参数
 func OnInternalRequest(ctx context.Context, group string, method string, params interface{}) *rpc.JsonRpcResponse {
+	meta := rpc.MetaFromContext(ctx)
+	tenantID := tenantIDFromRPCMeta(meta)
+
 	// 检查私有站点
-	PrivateSite, _ := config.GetAs[bool](config.PrivateSiteKey)
+	PrivateSite, _ := config.GetAsForTenant[bool](tenantID, config.PrivateSiteKey, false)
 
 	if PrivateSite && group == "guest" {
 		return rpc.ErrorResponse(nil, rpc.PermissionDenied, "Private site enabled, please login first", nil)
@@ -57,7 +61,10 @@ func OnInternalRequest(ctx context.Context, group string, method string, params 
 	}
 
 	// 构建 context meta
-	meta := &rpc.ContextMeta{Permission: group}
+	if meta == nil {
+		meta = &rpc.ContextMeta{}
+	}
+	meta.Permission = group
 	return rpc.CallWithContext(rpc.NewContextWithMeta(ctx, meta), nil, method, params)
 }
 
@@ -195,16 +202,48 @@ func buildContextMeta(c *gin.Context, permissionGroup string) *rpc.ContextMeta {
 		}
 	}
 	if token != "" {
-		if uuid, err := clients.GetClientUUIDByToken(token); err == nil {
+		if client, err := clients.GetClientByToken(token); err == nil {
 			meta.ClientToken = token
-			meta.ClientUUID = uuid
+			meta.ClientUUID = client.UUID
+			meta.TenantID = client.TenantID
 		}
 	}
 	// 提取用户 (session cookie)
 	if session_token, _ := c.Cookie("session_token"); session_token != "" {
-		if user, err := accounts.GetUserBySession(session_token); err == nil {
+		if sessionRecord, err := accounts.GetSessionRecord(session_token); err == nil {
+			if user, userErr := accounts.GetUserByUUID(sessionRecord.UUID); userErr == nil {
+				meta.User = &user
+				meta.UserUUID = user.UUID
+				if currentTenant, _, tenantErr := database.ResolveAccessibleTenant(user.UUID, sessionRecord.CurrentTenantID); tenantErr == nil && currentTenant != nil {
+					meta.TenantID = currentTenant.ID
+					meta.TenantRole = currentTenant.Role
+					if currentTenant.ID != sessionRecord.CurrentTenantID {
+						_ = accounts.SetSessionCurrentTenant(session_token, currentTenant.ID)
+					}
+				}
+			}
+		} else if user, err := accounts.GetUserBySession(session_token); err == nil {
 			meta.User = &user
 			meta.UserUUID = user.UUID
+		}
+	}
+	if meta.TenantID == "" {
+		for _, candidate := range []string{
+			strings.TrimSpace(c.GetHeader("X-Komari-Tenant")),
+			strings.TrimSpace(c.Query("tenant")),
+		} {
+			if candidate == "" {
+				continue
+			}
+			if tenant, err := database.GetTenantByIdentifier(candidate); err == nil {
+				meta.TenantID = tenant.ID
+				break
+			}
+		}
+	}
+	if meta.TenantID == "" {
+		if tenantID, err := database.GetDefaultTenantID(); err == nil {
+			meta.TenantID = tenantID
 		}
 	}
 	meta.RemoteIP = c.ClientIP()

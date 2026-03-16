@@ -7,7 +7,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	"github.com/komari-monitor/komari/api"
-	"github.com/komari-monitor/komari/database/auditlog"
+	"github.com/komari-monitor/komari/database/clients"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/database/tasks"
 	"github.com/komari-monitor/komari/utils"
@@ -18,6 +18,11 @@ import (
 // - command: string
 // - clients: []string (客户端 UUID 列表)
 func Exec(c *gin.Context) {
+	tenantID, ok := requireCurrentTenantID(c)
+	if !ok {
+		return
+	}
+
 	var req struct {
 		Command string   `json:"command" binding:"required"`
 		Clients []string `json:"clients" binding:"required"`
@@ -26,6 +31,11 @@ func Exec(c *gin.Context) {
 	var offlineClients []string
 	if err := c.ShouldBindJSON(&req); err != nil {
 		api.RespondError(c, 400, "Invalid or missing request body: "+err.Error())
+		return
+	}
+	normalizedClients, err := clients.NormalizeClientUUIDsForTenant(tenantID, req.Clients)
+	if err != nil {
+		api.RespondError(c, 400, err.Error())
 		return
 	}
 	// for uuid := range ws.GetConnectedClients() {
@@ -37,7 +47,7 @@ func Exec(c *gin.Context) {
 	// 	// 	return
 	// 	// }
 	// }
-	for _, uuid := range req.Clients {
+	for _, uuid := range normalizedClients {
 		if client := ws.GetConnectedClients()[uuid]; client != nil {
 			onlineClients = append(onlineClients, uuid)
 		} else {
@@ -49,7 +59,7 @@ func Exec(c *gin.Context) {
 		return
 	}
 	taskId := utils.GenerateRandomString(16)
-	if err := tasks.CreateTask(taskId, append(onlineClients, offlineClients...)); err != nil {
+	if err := tasks.CreateTaskForTenant(tenantID, taskId, append(onlineClients, offlineClients...)); err != nil {
 		api.RespondError(c, 500, "Failed to create task: "+err.Error())
 		return
 	}
@@ -76,14 +86,14 @@ func Exec(c *gin.Context) {
 		}
 	}
 	uuid, _ := c.Get("uuid")
-	auditlog.Log(c.ClientIP(), uuid.(string), "REC, task id: "+taskId, "warn")
+	api.AuditLogForCurrentTenant(c, uuid.(string), "REC, task id: "+taskId, "warn")
 	api.RespondSuccess(c, gin.H{
 		"task_id": taskId,
 		"clients": onlineClients,
 	})
 	if len(offlineClients) > 0 {
 		for _, uuid := range offlineClients {
-			tasks.SaveTaskResult(taskId, uuid, "Client offline!", -1, models.FromTime(time.Now()))
+			tasks.SaveTaskResultForTenant(tenantID, taskId, uuid, "Client offline!", -1, models.FromTime(time.Now()))
 		}
 	}
 }

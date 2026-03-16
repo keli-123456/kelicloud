@@ -58,7 +58,12 @@ type awsAccountView struct {
 }
 
 func GetAWSCredentials(c *gin.Context) {
-	_, addition, err := loadAWSAddition(true)
+	tenantID, ok := requireCurrentTenantID(c)
+	if !ok {
+		return
+	}
+
+	_, addition, err := loadAWSAddition(tenantID, true)
 	if err != nil {
 		api.RespondError(c, http.StatusBadRequest, err.Error())
 		return
@@ -68,6 +73,11 @@ func GetAWSCredentials(c *gin.Context) {
 }
 
 func SaveAWSCredentials(c *gin.Context) {
+	tenantID, ok := requireCurrentTenantID(c)
+	if !ok {
+		return
+	}
+
 	var payload struct {
 		Credentials        []awscloud.CredentialImport `json:"credentials"`
 		ActiveCredentialID string                      `json:"active_credential_id"`
@@ -83,7 +93,7 @@ func SaveAWSCredentials(c *gin.Context) {
 		return
 	}
 
-	_, addition, err := loadAWSAddition(true)
+	_, addition, err := loadAWSAddition(tenantID, true)
 	if err != nil {
 		api.RespondError(c, http.StatusBadRequest, err.Error())
 		return
@@ -105,7 +115,7 @@ func SaveAWSCredentials(c *gin.Context) {
 		addition.SetActiveRegion(payload.ActiveRegion)
 	}
 
-	if err := saveAWSAddition(addition); err != nil {
+	if err := saveAWSAddition(tenantID, addition); err != nil {
 		api.RespondError(c, http.StatusInternalServerError, "Failed to save AWS credentials: "+err.Error())
 		return
 	}
@@ -115,6 +125,11 @@ func SaveAWSCredentials(c *gin.Context) {
 }
 
 func SetAWSActiveCredential(c *gin.Context) {
+	tenantID, ok := requireCurrentTenantID(c)
+	if !ok {
+		return
+	}
+
 	var payload struct {
 		CredentialID string `json:"credential_id" binding:"required"`
 	}
@@ -123,7 +138,7 @@ func SetAWSActiveCredential(c *gin.Context) {
 		return
 	}
 
-	_, addition, err := loadAWSAddition(false)
+	_, addition, err := loadAWSAddition(tenantID, false)
 	if err != nil {
 		api.RespondError(c, http.StatusBadRequest, err.Error())
 		return
@@ -134,7 +149,7 @@ func SetAWSActiveCredential(c *gin.Context) {
 		return
 	}
 
-	if err := saveAWSAddition(addition); err != nil {
+	if err := saveAWSAddition(tenantID, addition); err != nil {
 		api.RespondError(c, http.StatusInternalServerError, "Failed to update active credential: "+err.Error())
 		return
 	}
@@ -144,6 +159,11 @@ func SetAWSActiveCredential(c *gin.Context) {
 }
 
 func SetAWSActiveRegion(c *gin.Context) {
+	tenantID, ok := requireCurrentTenantID(c)
+	if !ok {
+		return
+	}
+
 	var payload struct {
 		Region string `json:"region" binding:"required"`
 	}
@@ -152,14 +172,14 @@ func SetAWSActiveRegion(c *gin.Context) {
 		return
 	}
 
-	_, addition, err := loadAWSAddition(false)
+	_, addition, err := loadAWSAddition(tenantID, false)
 	if err != nil {
 		api.RespondError(c, http.StatusBadRequest, err.Error())
 		return
 	}
 
 	addition.SetActiveRegion(payload.Region)
-	if err := saveAWSAddition(addition); err != nil {
+	if err := saveAWSAddition(tenantID, addition); err != nil {
 		api.RespondError(c, http.StatusInternalServerError, "Failed to update active region: "+err.Error())
 		return
 	}
@@ -169,6 +189,11 @@ func SetAWSActiveRegion(c *gin.Context) {
 }
 
 func CheckAWSCredentials(c *gin.Context) {
+	tenantID, ok := requireCurrentTenantID(c)
+	if !ok {
+		return
+	}
+
 	var payload struct {
 		CredentialIDs []string `json:"credential_ids"`
 	}
@@ -179,7 +204,7 @@ func CheckAWSCredentials(c *gin.Context) {
 		}
 	}
 
-	_, addition, err := loadAWSAddition(false)
+	_, addition, err := loadAWSAddition(tenantID, false)
 	if err != nil {
 		api.RespondError(c, http.StatusBadRequest, err.Error())
 		return
@@ -238,7 +263,7 @@ func CheckAWSCredentials(c *gin.Context) {
 
 	wg.Wait()
 
-	if err := saveAWSAddition(addition); err != nil {
+	if err := saveAWSAddition(tenantID, addition); err != nil {
 		api.RespondError(c, http.StatusInternalServerError, "Failed to save credential health: "+err.Error())
 		return
 	}
@@ -248,13 +273,18 @@ func CheckAWSCredentials(c *gin.Context) {
 }
 
 func DeleteAWSCredential(c *gin.Context) {
+	tenantID, ok := requireCurrentTenantID(c)
+	if !ok {
+		return
+	}
+
 	credentialID := strings.TrimSpace(c.Param("id"))
 	if credentialID == "" {
 		api.RespondError(c, http.StatusBadRequest, "Invalid credential id")
 		return
 	}
 
-	_, addition, err := loadAWSAddition(false)
+	_, addition, err := loadAWSAddition(tenantID, false)
 	if err != nil {
 		api.RespondError(c, http.StatusBadRequest, err.Error())
 		return
@@ -265,7 +295,7 @@ func DeleteAWSCredential(c *gin.Context) {
 		return
 	}
 
-	if err := saveAWSAddition(addition); err != nil {
+	if err := saveAWSAddition(tenantID, addition); err != nil {
 		api.RespondError(c, http.StatusInternalServerError, "Failed to delete credential: "+err.Error())
 		return
 	}
@@ -275,13 +305,18 @@ func DeleteAWSCredential(c *gin.Context) {
 }
 
 func GetAWSCredentialSecret(c *gin.Context) {
+	tenantID, ok := requireCurrentTenantID(c)
+	if !ok {
+		return
+	}
+
 	credentialID := strings.TrimSpace(c.Param("id"))
 	if credentialID == "" {
 		api.RespondError(c, http.StatusBadRequest, "Invalid credential id")
 		return
 	}
 
-	_, addition, err := loadAWSAddition(false)
+	_, addition, err := loadAWSAddition(tenantID, false)
 	if err != nil {
 		api.RespondError(c, http.StatusBadRequest, err.Error())
 		return
@@ -297,7 +332,12 @@ func GetAWSCredentialSecret(c *gin.Context) {
 }
 
 func GetAWSAccount(c *gin.Context) {
-	addition, credential, region, ctx, cancel, err := getAWSActiveCredential(c)
+	tenantID, ok := requireCurrentTenantID(c)
+	if !ok {
+		return
+	}
+
+	addition, credential, region, ctx, cancel, err := getAWSActiveCredential(c, tenantID)
 	if err != nil {
 		respondAWSError(c, err)
 		return
@@ -314,7 +354,7 @@ func GetAWSAccount(c *gin.Context) {
 
 	if identity != nil {
 		credential.SetCheckResult(time.Now(), identity, quota, quotaErr, nil)
-		_ = saveAWSAddition(addition)
+		_ = saveAWSAddition(tenantID, addition)
 	}
 
 	api.RespondSuccess(c, awsAccountView{
@@ -328,7 +368,12 @@ func GetAWSAccount(c *gin.Context) {
 }
 
 func GetAWSCatalog(c *gin.Context) {
-	_, credential, region, ctx, cancel, err := getAWSActiveCredential(c)
+	tenantID, ok := requireCurrentTenantID(c)
+	if !ok {
+		return
+	}
+
+	_, credential, region, ctx, cancel, err := getAWSActiveCredential(c, tenantID)
 	if err != nil {
 		respondAWSError(c, err)
 		return
@@ -406,7 +451,12 @@ func GetAWSCatalog(c *gin.Context) {
 }
 
 func GetAWSInstanceDetail(c *gin.Context) {
-	_, credential, region, ctx, cancel, err := getAWSActiveCredential(c)
+	tenantID, ok := requireCurrentTenantID(c)
+	if !ok {
+		return
+	}
+
+	_, credential, region, ctx, cancel, err := getAWSActiveCredential(c, tenantID)
 	if err != nil {
 		respondAWSError(c, err)
 		return
@@ -429,7 +479,12 @@ func GetAWSInstanceDetail(c *gin.Context) {
 }
 
 func GetAWSLightsailCatalog(c *gin.Context) {
-	_, credential, region, ctx, cancel, err := getAWSActiveCredential(c)
+	tenantID, ok := requireCurrentTenantID(c)
+	if !ok {
+		return
+	}
+
+	_, credential, region, ctx, cancel, err := getAWSActiveCredential(c, tenantID)
 	if err != nil {
 		respondAWSError(c, err)
 		return
@@ -489,7 +544,12 @@ func GetAWSLightsailCatalog(c *gin.Context) {
 }
 
 func ListAWSLightsailInstances(c *gin.Context) {
-	_, credential, region, ctx, cancel, err := getAWSActiveCredential(c)
+	tenantID, ok := requireCurrentTenantID(c)
+	if !ok {
+		return
+	}
+
+	_, credential, region, ctx, cancel, err := getAWSActiveCredential(c, tenantID)
 	if err != nil {
 		respondAWSError(c, err)
 		return
@@ -509,7 +569,12 @@ func ListAWSLightsailInstances(c *gin.Context) {
 }
 
 func GetAWSLightsailInstanceDetail(c *gin.Context) {
-	_, credential, region, ctx, cancel, err := getAWSActiveCredential(c)
+	tenantID, ok := requireCurrentTenantID(c)
+	if !ok {
+		return
+	}
+
+	_, credential, region, ctx, cancel, err := getAWSActiveCredential(c, tenantID)
 	if err != nil {
 		respondAWSError(c, err)
 		return
@@ -532,7 +597,12 @@ func GetAWSLightsailInstanceDetail(c *gin.Context) {
 }
 
 func ListAWSInstances(c *gin.Context) {
-	_, credential, region, ctx, cancel, err := getAWSActiveCredential(c)
+	tenantID, ok := requireCurrentTenantID(c)
+	if !ok {
+		return
+	}
+
+	_, credential, region, ctx, cancel, err := getAWSActiveCredential(c, tenantID)
 	if err != nil {
 		respondAWSError(c, err)
 		return
@@ -552,7 +622,12 @@ func ListAWSInstances(c *gin.Context) {
 }
 
 func CreateAWSInstance(c *gin.Context) {
-	_, credential, region, ctx, cancel, err := getAWSActiveCredential(c)
+	tenantID, ok := requireCurrentTenantID(c)
+	if !ok {
+		return
+	}
+
+	_, credential, region, ctx, cancel, err := getAWSActiveCredential(c, tenantID)
 	if err != nil {
 		respondAWSError(c, err)
 		return
@@ -611,7 +686,12 @@ func CreateAWSInstance(c *gin.Context) {
 }
 
 func CreateAWSLightsailInstance(c *gin.Context) {
-	_, credential, region, ctx, cancel, err := getAWSActiveCredential(c)
+	tenantID, ok := requireCurrentTenantID(c)
+	if !ok {
+		return
+	}
+
+	_, credential, region, ctx, cancel, err := getAWSActiveCredential(c, tenantID)
 	if err != nil {
 		respondAWSError(c, err)
 		return
@@ -669,7 +749,12 @@ func CreateAWSLightsailInstance(c *gin.Context) {
 }
 
 func DeleteAWSInstance(c *gin.Context) {
-	_, credential, region, ctx, cancel, err := getAWSActiveCredential(c)
+	tenantID, ok := requireCurrentTenantID(c)
+	if !ok {
+		return
+	}
+
+	_, credential, region, ctx, cancel, err := getAWSActiveCredential(c, tenantID)
 	if err != nil {
 		respondAWSError(c, err)
 		return
@@ -692,7 +777,12 @@ func DeleteAWSInstance(c *gin.Context) {
 }
 
 func DeleteAWSLightsailInstance(c *gin.Context) {
-	_, credential, region, ctx, cancel, err := getAWSActiveCredential(c)
+	tenantID, ok := requireCurrentTenantID(c)
+	if !ok {
+		return
+	}
+
+	_, credential, region, ctx, cancel, err := getAWSActiveCredential(c, tenantID)
 	if err != nil {
 		respondAWSError(c, err)
 		return
@@ -715,7 +805,12 @@ func DeleteAWSLightsailInstance(c *gin.Context) {
 }
 
 func PostAWSInstanceAction(c *gin.Context) {
-	_, credential, region, ctx, cancel, err := getAWSActiveCredential(c)
+	tenantID, ok := requireCurrentTenantID(c)
+	if !ok {
+		return
+	}
+
+	_, credential, region, ctx, cancel, err := getAWSActiveCredential(c, tenantID)
 	if err != nil {
 		respondAWSError(c, err)
 		return
@@ -820,7 +915,12 @@ func PostAWSInstanceAction(c *gin.Context) {
 }
 
 func PostAWSLightsailInstanceAction(c *gin.Context) {
-	_, credential, region, ctx, cancel, err := getAWSActiveCredential(c)
+	tenantID, ok := requireCurrentTenantID(c)
+	if !ok {
+		return
+	}
+
+	_, credential, region, ctx, cancel, err := getAWSActiveCredential(c, tenantID)
 	if err != nil {
 		respondAWSError(c, err)
 		return
@@ -901,8 +1001,8 @@ func PostAWSLightsailInstanceAction(c *gin.Context) {
 	api.RespondSuccess(c, response)
 }
 
-func getAWSActiveCredential(c *gin.Context) (*awscloud.Addition, *awscloud.CredentialRecord, string, context.Context, context.CancelFunc, error) {
-	_, addition, err := loadAWSAddition(false)
+func getAWSActiveCredential(c *gin.Context, tenantID string) (*awscloud.Addition, *awscloud.CredentialRecord, string, context.Context, context.CancelFunc, error) {
+	_, addition, err := loadAWSAddition(tenantID, false)
 	if err != nil {
 		return nil, nil, "", nil, nil, err
 	}
@@ -952,8 +1052,8 @@ func errorString(err error) string {
 	return err.Error()
 }
 
-func loadAWSAddition(allowMissing bool) (*models.CloudProvider, *awscloud.Addition, error) {
-	config, err := database.GetCloudProviderConfigByName(awsProviderName)
+func loadAWSAddition(tenantID string, allowMissing bool) (*models.CloudProvider, *awscloud.Addition, error) {
+	config, err := database.GetCloudProviderConfigByTenantAndName(tenantID, awsProviderName)
 	if err != nil {
 		if allowMissing {
 			addition := &awscloud.Addition{}
@@ -976,7 +1076,7 @@ func loadAWSAddition(allowMissing bool) (*models.CloudProvider, *awscloud.Additi
 	return config, addition, nil
 }
 
-func saveAWSAddition(addition *awscloud.Addition) error {
+func saveAWSAddition(tenantID string, addition *awscloud.Addition) error {
 	if addition == nil {
 		addition = &awscloud.Addition{}
 	}
@@ -987,7 +1087,8 @@ func saveAWSAddition(addition *awscloud.Addition) error {
 		return err
 	}
 
-	return database.SaveCloudProviderConfig(&models.CloudProvider{
+	return database.SaveCloudProviderConfigForTenant(&models.CloudProvider{
+		TenantID: tenantID,
 		Name:     awsProviderName,
 		Addition: string(payload),
 	})

@@ -4,9 +4,11 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"testing"
 
 	"github.com/gin-gonic/gin"
+	"github.com/komari-monitor/komari/cmd/flags"
 	"github.com/komari-monitor/komari/database/accounts"
 	"github.com/stretchr/testify/assert"
 )
@@ -14,6 +16,8 @@ import (
 func TestGetMe(t *testing.T) {
 	// 设置测试模式
 	gin.SetMode(gin.TestMode)
+	flags.DatabaseType = "sqlite"
+	flags.DatabaseFile = filepath.Join(t.TempDir(), "komari-test.db")
 
 	// 创建测试用户
 	user, err := accounts.CreateAccount("testuser", "password")
@@ -27,31 +31,29 @@ func TestGetMe(t *testing.T) {
 		name           string
 		sessionToken   string
 		expectedStatus int
-		expectedBody   map[string]interface{}
+		expectedName   string
+		expectedLogin  bool
 	}{
 		{
 			name:           "有效的会话",
 			sessionToken:   sessionToken,
 			expectedStatus: http.StatusOK,
-			expectedBody: map[string]interface{}{
-				"username": "testuser",
-			},
+			expectedName:   "testuser",
+			expectedLogin:  true,
 		},
 		{
 			name:           "无效的会话",
 			sessionToken:   "invalid_token",
 			expectedStatus: http.StatusOK,
-			expectedBody: map[string]interface{}{
-				"username": "Guest",
-			},
+			expectedName:   "Guest",
+			expectedLogin:  false,
 		},
 		{
 			name:           "无会话",
 			sessionToken:   "",
 			expectedStatus: http.StatusOK,
-			expectedBody: map[string]interface{}{
-				"username": "Guest",
-			},
+			expectedName:   "Guest",
+			expectedLogin:  false,
 		},
 	}
 
@@ -84,8 +86,14 @@ func TestGetMe(t *testing.T) {
 			err := json.Unmarshal(w.Body.Bytes(), &response)
 			assert.NoError(t, err)
 
-			// 断言响应体
-			assert.Equal(t, tt.expectedBody, response)
+			assert.Equal(t, tt.expectedName, response["username"])
+			assert.Equal(t, tt.expectedLogin, response["logged_in"])
+			_, hasTenants := response["tenants"]
+			assert.True(t, hasTenants)
+			if tt.expectedLogin {
+				_, hasCurrentTenant := response["current_tenant"]
+				assert.True(t, hasCurrentTenant)
+			}
 		})
 	}
 

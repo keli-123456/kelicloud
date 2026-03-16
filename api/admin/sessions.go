@@ -3,14 +3,14 @@ package admin
 import (
 	"github.com/komari-monitor/komari/api"
 	"github.com/komari-monitor/komari/database/accounts"
-	"github.com/komari-monitor/komari/database/auditlog"
 
 	"github.com/gin-gonic/gin"
 )
 
 func GetSessions(c *gin.Context) {
+	uuid, _ := c.Get("uuid")
 
-	ss, err := accounts.GetAllSessions()
+	ss, err := accounts.GetSessionsByUser(uuid.(string))
 	if err != nil {
 		api.RespondError(c, 500, "Failed to retrieve sessions: "+err.Error())
 		return
@@ -27,24 +27,23 @@ func DeleteSession(c *gin.Context) {
 		api.RespondError(c, 400, "Invalid request: "+err.Error())
 		return
 	}
-	err := accounts.DeleteSession(req.Session)
+	uuid, _ := c.Get("uuid")
+	err := accounts.DeleteSessionByUser(uuid.(string), req.Session)
 	if err != nil {
 		api.RespondError(c, 500, "Failed to delete session: "+err.Error())
 		return
 	}
-	uuid, _ := c.Get("uuid")
-	auditlog.Log(c.ClientIP(), uuid.(string), "delete session", "info")
+	api.AuditLogForCurrentTenant(c, uuid.(string), "delete session", "info")
 	api.RespondSuccess(c, nil)
 }
 
 func DeleteAllSession(c *gin.Context) {
-
-	err := accounts.DeleteAllSessions()
+	uuid, _ := c.Get("uuid")
+	err := accounts.DeleteAllSessionsByUser(uuid.(string))
 	if err != nil {
 		api.RespondError(c, 500, "Failed to delete all sessions: "+err.Error())
 		return
 	}
-	uuid, _ := c.Get("uuid")
-	auditlog.Log(c.ClientIP(), uuid.(string), "delete all sessions", "warn")
+	api.AuditLogForCurrentTenant(c, uuid.(string), "delete all sessions", "warn")
 	api.RespondSuccess(c, nil)
 }

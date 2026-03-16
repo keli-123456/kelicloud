@@ -92,7 +92,7 @@ func migrateInPlace() {
 		}
 	}
 
-	if err := db.AutoMigrate(&ConfigItem{}); err != nil {
+	if err := db.AutoMigrate(&ConfigItem{}, &TenantConfigItem{}); err != nil {
 		panic("failed " + err.Error())
 	}
 }

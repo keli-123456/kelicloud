@@ -23,6 +23,11 @@ type upsertCloudInstanceSharePayload struct {
 }
 
 func GetCloudInstanceShare(c *gin.Context) {
+	tenantID, ok := requireCurrentTenantID(c)
+	if !ok {
+		return
+	}
+
 	provider, resourceType, resourceID, err := cloudshare.NormalizeReference(
 		c.Param("provider"),
 		c.Param("resource_type"),
@@ -33,13 +38,13 @@ func GetCloudInstanceShare(c *gin.Context) {
 		return
 	}
 
-	state, err := cloudshare.ResolveActiveResource(provider, resourceType, resourceID)
+	state, err := cloudshare.ResolveActiveResourceForTenant(tenantID, provider, resourceType, resourceID)
 	if err != nil {
 		respondCloudShareError(c, err)
 		return
 	}
 
-	share, err := database.GetCloudInstanceShare(provider, resourceType, resourceID)
+	share, err := database.GetCloudInstanceShareByTenant(tenantID, provider, resourceType, resourceID)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			api.RespondSuccess(c, cloudshare.BuildAdminShareView(nil, state))
@@ -53,6 +58,11 @@ func GetCloudInstanceShare(c *gin.Context) {
 }
 
 func UpsertCloudInstanceShare(c *gin.Context) {
+	tenantID, ok := requireCurrentTenantID(c)
+	if !ok {
+		return
+	}
+
 	provider, resourceType, resourceID, err := cloudshare.NormalizeReference(
 		c.Param("provider"),
 		c.Param("resource_type"),
@@ -69,7 +79,7 @@ func UpsertCloudInstanceShare(c *gin.Context) {
 		return
 	}
 
-	state, err := cloudshare.ResolveActiveResource(provider, resourceType, resourceID)
+	state, err := cloudshare.ResolveActiveResourceForTenant(tenantID, provider, resourceType, resourceID)
 	if err != nil {
 		respondCloudShareError(c, err)
 		return
@@ -84,13 +94,14 @@ func UpsertCloudInstanceShare(c *gin.Context) {
 		return
 	}
 
-	share, err := database.GetCloudInstanceShare(provider, resourceType, resourceID)
+	share, err := database.GetCloudInstanceShareByTenant(tenantID, provider, resourceType, resourceID)
 	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 		api.RespondError(c, http.StatusInternalServerError, "Failed to load cloud instance share: "+err.Error())
 		return
 	}
 	if errors.Is(err, gorm.ErrRecordNotFound) || share == nil {
 		share = &models.CloudInstanceShare{
+			TenantID:     tenantID,
 			ShareToken:   uuid.NewString(),
 			Provider:     provider,
 			ResourceType: resourceType,
@@ -98,6 +109,7 @@ func UpsertCloudInstanceShare(c *gin.Context) {
 		}
 	}
 
+	share.TenantID = tenantID
 	share.Provider = provider
 	share.ResourceType = resourceType
 	share.ResourceID = resourceID
@@ -119,6 +131,11 @@ func UpsertCloudInstanceShare(c *gin.Context) {
 }
 
 func DeleteCloudInstanceShare(c *gin.Context) {
+	tenantID, ok := requireCurrentTenantID(c)
+	if !ok {
+		return
+	}
+
 	provider, resourceType, resourceID, err := cloudshare.NormalizeReference(
 		c.Param("provider"),
 		c.Param("resource_type"),
@@ -129,7 +146,7 @@ func DeleteCloudInstanceShare(c *gin.Context) {
 		return
 	}
 
-	share, err := database.GetCloudInstanceShare(provider, resourceType, resourceID)
+	share, err := database.GetCloudInstanceShareByTenant(tenantID, provider, resourceType, resourceID)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			api.RespondSuccess(c, nil)

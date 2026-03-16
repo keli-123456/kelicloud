@@ -15,7 +15,6 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/komari-monitor/komari/api"
 	"github.com/komari-monitor/komari/common"
-	"github.com/komari-monitor/komari/database/clients"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/database/tasks"
 	"github.com/komari-monitor/komari/utils/notifier"
@@ -119,15 +118,14 @@ func UploadReport(c *gin.Context) {
 	}
 	report.UpdatedAt = time.Now()
 
-	// 优先使用 body 中的 UUID，若为空则从中间件注入的上下文中获取
-	uuid := report.UUID
-	if uuid == "" {
-		if v, ok := c.Get("client_uuid"); ok {
-			uuid, _ = v.(string)
-		}
-	}
-	if uuid == "" {
+	uuidValue, ok := c.Get("client_uuid")
+	uuid, _ := uuidValue.(string)
+	if !ok || uuid == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "UUID is required"})
+		return
+	}
+	if report.UUID != "" && report.UUID != uuid {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "UUID does not match token"})
 		return
 	}
 	report.UUID = uuid
@@ -181,22 +179,10 @@ func WebSocketReport(c *gin.Context) {
 		conn.WriteJSON(gin.H{"status": "error", "error": "Invalid JSON"})
 		return
 	}
-	// it should ok,token was verfied in the middleware
-	token := ""
-	var errMsg string
-
-	// 优先检查查询参数中的 token
-	token = c.Query("token")
-
-	// 如果 token 为空，返回错误
-	if token == "" {
-		conn.WriteJSON(gin.H{"status": "error", "error": errMsg})
-		return
-	}
-
-	uuid, err := clients.GetClientUUIDByToken(token)
-	if err != nil {
-		conn.WriteJSON(gin.H{"status": "error", "error": errMsg})
+	uuidValue, ok := c.Get("client_uuid")
+	uuid, _ := uuidValue.(string)
+	if !ok || uuid == "" {
+		conn.WriteJSON(gin.H{"status": "error", "error": "invalid token"})
 		return
 	}
 

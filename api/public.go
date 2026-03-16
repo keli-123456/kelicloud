@@ -9,7 +9,13 @@ import (
 )
 
 func GetPublicSettings(c *gin.Context) {
-	p, e := database.GetPublicInfo()
+	tenantID, _, resolveErr := ResolveTenantScopeFromSession(c)
+	if resolveErr != nil {
+		RespondError(c, 500, resolveErr.Error())
+		return
+	}
+
+	p, e := database.GetPublicInfo(tenantID)
 	if e != nil {
 		RespondError(c, 500, e.Error())
 		return
@@ -21,11 +27,11 @@ func GetPublicSettings(c *gin.Context) {
 			return false
 		}
 
-		tempKeyExpireTime, err := config.GetAs[int64]("tempory_share_token_expire_at", 0)
+		tempKeyExpireTime, err := config.GetAsForTenant[int64](tenantID, config.TempShareTokenExpireAtKey, 0)
 		if err != nil {
 			return false
 		}
-		allowTempKey, err := config.GetAs[string]("tempory_share_token", "")
+		allowTempKey, err := config.GetAsForTenant[string](tenantID, config.TempShareTokenKey, "")
 		if err != nil {
 			return false
 		}

@@ -5,8 +5,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/api"
-	"github.com/komari-monitor/komari/database/dbcore"
-	"github.com/komari-monitor/komari/database/models"
+	"github.com/komari-monitor/komari/database/auditlog"
 )
 
 func GetLogs(c *gin.Context) {
@@ -30,18 +29,17 @@ func GetLogs(c *gin.Context) {
 		api.RespondError(c, 400, "Invalid page: "+page)
 		return
 	}
-	db := dbcore.GetDBInstance()
-	var logs []models.Log
+	tenantValue, ok := c.Get("tenant_id")
+	tenantID, _ := tenantValue.(string)
+	if !ok || tenantID == "" {
+		api.RespondError(c, 403, "Tenant context is required")
+		return
+	}
 	// 添加分页：计算偏移量并限制数量
 	offset := (pageInt - 1) * limitInt
 
-	var total int64
-	if err := db.Model(&models.Log{}).Count(&total).Error; err != nil {
-		api.RespondError(c, 500, "Failed to count logs: "+err.Error())
-		return
-	}
-
-	if err := db.Order("time desc").Limit(limitInt).Offset(offset).Find(&logs).Error; err != nil {
+	logs, total, err := auditlog.ListLogsByTenant(tenantID, limitInt, offset)
+	if err != nil {
 		api.RespondError(c, 500, "Failed to retrieve logs: "+err.Error())
 		return
 	}

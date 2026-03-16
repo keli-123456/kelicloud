@@ -23,6 +23,8 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/api/jsonRpc"
 	conf "github.com/komari-monitor/komari/config"
+	"github.com/komari-monitor/komari/database"
+	"github.com/komari-monitor/komari/database/accounts"
 	"github.com/komari-monitor/komari/database/models"
 	"golang.org/x/image/font"
 	"golang.org/x/image/font/basicfont"
@@ -468,24 +470,43 @@ func MjpegLiveHandler(c *gin.Context) {
 	c.Header("Connection", "keep-alive")
 
 	ctx := c.Request.Context()
+	tenantID := ""
+	for _, candidate := range []string{
+		strings.TrimSpace(c.GetHeader("X-Komari-Tenant")),
+		strings.TrimSpace(c.Query("tenant")),
+	} {
+		if candidate == "" {
+			continue
+		}
+		if tenant, tenantErr := database.GetTenantByIdentifier(candidate); tenantErr == nil {
+			tenantID = tenant.ID
+			break
+		}
+	}
+	if tenantID == "" {
+		sessionToken, _ := c.Cookie("session_token")
+		if resolvedTenantID, _, err := accounts.ResolveTenantScope(sessionToken); err == nil {
+			tenantID = resolvedTenantID
+		}
+	}
 	ticker := time.NewTicker(refreshInterval)
 	defer ticker.Stop()
 
 	// 立即发送第一帧
-	sendFrame(c.Writer, ctx, lang, tzOffset)
+	sendFrame(c.Writer, ctx, tenantID, lang, tzOffset)
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			sendFrame(c.Writer, ctx, lang, tzOffset)
+			sendFrame(c.Writer, ctx, tenantID, lang, tzOffset)
 		}
 	}
 }
 
-func sendFrame(w http.ResponseWriter, ctx context.Context, lang string, tzOffset *int) {
-	img := renderFrame(ctx, lang, tzOffset)
+func sendFrame(w http.ResponseWriter, ctx context.Context, tenantID, lang string, tzOffset *int) {
+	img := renderFrame(ctx, tenantID, lang, tzOffset)
 	var buf bytes.Buffer
 	if err := jpeg.Encode(&buf, img, &jpeg.Options{Quality: 90}); err != nil {
 		return
@@ -502,7 +523,7 @@ func sendFrame(w http.ResponseWriter, ctx context.Context, lang string, tzOffset
 	}
 }
 
-func renderFrame(ctx context.Context, lang string, tzOffset *int) *image.RGBA {
+func renderFrame(ctx context.Context, tenantID, lang string, tzOffset *int) *image.RGBA {
 	fontMutex.RLock()
 	ready := fontReady
 	ferr := fontError
@@ -520,12 +541,12 @@ func renderFrame(ctx context.Context, lang string, tzOffset *int) *image.RGBA {
 		}
 		// 如果下载失败且不在下载中，尝试使用基础字体渲染
 		if ferr != nil {
-			return renderStatusTableWithBasicFont(ctx, lang, tzOffset, ferr)
+			return renderStatusTableWithBasicFont(ctx, tenantID, lang, tzOffset, ferr)
 		}
 		return renderError(ferr)
 	}
 
-	return renderStatusTable(ctx, lang, tzOffset, ferr)
+	return renderStatusTable(ctx, tenantID, lang, tzOffset, ferr)
 }
 
 // renderDownloadProgress 渲染下载进度（使用基础字体）
@@ -629,7 +650,7 @@ type NodeStatus struct {
 }
 
 // renderStatusTable 渲染状态表格
-func renderStatusTable(ctx context.Context, lang string, tzOffset *int, fontErr error) *image.RGBA {
+func renderStatusTable(ctx context.Context, tenantID, lang string, tzOffset *int, fontErr error) *image.RGBA {
 	lp := getLangPack(lang)
 
 	// 获取节点数据
@@ -665,7 +686,7 @@ func renderStatusTable(ctx context.Context, lang string, tzOffset *int, fontErr 
 	y := padding
 
 	// 标题
-	siteName, _ := conf.GetAs[string](conf.SitenameKey, "Komari Monitor")
+	siteName, _ := conf.GetAsForTenant[string](tenantID, conf.SitenameKey, "Komari Monitor")
 	fontMutex.RLock()
 	boldFace := fontFaceBold
 	normalFace := fontFace
@@ -797,7 +818,7 @@ func renderStatusTable(ctx context.Context, lang string, tzOffset *int, fontErr 
 }
 
 // renderStatusTableWithBasicFont 使用基础字体渲染状态表格（当自定义字体下载失败时）
-func renderStatusTableWithBasicFont(ctx context.Context, lang string, tzOffset *int, fontErr error) *image.RGBA {
+func renderStatusTableWithBasicFont(ctx context.Context, tenantID, lang string, tzOffset *int, fontErr error) *image.RGBA {
 	lp := getLangPack("en") // 基础字体只支持英文
 
 	// 获取节点数据
@@ -833,7 +854,7 @@ func renderStatusTableWithBasicFont(ctx context.Context, lang string, tzOffset *
 	y := padding
 
 	// 标题
-	siteName, _ := conf.GetAs[string](conf.SitenameKey, "Komari Monitor")
+	siteName, _ := conf.GetAsForTenant[string](tenantID, conf.SitenameKey, "Komari Monitor")
 
 	drawStringBasic(img, siteName, padding+5, y+titleFontSize, color.Black)
 	y += headerHeight

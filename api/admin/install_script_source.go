@@ -10,8 +10,8 @@ import (
 
 const defaultAgentInstallScriptBaseURL = "https://raw.githubusercontent.com/keli-123456/kelicloud-agent/refs/heads/main"
 
-func resolveAgentInstallScriptURL(scriptFile string) (string, error) {
-	baseScriptsURL, err := config.GetAs[string](config.BaseScriptsURLKey, "")
+func resolveAgentInstallScriptURL(tenantID, scriptFile string) (string, error) {
+	baseScriptsURL, err := config.GetAsForTenant[string](tenantID, config.BaseScriptsURLKey, "")
 	if err != nil {
 		return "", fmt.Errorf("failed to load base scripts url: %w", err)
 	}

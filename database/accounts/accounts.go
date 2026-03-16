@@ -7,6 +7,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/komari-monitor/komari/database"
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/utils"
@@ -67,6 +68,9 @@ func CreateAccount(username, passwd string) (user models.User, err error) {
 	if err != nil {
 		return models.User{}, err
 	}
+	if err := database.EnsureDefaultTenantMembership(user.UUID, database.RoleOwner); err != nil {
+		return models.User{}, err
+	}
 	return user, nil
 }
 
@@ -108,6 +112,9 @@ func CreateDefaultAdminAccount() (username, passwd string, err error) {
 	if err != nil {
 		return "", "", err
 	}
+	if err := database.EnsureDefaultTenantMembership(user.UUID, database.RoleOwner); err != nil {
+		return "", "", err
+	}
 
 	return username, passwd, nil
 }
@@ -115,6 +122,15 @@ func CreateDefaultAdminAccount() (username, passwd string, err error) {
 func GetUserByUUID(uuid string) (user models.User, err error) {
 	db := dbcore.GetDBInstance()
 	err = db.Where("uuid = ?", uuid).First(&user).Error
+	if err != nil {
+		return models.User{}, err
+	}
+	return user, nil
+}
+
+func GetUserByUsername(username string) (user models.User, err error) {
+	db := dbcore.GetDBInstance()
+	err = db.Where("username = ?", username).First(&user).Error
 	if err != nil {
 		return models.User{}, err
 	}
@@ -177,7 +193,7 @@ func UpdateUser(uuid string, name, password, sso_type *string) error {
 		return err
 	}
 	if password != nil {
-		DeleteAllSessions()
+		DeleteAllSessionsByUser(uuid)
 	}
 	return nil
 }

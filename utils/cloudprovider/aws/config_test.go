@@ -113,3 +113,26 @@ func TestAdditionUpsertCredentialsGeneratesUniqueDefaultNames(t *testing.T) {
 	require.Equal(t, "Credential 2", addition.Credentials[1].Name)
 	require.Equal(t, "Credential 3", addition.Credentials[2].Name)
 }
+
+func TestAdditionRemoveCredentialClearsLegacyCredentialWhenLastEntryDeleted(t *testing.T) {
+	addition := &Addition{
+		AccessKeyID:     "AKIALEGACY",
+		SecretAccessKey: "legacy-secret",
+		SessionToken:    "legacy-session",
+		DefaultRegion:   "us-east-1",
+	}
+
+	addition.Normalize()
+	require.Len(t, addition.Credentials, 1)
+
+	credentialID := addition.Credentials[0].ID
+	require.True(t, addition.RemoveCredential(credentialID))
+	require.Empty(t, addition.Credentials)
+	require.Empty(t, addition.ActiveCredentialID)
+	require.Empty(t, addition.AccessKeyID)
+	require.Empty(t, addition.SecretAccessKey)
+	require.Empty(t, addition.SessionToken)
+
+	addition.Normalize()
+	require.Empty(t, addition.Credentials)
+}

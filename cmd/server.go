@@ -218,10 +218,10 @@ func RunServer() {
 	// #region 管理员
 	adminAuthrized := r.Group("/api/admin", api.AdminAuthMiddleware())
 	{
-		adminAuthrized.GET("/download/backup", admin.DownloadBackup)
-		adminAuthrized.POST("/upload/backup", admin.UploadBackup)
+		adminAuthrized.GET("/download/backup", admin.RequirePlatformAdminMiddleware(), admin.DownloadBackup)
+		adminAuthrized.POST("/upload/backup", admin.RequirePlatformAdminMiddleware(), admin.UploadBackup)
 		// test
-		testGroup := adminAuthrized.Group("/test")
+		testGroup := adminAuthrized.Group("/test", admin.RequirePlatformAdminMiddleware())
 		{
 			testGroup.GET("/geoip", test.TestGeoIp)
 			testGroup.POST("/sendMessage", test.TestSendMessage)
@@ -229,10 +229,10 @@ func RunServer() {
 		// update
 		updateGroup := adminAuthrized.Group("/update")
 		{
-			updateGroup.POST("/mmdb", update.UpdateMmdbGeoIP)
+			updateGroup.POST("/mmdb", admin.RequirePlatformAdminMiddleware(), update.UpdateMmdbGeoIP)
 			updateGroup.POST("/user", update.UpdateUser)
-			updateGroup.PUT("/favicon", update.UploadFavicon)
-			updateGroup.POST("/favicon", update.DeleteFavicon)
+			updateGroup.PUT("/favicon", admin.RequirePlatformAdminMiddleware(), update.UploadFavicon)
+			updateGroup.POST("/favicon", admin.RequirePlatformAdminMiddleware(), update.DeleteFavicon)
 		}
 		// tasks
 		taskGroup := adminAuthrized.Group("/task")
@@ -249,10 +249,12 @@ func RunServer() {
 		{
 			settingsGroup.GET("/", admin.GetSettings)
 			settingsGroup.POST("/", admin.EditSettings)
-			settingsGroup.POST("/oidc", admin.SetOidcProvider)
-			settingsGroup.GET("/oidc", admin.GetOidcProvider)
-			settingsGroup.POST("/message-sender", admin.SetMessageSenderProvider)
-			settingsGroup.GET("/message-sender", admin.GetMessageSenderProvider)
+			settingsGroup.GET("/system", admin.RequirePlatformAdminMiddleware(), admin.GetSystemSettings)
+			settingsGroup.POST("/system", admin.RequirePlatformAdminMiddleware(), admin.EditSystemSettings)
+			settingsGroup.POST("/oidc", admin.RequirePlatformAdminMiddleware(), admin.SetOidcProvider)
+			settingsGroup.GET("/oidc", admin.RequirePlatformAdminMiddleware(), admin.GetOidcProvider)
+			settingsGroup.POST("/message-sender", admin.RequirePlatformAdminMiddleware(), admin.SetMessageSenderProvider)
+			settingsGroup.GET("/message-sender", admin.RequirePlatformAdminMiddleware(), admin.GetMessageSenderProvider)
 		}
 		cloudGroup := adminAuthrized.Group("/cloud")
 		{
@@ -327,12 +329,12 @@ func RunServer() {
 		// themes
 		themeGroup := adminAuthrized.Group("/theme")
 		{
-			themeGroup.PUT("/upload", admin.UploadTheme)
+			themeGroup.PUT("/upload", admin.RequirePlatformAdminMiddleware(), admin.UploadTheme)
 			themeGroup.GET("/list", admin.ListThemes)
-			themeGroup.POST("/delete", admin.DeleteTheme)
+			themeGroup.POST("/delete", admin.RequirePlatformAdminMiddleware(), admin.DeleteTheme)
 			themeGroup.GET("/set", admin.SetTheme)
-			themeGroup.POST("/update", admin.UpdateTheme)
-			themeGroup.POST("/import", admin.ImportTheme)
+			themeGroup.POST("/update", admin.RequirePlatformAdminMiddleware(), admin.UpdateTheme)
+			themeGroup.POST("/import", admin.RequirePlatformAdminMiddleware(), admin.ImportTheme)
 			themeGroup.POST("/settings", admin.UpdateThemeSettings)
 		}
 		// clients
@@ -366,6 +368,16 @@ func RunServer() {
 			sessionGroup.GET("/get", admin.GetSessions)
 			sessionGroup.POST("/remove", admin.DeleteSession)
 			sessionGroup.POST("/remove/all", admin.DeleteAllSession)
+		}
+		tenantGroup := adminAuthrized.Group("/tenants")
+		{
+			tenantGroup.POST("", admin.CreateTenant)
+			tenantGroup.GET("", admin.GetAccessibleTenants)
+			tenantGroup.POST("/current", admin.SwitchCurrentTenant)
+			tenantGroup.GET("/current/members", admin.GetCurrentTenantMembers)
+			tenantGroup.POST("/current/members", admin.AddCurrentTenantMember)
+			tenantGroup.POST("/current/members/:user_uuid/role", admin.UpdateCurrentTenantMemberRole)
+			tenantGroup.DELETE("/current/members/:user_uuid", admin.RemoveCurrentTenantMember)
 		}
 		two_factorGroup := adminAuthrized.Group("/2fa")
 		{
@@ -460,6 +472,9 @@ func InitDatabase() {
 			panic(err)
 		}
 		log.Println("Default admin account created. Username:", user, ", Password:", passwd)
+	}
+	if err := database.EnsureTenantBootstrap(); err != nil {
+		panic(err)
 	}
 }
 

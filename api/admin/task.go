@@ -1,20 +1,28 @@
 package admin
 
 import (
+	"errors"
+
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/api"
 	"github.com/komari-monitor/komari/database/tasks"
+	"gorm.io/gorm"
 )
 
 func GetTasks(c *gin.Context) {
-	dbTasks, err := tasks.GetAllTasks()
+	tenantID, ok := requireCurrentTenantID(c)
+	if !ok {
+		return
+	}
+
+	dbTasks, err := tasks.GetAllTasksByTenant(tenantID)
 	if err != nil {
 		api.RespondError(c, 500, "Failed to retrieve tasks: "+err.Error())
 		return
 	}
 	var responseTasks []gin.H
 	for _, t := range dbTasks {
-		results, err := tasks.GetTaskResultsByTaskId(t.TaskId)
+		results, err := tasks.GetTaskResultsByTaskIdForTenant(tenantID, t.TaskId)
 		if err != nil {
 			api.RespondError(c, 500, "Failed to retrieve task results: "+err.Error())
 			return
@@ -42,13 +50,22 @@ func GetTasks(c *gin.Context) {
 }
 
 func GetTaskById(c *gin.Context) {
+	tenantID, ok := requireCurrentTenantID(c)
+	if !ok {
+		return
+	}
+
 	taskId := c.Param("task_id")
 	if taskId == "" {
 		api.RespondError(c, 400, "Task ID is required")
 		return
 	}
-	task, err := tasks.GetTaskByTaskId(taskId)
+	task, err := tasks.GetTaskByTaskIdForTenant(tenantID, taskId)
 	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			api.RespondError(c, 404, "Task not found")
+			return
+		}
 		api.RespondError(c, 500, "Failed to retrieve task: "+err.Error())
 		return
 	}
@@ -56,7 +73,7 @@ func GetTaskById(c *gin.Context) {
 		api.RespondError(c, 404, "Task not found")
 		return
 	}
-	results, err := tasks.GetTaskResultsByTaskId(taskId)
+	results, err := tasks.GetTaskResultsByTaskIdForTenant(tenantID, taskId)
 	if err != nil {
 		api.RespondError(c, 500, "Failed to retrieve task results: "+err.Error())
 		return
@@ -80,12 +97,17 @@ func GetTaskById(c *gin.Context) {
 }
 
 func GetTasksByClientId(c *gin.Context) {
+	tenantID, ok := requireCurrentTenantID(c)
+	if !ok {
+		return
+	}
+
 	clientId := c.Param("uuid")
 	if clientId == "" {
 		api.RespondError(c, 400, "Client ID is required")
 		return
 	}
-	taskList, err := tasks.GetTasksByClientId(clientId)
+	taskList, err := tasks.GetTasksByClientIdForTenant(tenantID, clientId)
 	if err != nil {
 		api.RespondError(c, 500, "Failed to retrieve tasks: "+err.Error())
 		return
@@ -106,14 +128,23 @@ func GetTasksByClientId(c *gin.Context) {
 }
 
 func GetSpecificTaskResult(c *gin.Context) {
+	tenantID, ok := requireCurrentTenantID(c)
+	if !ok {
+		return
+	}
+
 	taskId := c.Param("task_id")
 	clientId := c.Param("uuid")
 	if taskId == "" || clientId == "" {
 		api.RespondError(c, 400, "Task ID and Client ID are required")
 		return
 	}
-	result, err := tasks.GetSpecificTaskResult(taskId, clientId)
+	result, err := tasks.GetSpecificTaskResultForTenant(tenantID, taskId, clientId)
 	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			api.RespondError(c, 404, "No result found for this task and client")
+			return
+		}
 		api.RespondError(c, 500, "Failed to retrieve task result: "+err.Error())
 		return
 	}
@@ -126,12 +157,17 @@ func GetSpecificTaskResult(c *gin.Context) {
 
 // Param: task_id
 func GetTaskResultsByTaskId(c *gin.Context) {
+	tenantID, ok := requireCurrentTenantID(c)
+	if !ok {
+		return
+	}
+
 	taskId := c.Param("task_id")
 	if taskId == "" {
 		api.RespondError(c, 400, "Task ID is required")
 		return
 	}
-	results, err := tasks.GetTaskResultsByTaskId(taskId)
+	results, err := tasks.GetTaskResultsByTaskIdForTenant(tenantID, taskId)
 	if err != nil {
 		api.RespondError(c, 500, "Failed to retrieve task results: "+err.Error())
 		return
@@ -144,12 +180,17 @@ func GetTaskResultsByTaskId(c *gin.Context) {
 }
 
 func GetAllTaskResultByUUID(c *gin.Context) {
+	tenantID, ok := requireCurrentTenantID(c)
+	if !ok {
+		return
+	}
+
 	clientId := c.Param("uuid")
 	if clientId == "" {
 		api.RespondError(c, 400, "Client ID is required")
 		return
 	}
-	results, err := tasks.GetAllTasksResultByUUID(clientId)
+	results, err := tasks.GetAllTasksResultByUUIDForTenant(tenantID, clientId)
 	if err != nil {
 		api.RespondError(c, 500, "Failed to retrieve tasks: "+err.Error())
 		return

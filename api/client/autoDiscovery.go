@@ -2,14 +2,17 @@ package client
 
 import (
 	"encoding/base64"
+	"errors"
 	"net/url"
 	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/api"
 	"github.com/komari-monitor/komari/config"
+	"github.com/komari-monitor/komari/database"
 	"github.com/komari-monitor/komari/database/clients"
 	"github.com/komari-monitor/komari/utils"
+	"gorm.io/gorm"
 )
 
 func parseAutoDiscoveryAuthorization(authHeader string) (string, string, bool) {
@@ -60,29 +63,47 @@ func RegisterClient(c *gin.Context) {
 		api.RespondError(c, 403, "Invalid AutoDiscovery Key")
 		return
 	}
-	AutoDiscoveryKey, err := config.GetAs[string](config.AutoDiscoveryKeyKey, "")
-	if err != nil {
-		api.RespondError(c, 500, "Failed to get AutoDiscovery Key: "+err.Error())
-		return
-	}
-	if AutoDiscoveryKey == "" ||
-		len(AutoDiscoveryKey) < 12 ||
-		!strings.HasPrefix(auth, "Bearer ") {
-
+	if !strings.HasPrefix(auth, "Bearer ") {
 		api.RespondError(c, 403, "Invalid AutoDiscovery Key")
 		return
 	}
 	requestKey, group, ok := parseAutoDiscoveryAuthorization(auth)
-	if !ok || requestKey != AutoDiscoveryKey {
+	if !ok || len(strings.TrimSpace(requestKey)) < 12 {
 		api.RespondError(c, 403, "Invalid AutoDiscovery Key")
 		return
 	}
+
+	tenantID, err := config.FindTenantIDByConfigValue(config.AutoDiscoveryKeyKey, requestKey)
+	if err != nil {
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			api.RespondError(c, 500, "Failed to resolve auto discovery tenant: "+err.Error())
+			return
+		}
+		legacyKey, legacyErr := config.GetAs[string](config.AutoDiscoveryKeyKey, "")
+		if legacyErr != nil {
+			api.RespondError(c, 500, "Failed to get AutoDiscovery Key: "+legacyErr.Error())
+			return
+		}
+		if requestKey != legacyKey || len(strings.TrimSpace(legacyKey)) < 12 {
+			api.RespondError(c, 403, "Invalid AutoDiscovery Key")
+			return
+		}
+
+		defaultTenantID, defaultErr := database.GetDefaultTenantID()
+		if defaultErr != nil {
+			api.RespondError(c, 500, "Failed to resolve auto discovery tenant: "+defaultErr.Error())
+			return
+		}
+		tenantID = defaultTenantID
+	}
+
 	name := c.Query("name")
 	if name == "" {
 		name = utils.GenerateRandomString(8)
 	}
 	name = "Auto-" + name
-	uuid, token, err := clients.CreateClientWithNameAndGroup(name, group)
+
+	uuid, token, err := clients.CreateClientWithNameAndGroupForTenant(tenantID, name, group)
 	if err != nil {
 		api.RespondError(c, 500, "Failed to create client: "+err.Error())
 		return

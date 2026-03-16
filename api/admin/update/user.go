@@ -3,8 +3,8 @@ package update
 import (
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/api"
+	adminapi "github.com/komari-monitor/komari/api/admin"
 	"github.com/komari-monitor/komari/database/accounts"
-	"github.com/komari-monitor/komari/database/auditlog"
 )
 
 func UpdateUser(c *gin.Context) {
@@ -30,11 +30,18 @@ func UpdateUser(c *gin.Context) {
 		api.RespondError(c, 400, "Password must be at least 6 characters long")
 		return
 	}
+
+	currentUUID, _ := c.Get("uuid")
+	if currentUUID == nil || currentUUID.(string) != req.Uuid {
+		if !adminapi.EnsurePlatformAdmin(c) {
+			return
+		}
+	}
 	if err := accounts.UpdateUser(req.Uuid, req.Name, req.Password, req.SsoType); err != nil {
 		api.RespondError(c, 500, "Failed to update user: "+err.Error())
 		return
 	}
 	uuid, _ := c.Get("uuid")
-	auditlog.Log(c.ClientIP(), uuid.(string), "User updated", "warn")
+	api.AuditLogForCurrentTenant(c, uuid.(string), "User updated", "warn")
 	api.RespondSuccess(c, gin.H{"uuid": req.Uuid})
 }

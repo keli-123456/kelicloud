@@ -12,7 +12,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/api"
-	"github.com/komari-monitor/komari/cmd/flags"
 	"github.com/komari-monitor/komari/database/dbcore"
 )
 
@@ -40,7 +39,7 @@ func copyFile(srcPath, destPath string) error {
 	return nil
 }
 
-// copyDataToTempExcludingDB 将 ./data 下除了 .db/.db-wal/.db-shm 之外的所有文件复制到临时目录
+// copyDataToTempExcludingDB 将 ./data 下除了 sqlite 数据库文件之外的所有文件复制到临时目录
 func copyDataToTempExcludingDB(tempDir string) error {
 	dataRoot := "./data"
 
@@ -121,31 +120,18 @@ func DownloadBackup(c *gin.Context) {
 
 	// 3) 处理数据库备份 -> 临时目录/komari.db
 	destDB := filepath.Join(tempDir, "komari.db")
-	dbFilePath := flags.DatabaseFile
-
-	if flags.DatabaseType == "sqlite" || flags.DatabaseType == "" {
+	if dbcore.GetDBInstance().Dialector.Name() == "sqlite" {
 		if err := backupSQLiteTo(destDB); err != nil {
 			api.RespondError(c, http.StatusInternalServerError, fmt.Sprintf("Error backing up sqlite database: %v", err))
 			return
 		}
-	} else if flags.DatabaseType == "mysql" {
+	} else {
 		api.RespondError(
 			c,
 			http.StatusNotImplemented,
 			"MySQL backup is not available from the web panel yet. Please use mysqldump or a database volume snapshot.",
 		)
 		return
-	} else if dbFilePath != "" {
-		// 非 sqlite 的情况：若配置了文件路径且存在，则直接复制（按用户需求仍然将名称固定为 komari.db）
-		if _, err := os.Stat(dbFilePath); err == nil {
-			if err := copyFile(dbFilePath, destDB); err != nil {
-				api.RespondError(c, http.StatusInternalServerError, fmt.Sprintf("Error copying database file: %v", err))
-				return
-			}
-		} else if !os.IsNotExist(err) {
-			api.RespondError(c, http.StatusInternalServerError, fmt.Sprintf("Error stating database file: %v", err))
-			return
-		}
 	}
 
 	// 4) 开始写出 ZIP（以临时目录为根）

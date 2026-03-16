@@ -2,21 +2,20 @@ package api
 
 import (
 	"github.com/gin-gonic/gin"
-	"github.com/komari-monitor/komari/database/accounts"
 	"github.com/komari-monitor/komari/database/clients"
 )
 
 func GetNodesInformation(c *gin.Context) {
-	clientList, err := clients.GetAllClientBasicInfo()
+	tenantID, isLogin, err := ResolveTenantScopeFromSession(c)
+	if err != nil {
+		RespondError(c, 500, "Failed to resolve tenant scope: "+err.Error())
+		return
+	}
+
+	clientList, err := clients.GetAllClientBasicInfoByTenant(tenantID)
 	if err != nil {
 		RespondError(c, 500, "Failed to retrieve client information: "+err.Error())
 		return
-	}
-	isLogin := false
-	session, _ := c.Cookie("session_token")
-	_, err = accounts.GetUserBySession(session)
-	if err == nil {
-		isLogin = true
 	}
 
 	// 过滤掉 Hidden 的客户端，并清理需要隐藏的字段

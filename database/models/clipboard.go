@@ -2,6 +2,7 @@ package models
 
 type Clipboard struct {
 	Id        int       `json:"id" gorm:"primaryKey;autoIncrement;unique"`
+	TenantID  string    `json:"tenant_id,omitempty" gorm:"type:varchar(36);index"`
 	Text      string    `json:"text" gorm:"type:longtext"`
 	Name      string    `json:"name" gorm:"type:varchar(255)"`
 	Weight    int       `json:"weight" gorm:"type:int"`

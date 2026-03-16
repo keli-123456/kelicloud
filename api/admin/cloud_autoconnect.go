@@ -25,7 +25,12 @@ func prepareCloudAutoConnectUserData(c *gin.Context, userData string, opts autoC
 		return userData, "", nil
 	}
 
-	autoDiscoveryKey, err := config.GetAs[string](config.AutoDiscoveryKeyKey, "")
+	tenantID, ok := currentTenantID(c)
+	if !ok {
+		return "", "", errors.New("tenant context is required")
+	}
+
+	autoDiscoveryKey, err := config.GetAsForTenant[string](tenantID, config.AutoDiscoveryKeyKey, "")
 	if err != nil {
 		return "", "", fmt.Errorf("failed to load auto discovery key: %w", err)
 	}
@@ -48,7 +53,7 @@ func prepareCloudAutoConnectUserData(c *gin.Context, userData string, opts autoC
 	}
 
 	scopedAutoDiscoveryKey := buildScopedAutoDiscoveryKey(autoDiscoveryKey, group)
-	installSnippet := buildCloudAutoConnectInstallSnippet(endpoint, scopedAutoDiscoveryKey)
+	installSnippet := buildCloudAutoConnectInstallSnippet(tenantID, endpoint, scopedAutoDiscoveryKey)
 	mergedUserData, err := mergeCloudAutoConnectUserData(userData, installSnippet, opts.WrapInShellScript)
 	if err != nil {
 		return "", "", err
@@ -58,7 +63,12 @@ func prepareCloudAutoConnectUserData(c *gin.Context, userData string, opts autoC
 }
 
 func resolveCloudAutoConnectEndpoint(c *gin.Context) (string, error) {
-	scriptDomain, err := config.GetAs[string](config.ScriptDomainKey, "")
+	tenantID, ok := currentTenantID(c)
+	if !ok {
+		return "", errors.New("tenant context is required")
+	}
+
+	scriptDomain, err := config.GetAsForTenant[string](tenantID, config.ScriptDomainKey, "")
 	if err != nil {
 		return "", fmt.Errorf("failed to load script domain: %w", err)
 	}
@@ -154,8 +164,8 @@ func buildScopedAutoDiscoveryKey(baseKey, group string) string {
 	return baseKey + "::group-b64=" + base64.RawURLEncoding.EncodeToString([]byte(group))
 }
 
-func buildCloudAutoConnectInstallSnippet(endpoint, scopedAutoDiscoveryKey string) string {
-	installScriptURL, err := resolveAgentInstallScriptURL("install.sh")
+func buildCloudAutoConnectInstallSnippet(tenantID, endpoint, scopedAutoDiscoveryKey string) string {
+	installScriptURL, err := resolveAgentInstallScriptURL(tenantID, "install.sh")
 	if err != nil {
 		installScriptURL = buildAgentInstallScriptURL("", "install.sh")
 	}

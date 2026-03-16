@@ -1,15 +1,25 @@
 package clipboard
 
 import (
+	"errors"
 	"net/http"
 	"strconv"
 
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/api"
-	"github.com/komari-monitor/komari/database/auditlog"
 	clipboardDB "github.com/komari-monitor/komari/database/clipboard"
 	"github.com/komari-monitor/komari/database/models"
+	"gorm.io/gorm"
 )
+
+func tenantIDFromContext(c *gin.Context) (string, bool) {
+	tenantID, ok := c.Get("tenant_id")
+	if !ok {
+		return "", false
+	}
+	value, ok := tenantID.(string)
+	return value, ok && value != ""
+}
 
 // GetClipboard retrieves a clipboard entry by ID
 func GetClipboard(c *gin.Context) {
@@ -19,8 +29,17 @@ func GetClipboard(c *gin.Context) {
 		api.RespondError(c, http.StatusBadRequest, "Invalid ID")
 		return
 	}
-	cb, err := clipboardDB.GetClipboardByID(id)
+	tenantID, ok := tenantIDFromContext(c)
+	if !ok {
+		api.RespondError(c, http.StatusForbidden, "Tenant context is required")
+		return
+	}
+	cb, err := clipboardDB.GetClipboardByIDForTenant(id, tenantID)
 	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			api.RespondError(c, http.StatusNotFound, "Clipboard not found")
+			return
+		}
 		api.RespondError(c, http.StatusInternalServerError, "Failed to get clipboard: "+err.Error())
 		return
 	}
@@ -29,7 +48,12 @@ func GetClipboard(c *gin.Context) {
 
 // ListClipboard lists all clipboard entries
 func ListClipboard(c *gin.Context) {
-	list, err := clipboardDB.ListClipboard()
+	tenantID, ok := tenantIDFromContext(c)
+	if !ok {
+		api.RespondError(c, http.StatusForbidden, "Tenant context is required")
+		return
+	}
+	list, err := clipboardDB.ListClipboardByTenant(tenantID)
 	if err != nil {
 		api.RespondError(c, http.StatusInternalServerError, "Failed to list clipboard: "+err.Error())
 		return
@@ -44,12 +68,19 @@ func CreateClipboard(c *gin.Context) {
 		api.RespondError(c, http.StatusBadRequest, "Invalid request: "+err.Error())
 		return
 	}
-	if err := clipboardDB.CreateClipboard(&req); err != nil {
+	tenantID, ok := tenantIDFromContext(c)
+	if !ok {
+		api.RespondError(c, http.StatusForbidden, "Tenant context is required")
+		return
+	}
+	req.Id = 0
+	req.TenantID = tenantID
+	if err := clipboardDB.CreateClipboardForTenant(tenantID, &req); err != nil {
 		api.RespondError(c, http.StatusInternalServerError, "Failed to create clipboard: "+err.Error())
 		return
 	}
 	userUUID, _ := c.Get("uuid")
-	auditlog.Log(c.ClientIP(), userUUID.(string), "create clipboard:"+strconv.Itoa(req.Id), "info")
+	api.AuditLogForCurrentTenant(c, userUUID.(string), "create clipboard:"+strconv.Itoa(req.Id), "info")
 	api.RespondSuccess(c, req)
 }
 
@@ -66,12 +97,21 @@ func UpdateClipboard(c *gin.Context) {
 		api.RespondError(c, http.StatusBadRequest, "Invalid request: "+err.Error())
 		return
 	}
-	if err := clipboardDB.UpdateClipboardFields(id, fields); err != nil {
+	tenantID, ok := tenantIDFromContext(c)
+	if !ok {
+		api.RespondError(c, http.StatusForbidden, "Tenant context is required")
+		return
+	}
+	if err := clipboardDB.UpdateClipboardFieldsForTenant(id, tenantID, fields); err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			api.RespondError(c, http.StatusNotFound, "Clipboard not found")
+			return
+		}
 		api.RespondError(c, http.StatusInternalServerError, "Failed to update clipboard: "+err.Error())
 		return
 	}
 	userUUID, _ := c.Get("uuid")
-	auditlog.Log(c.ClientIP(), userUUID.(string), "update clipboard:"+strconv.Itoa(id), "info")
+	api.AuditLogForCurrentTenant(c, userUUID.(string), "update clipboard:"+strconv.Itoa(id), "info")
 	api.RespondSuccess(c, nil)
 }
 
@@ -83,12 +123,21 @@ func DeleteClipboard(c *gin.Context) {
 		api.RespondError(c, http.StatusBadRequest, "Invalid ID")
 		return
 	}
-	if err := clipboardDB.DeleteClipboard(id); err != nil {
+	tenantID, ok := tenantIDFromContext(c)
+	if !ok {
+		api.RespondError(c, http.StatusForbidden, "Tenant context is required")
+		return
+	}
+	if err := clipboardDB.DeleteClipboardForTenant(id, tenantID); err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			api.RespondError(c, http.StatusNotFound, "Clipboard not found")
+			return
+		}
 		api.RespondError(c, http.StatusInternalServerError, "Failed to delete clipboard: "+err.Error())
 		return
 	}
 	userUUID, _ := c.Get("uuid")
-	auditlog.Log(c.ClientIP(), userUUID.(string), "delete clipboard:"+strconv.Itoa(id), "warn")
+	api.AuditLogForCurrentTenant(c, userUUID.(string), "delete clipboard:"+strconv.Itoa(id), "warn")
 	api.RespondSuccess(c, nil)
 }
 
@@ -105,11 +154,16 @@ func BatchDeleteClipboard(c *gin.Context) {
 		api.RespondError(c, http.StatusBadRequest, "IDs cannot be empty")
 		return
 	}
-	if err := clipboardDB.DeleteClipboardBatch(req.IDs); err != nil {
+	tenantID, ok := tenantIDFromContext(c)
+	if !ok {
+		api.RespondError(c, http.StatusForbidden, "Tenant context is required")
+		return
+	}
+	if err := clipboardDB.DeleteClipboardBatchForTenant(req.IDs, tenantID); err != nil {
 		api.RespondError(c, http.StatusInternalServerError, "Failed to batch delete clipboard: "+err.Error())
 		return
 	}
 	userUUID, _ := c.Get("uuid")
-	auditlog.Log(c.ClientIP(), userUUID.(string), "batch delete clipboard: "+strconv.Itoa(len(req.IDs))+" items", "warn")
+	api.AuditLogForCurrentTenant(c, userUUID.(string), "batch delete clipboard: "+strconv.Itoa(len(req.IDs))+" items", "warn")
 	api.RespondSuccess(c, nil)
 }

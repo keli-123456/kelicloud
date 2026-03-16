@@ -34,7 +34,14 @@ func AddLoadNotification(c *gin.Context) {
 		return
 	}
 
-	if taskID, err := notification.AddLoadNotification(req.Clients, req.Name, req.Metric, req.Threshold, req.Ratio, req.Interval); err != nil {
+	tenantID, ok := c.Get("tenant_id")
+	currentTenantID, _ := tenantID.(string)
+	if !ok || currentTenantID == "" {
+		api.RespondError(c, http.StatusForbidden, "Tenant context is required")
+		return
+	}
+
+	if taskID, err := notification.AddLoadNotificationForTenant(currentTenantID, req.Clients, req.Name, req.Metric, req.Threshold, req.Ratio, req.Interval); err != nil {
 		api.RespondError(c, http.StatusInternalServerError, err.Error())
 	} else {
 		api.RespondSuccess(c, gin.H{"task_id": taskID})
@@ -51,7 +58,14 @@ func DeleteLoadNotification(c *gin.Context) {
 		return
 	}
 
-	if err := notification.DeleteLoadNotification(req.ID); err != nil {
+	tenantID, ok := c.Get("tenant_id")
+	currentTenantID, _ := tenantID.(string)
+	if !ok || currentTenantID == "" {
+		api.RespondError(c, http.StatusForbidden, "Tenant context is required")
+		return
+	}
+
+	if err := notification.DeleteLoadNotificationForTenant(currentTenantID, req.ID); err != nil {
 		api.RespondError(c, http.StatusInternalServerError, err.Error())
 	} else {
 		api.RespondSuccess(c, nil)
@@ -69,7 +83,14 @@ func EditLoadNotification(c *gin.Context) {
 		return
 	}
 
-	if err := notification.EditLoadNotification(req.Notifications); err != nil {
+	tenantID, ok := c.Get("tenant_id")
+	currentTenantID, _ := tenantID.(string)
+	if !ok || currentTenantID == "" {
+		api.RespondError(c, http.StatusForbidden, "Tenant context is required")
+		return
+	}
+
+	if err := notification.EditLoadNotificationForTenant(currentTenantID, req.Notifications); err != nil {
 		api.RespondError(c, http.StatusInternalServerError, err.Error())
 	} else {
 		// for _, notification := range req.Notifications {
@@ -80,7 +101,14 @@ func EditLoadNotification(c *gin.Context) {
 }
 
 func GetAllLoadNotifications(c *gin.Context) {
-	notifications, err := notification.GetAllLoadNotifications()
+	tenantID, ok := c.Get("tenant_id")
+	currentTenantID, _ := tenantID.(string)
+	if !ok || currentTenantID == "" {
+		api.RespondError(c, http.StatusForbidden, "Tenant context is required")
+		return
+	}
+
+	notifications, err := notification.GetAllLoadNotificationsByTenant(currentTenantID)
 	if err != nil {
 		api.RespondError(c, http.StatusInternalServerError, err.Error())
 		return

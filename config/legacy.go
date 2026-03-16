@@ -80,6 +80,8 @@ const (
 	RecordEnabledKey              = "record_enabled"
 	RecordPreserveTimeKey         = "record_preserve_time"
 	PingRecordPreserveTimeKey     = "ping_record_preserve_time"
+	TempShareTokenKey             = "tempory_share_token"
+	TempShareTokenExpireAtKey     = "tempory_share_token_expire_at"
 	UpdatedAtKey                  = "updated_at"
 )
 

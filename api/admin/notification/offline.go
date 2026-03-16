@@ -3,6 +3,7 @@ package notification
 import (
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/api"
+	clientdb "github.com/komari-monitor/komari/database/clients"
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
 	"gorm.io/gorm/clause"
@@ -15,14 +16,25 @@ func EnableOfflineNotification(c *gin.Context) {
 		api.RespondError(c, 400, "Invalid request body: "+err.Error())
 		return
 	}
+	tenantID, ok := c.Get("tenant_id")
+	currentTenantID, _ := tenantID.(string)
+	if !ok || currentTenantID == "" {
+		api.RespondError(c, 403, "Tenant context is required")
+		return
+	}
+	normalizedUUIDs, err := clientdb.NormalizeClientUUIDsForTenant(currentTenantID, uuids)
+	if err != nil {
+		api.RespondError(c, 400, err.Error())
+		return
+	}
 	var notifications []models.OfflineNotification
-	for _, uuid := range uuids {
+	for _, uuid := range normalizedUUIDs {
 		notifications = append(notifications, models.OfflineNotification{
 			Client: uuid,
 			Enable: true,
 		})
 	}
-	err := dbcore.GetDBInstance().Model(&models.OfflineNotification{}).
+	err = dbcore.GetDBInstance().Model(&models.OfflineNotification{}).
 		Clauses(clause.OnConflict{
 			Columns:   []clause.Column{{Name: "client"}},
 			DoUpdates: clause.AssignmentColumns([]string{"enable"}),
@@ -43,14 +55,25 @@ func DisableOfflineNotification(c *gin.Context) {
 		api.RespondError(c, 400, "Invalid request body: "+err.Error())
 		return
 	}
+	tenantID, ok := c.Get("tenant_id")
+	currentTenantID, _ := tenantID.(string)
+	if !ok || currentTenantID == "" {
+		api.RespondError(c, 403, "Tenant context is required")
+		return
+	}
+	normalizedUUIDs, err := clientdb.NormalizeClientUUIDsForTenant(currentTenantID, uuids)
+	if err != nil {
+		api.RespondError(c, 400, err.Error())
+		return
+	}
 	var notifications []models.OfflineNotification
-	for _, uuid := range uuids {
+	for _, uuid := range normalizedUUIDs {
 		notifications = append(notifications, models.OfflineNotification{
 			Client: uuid,
 			Enable: false,
 		})
 	}
-	err := dbcore.GetDBInstance().Model(&models.OfflineNotification{}).
+	err = dbcore.GetDBInstance().Model(&models.OfflineNotification{}).
 		Clauses(clause.OnConflict{
 			Columns:   []clause.Column{{Name: "client"}},
 			DoUpdates: clause.AssignmentColumns([]string{"enable"}),
@@ -74,6 +97,13 @@ func EditOfflineNotification(c *gin.Context) {
 		api.RespondError(c, 400, "At least one notification is required")
 		return
 	}
+	tenantID, ok := c.Get("tenant_id")
+	currentTenantID, _ := tenantID.(string)
+	if !ok || currentTenantID == "" {
+		api.RespondError(c, 403, "Tenant context is required")
+		return
+	}
+	clientUUIDs := make([]string, 0, len(notifications))
 	for _, noti := range notifications {
 		if noti.Client == "" {
 			api.RespondError(c, 400, "Client UUID cannot be empty")
@@ -83,6 +113,11 @@ func EditOfflineNotification(c *gin.Context) {
 			api.RespondError(c, 400, "GracePeriod must be a positive integer")
 			return
 		}
+		clientUUIDs = append(clientUUIDs, noti.Client)
+	}
+	if _, err := clientdb.NormalizeClientUUIDsForTenant(currentTenantID, clientUUIDs); err != nil {
+		api.RespondError(c, 400, err.Error())
+		return
 	}
 	err := dbcore.GetDBInstance().Model(&models.OfflineNotification{}).
 		Clauses(clause.OnConflict{
@@ -100,7 +135,17 @@ func EditOfflineNotification(c *gin.Context) {
 
 func ListOfflineNotifications(c *gin.Context) {
 	var notifications []models.OfflineNotification
-	err := dbcore.GetDBInstance().Model(&models.OfflineNotification{}).Find(&notifications).Error
+	tenantID, ok := c.Get("tenant_id")
+	currentTenantID, _ := tenantID.(string)
+	if !ok || currentTenantID == "" {
+		api.RespondError(c, 403, "Tenant context is required")
+		return
+	}
+	err := dbcore.GetDBInstance().
+		Model(&models.OfflineNotification{}).
+		Joins("JOIN clients ON clients.uuid = offline_notifications.client").
+		Where("clients.tenant_id = ?", currentTenantID).
+		Find(&notifications).Error
 	if err != nil {
 		api.RespondError(c, 500, "Failed to list offline notifications: "+err.Error())
 		return

@@ -2,8 +2,8 @@ package api
 
 import (
 	"bytes"
-	"database/sql"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 
@@ -59,32 +59,18 @@ func TokenAuthMiddleware() gin.HandlerFunc {
 			return
 		}
 
-		uuid, err := checkTokenAndGetUUID(token)
+		client, err := clients.GetClientByToken(token)
 		if err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"status": "error", "error": "invalid token"})
+				return
+			}
 			c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"status": "error", "error": "failed to validate token"})
 			return
 		}
-		if uuid == "" {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"status": "error", "error": "invalid token"})
-			return
-		}
 
-		c.Set("client_uuid", uuid)
+		c.Set("client_uuid", client.UUID)
+		c.Set("tenant_id", client.TenantID)
 		c.Next()
 	}
-}
-
-func checkTokenAndGetUUID(token string) (string, error) {
-	uuid, err := clients.GetClientUUIDByToken(token)
-
-	if err == sql.ErrNoRows {
-		return "", nil
-	}
-	if err == gorm.ErrRecordNotFound {
-		return "", nil
-	}
-	if err != nil {
-		return "", err
-	}
-	return uuid, nil
 }

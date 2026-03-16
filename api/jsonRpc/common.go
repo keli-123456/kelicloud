@@ -167,6 +167,17 @@ func getPingStatsForNode(uuid string, pingTasks []models.PingTask) map[string]pi
 	return result
 }
 
+func tenantIDFromRPCMeta(meta *rpc.ContextMeta) string {
+	if meta != nil && strings.TrimSpace(meta.TenantID) != "" {
+		return strings.TrimSpace(meta.TenantID)
+	}
+	tenantID, err := database.GetDefaultTenantID()
+	if err != nil {
+		return ""
+	}
+	return tenantID
+}
+
 func init() {
 	RegisterWithGroupAndMeta("getNodes", "common",
 		func(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
@@ -223,13 +234,14 @@ func getNodes(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcEr
 		UUID string `json:"uuid"`
 	}
 	req.BindParams(&params)
-	cinfo, err := clients.GetAllClientBasicInfo()
+	meta := rpc.MetaFromContext(ctx)
+	tenantID := tenantIDFromRPCMeta(meta)
+	cinfo, err := clients.GetAllClientBasicInfoByTenant(tenantID)
 	if err != nil {
 		return nil, rpc.MakeError(rpc.InternalError, "Failed to get client info", cinfo)
 	}
-	meta := rpc.MetaFromContext(ctx)
 
-	SendIpAddrToGuest, _ := config.GetAs[bool](config.SendIpAddrToGuestKey)
+	SendIpAddrToGuest, _ := config.GetAsForTenant[bool](tenantID, config.SendIpAddrToGuestKey, false)
 	if meta.Permission != "admin" {
 		// 过滤 Hidden 节点并隐藏敏感字段
 		filtered := make([]models.Client, 0, len(cinfo))
@@ -272,8 +284,11 @@ func getNodes(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcEr
 	return nodesMap, nil
 }
 
-func getPublicInfo(_ context.Context, _ *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
-	info, err := database.GetPublicInfo()
+func getPublicInfo(ctx context.Context, _ *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
+	meta := rpc.MetaFromContext(ctx)
+	tenantID := tenantIDFromRPCMeta(meta)
+
+	info, err := database.GetPublicInfo(tenantID)
 	if err != nil {
 		return nil, rpc.MakeError(rpc.InternalError, "Failed to get public info", err.Error())
 	}
@@ -288,6 +303,7 @@ func getNodesLatestStatus(ctx context.Context, req *rpc.JsonRpcRequest) (any, *r
 	req.BindParams(&params)
 
 	meta := rpc.MetaFromContext(ctx)
+	tenantID := tenantIDFromRPCMeta(meta)
 	latest := ws.GetLatestReport() // map[string]*common.Report (copy)
 	onlineUUIDs := ws.GetAllOnlineUUIDs()
 	onlineSet := make(map[string]bool, len(onlineUUIDs))
@@ -295,20 +311,22 @@ func getNodesLatestStatus(ctx context.Context, req *rpc.JsonRpcRequest) (any, *r
 		onlineSet[uuid] = true
 	}
 
-	// Hidden 过滤
+	cinfo, err := clients.GetAllClientBasicInfoByTenant(tenantID)
+	if err != nil {
+		return nil, rpc.MakeError(rpc.InternalError, "Failed to get client info", err.Error())
+	}
+	allowed := make(map[string]models.Client, len(cinfo))
+	for _, c := range cinfo {
+		allowed[c.UUID] = c
+	}
+	for uuid := range latest {
+		if _, ok := allowed[uuid]; !ok {
+			delete(latest, uuid)
+		}
+	}
 	if meta.Permission != "admin" {
-		cinfo, err := clients.GetAllClientBasicInfo()
-		if err != nil {
-			return nil, rpc.MakeError(rpc.InternalError, "Failed to get client info", err.Error())
-		}
-		hidden := make(map[string]bool, len(cinfo))
-		for _, c := range cinfo {
-			if c.Hidden {
-				hidden[c.UUID] = true
-			}
-		}
-		for uuid := range latest {
-			if hidden[uuid] {
+		for uuid, node := range allowed {
+			if node.Hidden {
 				delete(latest, uuid)
 			}
 		}
@@ -352,7 +370,7 @@ func getNodesLatestStatus(ctx context.Context, req *rpc.JsonRpcRequest) (any, *r
 	respMap := make(map[string]recordLike, len(latest))
 
 	// 预取所有 ping 任务
-	pingTasks, _ := tasks.GetAllPingTasks()
+	pingTasks, _ := tasks.GetAllPingTasksByTenant(tenantID)
 
 	appendOne := func(uuid string, rep *common.Report) {
 		if rep == nil {

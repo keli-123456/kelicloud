@@ -364,6 +364,11 @@ func (a *Addition) RemoveCredential(id string) bool {
 	if a.ActiveCredentialID == id {
 		a.ActiveCredentialID = ""
 	}
+	if len(a.Credentials) == 0 {
+		a.AccessKeyID = ""
+		a.SecretAccessKey = ""
+		a.SessionToken = ""
+	}
 	a.Normalize()
 	return true
 }

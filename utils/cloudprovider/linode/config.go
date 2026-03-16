@@ -343,6 +343,9 @@ func (a *Addition) RemoveToken(id string) bool {
 	if a.ActiveTokenID == id {
 		a.ActiveTokenID = ""
 	}
+	if len(a.Tokens) == 0 {
+		a.Token = ""
+	}
 	a.Normalize()
 	return true
 }

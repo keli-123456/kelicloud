@@ -13,6 +13,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/config"
+	"github.com/komari-monitor/komari/database"
+	"github.com/komari-monitor/komari/database/accounts"
 )
 
 //go:embed defaultTheme
@@ -74,13 +76,37 @@ func Static(r *gin.RouterGroup, noRoute func(handlers ...gin.HandlerFunc)) {
 		panic("you may forget to put dist of frontend to public/defaultTheme/dist")
 	}
 
-	getConfig := func() map[string]any {
-		cfg, _ := config.GetMany(map[string]any{
+	resolveTenantID := func(c *gin.Context) string {
+		for _, candidate := range []string{
+			strings.TrimSpace(c.GetHeader("X-Komari-Tenant")),
+			strings.TrimSpace(c.Query("tenant")),
+		} {
+			if candidate == "" {
+				continue
+			}
+			if tenant, err := database.GetTenantByIdentifier(candidate); err == nil {
+				return tenant.ID
+			}
+		}
+
+		sessionToken, _ := c.Cookie("session_token")
+		tenantID, _, err := accounts.ResolveTenantScope(sessionToken)
+		if err != nil {
+			return ""
+		}
+		return tenantID
+	}
+
+	getConfig := func(c *gin.Context) map[string]any {
+		tenantID := resolveTenantID(c)
+
+		cfg, _ := config.GetManyForTenant(tenantID, map[string]any{
 			config.DescriptionKey: "A simple server monitor tool.",
 			config.CustomHeadKey:  "",
 			config.CustomBodyKey:  "",
 			config.SitenameKey:    "Komari Monitor",
 			config.ThemeKey:       DefaultTheme,
+			config.PrivateSiteKey: false,
 		})
 		return cfg
 	}
@@ -133,7 +159,7 @@ func Static(r *gin.RouterGroup, noRoute func(handlers ...gin.HandlerFunc)) {
 	// 核心逻辑：渲染 Index.html
 	serveIndex := func(c *gin.Context) {
 		reqPath := c.Request.URL.Path
-		cfg := getConfig()
+		cfg := getConfig(c)
 
 		currentTheme := cfg[config.ThemeKey].(string)
 		shouldReplace := true
@@ -184,7 +210,7 @@ func Static(r *gin.RouterGroup, noRoute func(handlers ...gin.HandlerFunc)) {
 
 		// 其次：当前主题的 dist/favicon.ico 或 theme_root/favicon.ico ?
 		// 通常构建后的资源在 dist 中，这里假设优先找 dist 内的，如果你的 favicon 在根目录，去掉 DistDir 拼接即可
-		cfg := getConfig()
+		cfg := getConfig(c)
 		themeFaviconPath := path.Join(DistDir, FaviconFile)
 		content, mimeType, exists := getFileContent(cfg[config.ThemeKey].(string), themeFaviconPath)
 		if exists {
@@ -222,12 +248,13 @@ func Static(r *gin.RouterGroup, noRoute func(handlers ...gin.HandlerFunc)) {
 			if tempKey == "" {
 				return
 			}
+			tenantID := resolveTenantID(c)
 
-			tempKeyExpireTime, err := config.GetAs[int64]("tempory_share_token_expire_at", 0)
+			tempKeyExpireTime, err := config.GetAsForTenant[int64](tenantID, config.TempShareTokenExpireAtKey, 0)
 			if err != nil {
 				return
 			}
-			allowTempKey, err := config.GetAs[string]("tempory_share_token", "")
+			allowTempKey, err := config.GetAsForTenant[string](tenantID, config.TempShareTokenKey, "")
 			if err != nil {
 				return
 			}
@@ -253,7 +280,7 @@ func Static(r *gin.RouterGroup, noRoute func(handlers ...gin.HandlerFunc)) {
 			}
 		}()
 		reqPath := c.Request.URL.Path
-		cfg := getConfig()
+		cfg := getConfig(c)
 		currentTheme := cfg[config.ThemeKey].(string)
 
 		// SPA 静态资源回退

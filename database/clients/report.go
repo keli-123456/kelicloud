@@ -31,13 +31,20 @@ func SaveReport(uuid string, data map[string]interface{}) (err error) {
 }
 
 func GetClientUUIDByToken(token string) (clientUUID string, err error) {
-	db := dbcore.GetDBInstance()
-	var client models.Client
-	err = db.Where("token = ?", token).First(&client).Error
+	client, err := GetClientByToken(token)
 	if err != nil {
 		return "", err
 	}
 	return client.UUID, nil
+}
+
+func GetClientByToken(token string) (client models.Client, err error) {
+	db := dbcore.GetDBInstance()
+	err = db.Where("token = ?", token).First(&client).Error
+	if err != nil {
+		return models.Client{}, err
+	}
+	return client, nil
 }
 
 func ParseReport(data map[string]interface{}) (report common.Report, err error) {

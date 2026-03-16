@@ -7,7 +7,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
-	"github.com/komari-monitor/komari/database/auditlog"
 	"github.com/komari-monitor/komari/database/clients"
 	"github.com/komari-monitor/komari/utils"
 	"github.com/komari-monitor/komari/ws"
@@ -16,9 +15,17 @@ import (
 func RequestTerminal(c *gin.Context) {
 	uuid := c.Param("uuid")
 	user_uuid, _ := c.Get("uuid")
-	_, err := clients.GetClientByUUID(uuid)
+	tenantID, ok := c.Get("tenant_id")
+	if !ok {
+		c.JSON(http.StatusForbidden, gin.H{
+			"status":  "error",
+			"message": "Tenant context is required",
+		})
+		return
+	}
+	_, err := clients.GetClientByUUIDForTenant(uuid, tenantID.(string))
 	if err != nil {
-		c.JSON(400, gin.H{
+		c.JSON(http.StatusNotFound, gin.H{
 			"status":  "error",
 			"message": "Client not found",
 		})
@@ -41,6 +48,7 @@ func RequestTerminal(c *gin.Context) {
 	session := &TerminalSession{
 		UserUUID:    user_uuid.(string),
 		UUID:        uuid,
+		TenantID:    tenantID.(string),
 		Browser:     conn,
 		Agent:       nil,
 		RequesterIp: c.ClientIP(),
@@ -103,7 +111,7 @@ func ForwardTerminal(id string) {
 	if !exists || session == nil || session.Agent == nil || session.Browser == nil {
 		return
 	}
-	auditlog.Log(session.RequesterIp, session.UserUUID, "established, terminal id:"+id, "terminal")
+	AuditLogForTenant(session.TenantID, session.RequesterIp, session.UserUUID, "established, terminal id:"+id, "terminal")
 	established_time := time.Now()
 	errChan := make(chan error, 1)
 
@@ -160,7 +168,7 @@ func ForwardTerminal(id string) {
 		session.Browser.Close()
 	}
 	disconnect_time := time.Now()
-	auditlog.Log(session.RequesterIp, session.UserUUID, "disconnected, terminal id:"+id+", duration:"+disconnect_time.Sub(established_time).String(), "terminal")
+	AuditLogForTenant(session.TenantID, session.RequesterIp, session.UserUUID, "disconnected, terminal id:"+id+", duration:"+disconnect_time.Sub(established_time).String(), "terminal")
 	TerminalSessionsMutex.Lock()
 	delete(TerminalSessions, id)
 	TerminalSessionsMutex.Unlock()

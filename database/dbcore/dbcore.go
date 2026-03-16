@@ -22,6 +22,10 @@ import (
 	"gorm.io/gorm"
 )
 
+func shouldUseSQLiteForTests() bool {
+	return strings.HasSuffix(filepath.Base(os.Args[0]), ".test") && flags.DatabaseType == "sqlite"
+}
+
 // zipDirectoryExcluding 将 srcDir 打包为 dstZip，exclude 是绝对路径集合需要排除
 func zipDirectoryExcluding(srcDir, dstZip string, exclude map[string]struct{}) error {
 	// 规范化排除路径为绝对路径
@@ -447,23 +451,23 @@ func GetDBInstance() *gorm.DB {
 			Logger: logutil.NewGormLogger(),
 		}
 
-		// 根据数据库类型选择不同的连接方式
-		switch flags.DatabaseType {
-		case "sqlite", "":
-			// SQLite 连接
+		// 运行时固定使用 MySQL；SQLite 仅保留给单元测试。
+		if shouldUseSQLiteForTests() {
 			instance, err = gorm.Open(sqlite.Open(flags.DatabaseFile), logConfig)
 			if err != nil {
 				log.Fatalf("Failed to connect to SQLite3 database: %v", err)
 			}
-			log.Printf("Using SQLite database file: %s", flags.DatabaseFile)
+			log.Printf("Using SQLite database file for tests: %s", flags.DatabaseFile)
 			instance.Exec("PRAGMA wal = ON;")
 			if err := instance.Exec("PRAGMA journal_mode = WAL;").Error; err != nil {
 				log.Printf("Failed to enable WAL mode for SQLite: %v", err)
 			}
 			instance.Exec("VACUUM;")
 			instance.Exec("PRAGMA wal_checkpoint(TRUNCATE);")
-		case "mysql":
-			// MySQL 连接
+		} else {
+			if flags.DatabaseType == "sqlite" {
+				log.Fatalf("SQLite is no longer supported for runtime deployments; please configure MySQL instead")
+			}
 			dsn := fmt.Sprintf(
 				"%s:%s@tcp(%s:%s)/%s?charset=utf8mb4&collation=utf8mb4_unicode_ci&parseTime=True&loc=Local",
 				flags.DatabaseUser,
@@ -493,8 +497,6 @@ func GetDBInstance() *gorm.DB {
 				flags.DatabasePort,
 				flags.DatabaseName,
 			)
-		default:
-			log.Fatalf("Unsupported database type: %s", flags.DatabaseType)
 		}
 		config.SetDb(instance)
 		MergeDatabase(instance)
@@ -502,6 +504,8 @@ func GetDBInstance() *gorm.DB {
 		// 自动迁移模型
 		err = instance.AutoMigrate(
 			&models.User{},
+			&models.Tenant{},
+			&models.TenantMember{},
 			&models.Client{},
 			&models.Record{},
 			&models.GPURecord{},

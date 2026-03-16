@@ -15,7 +15,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/api"
 	"github.com/komari-monitor/komari/config"
-	"github.com/komari-monitor/komari/database/dbcore"
+	"github.com/komari-monitor/komari/database"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/public"
 )
@@ -143,7 +143,12 @@ func SetTheme(c *gin.Context) {
 		}
 	}
 
-	if err := config.Set("theme", themeName); err != nil {
+	tenantID, ok := requireCurrentTenantID(c)
+	if !ok {
+		return
+	}
+
+	if err := config.SetForTenant(tenantID, config.ThemeKey, themeName); err != nil {
 		api.RespondError(c, http.StatusInternalServerError, "更新主题设置失败: "+err.Error())
 		return
 	}
@@ -742,6 +747,10 @@ func UpdateThemeSettings(c *gin.Context) {
 		api.RespondError(c, http.StatusBadRequest, "主题名称不能为空")
 		return
 	}
+	tenantID, ok := requireCurrentTenantID(c)
+	if !ok {
+		return
+	}
 
 	var req map[string]any
 
@@ -750,17 +759,14 @@ func UpdateThemeSettings(c *gin.Context) {
 		api.RespondError(c, http.StatusBadRequest, "参数错误: "+err.Error())
 		return
 	}
-	db := dbcore.GetDBInstance()
-
 	data, err := json.Marshal(&req)
 	if err != nil {
 		api.RespondError(c, http.StatusInternalServerError, "生成主题配置失败: "+err.Error())
 		return
 	}
-
-	var themeCfg models.ThemeConfiguration
-	db.Where("short = ?", theme).
-		Assign(models.ThemeConfiguration{Short: theme, Data: string(data)}).
-		FirstOrCreate(&themeCfg)
+	if err := database.UpsertThemeConfigurationForTenant(tenantID, theme, string(data)); err != nil {
+		api.RespondError(c, http.StatusInternalServerError, "保存主题配置失败: "+err.Error())
+		return
+	}
 	api.RespondSuccess(c, nil)
 }

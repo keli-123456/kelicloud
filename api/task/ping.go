@@ -17,7 +17,13 @@ type PublicPingTask struct {
 }
 
 func GetPublicPingTasks(c *gin.Context) {
-	tasks, err := tasks.GetAllPingTasks()
+	tenantID, _, err := api.ResolveTenantScopeFromSession(c)
+	if err != nil {
+		api.RespondError(c, http.StatusInternalServerError, "Failed to resolve tenant scope: "+err.Error())
+		return
+	}
+
+	tasks, err := tasks.GetAllPingTasksByTenant(tenantID)
 	if err != nil {
 		api.RespondError(c, http.StatusInternalServerError, err.Error())
 		return

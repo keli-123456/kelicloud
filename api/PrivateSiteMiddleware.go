@@ -46,7 +46,14 @@ func PrivateSiteMiddleware() gin.HandlerFunc {
 			c.Next()
 			return
 		}
-		PrivateSite, err := config.GetAs[bool](config.PrivateSiteKey, false)
+		tenantID, _, tenantErr := ResolveTenantScopeFromSession(c)
+		if tenantErr != nil {
+			RespondError(c, http.StatusInternalServerError, "Failed to resolve tenant scope.")
+			c.Abort()
+			return
+		}
+
+		PrivateSite, err := config.GetAsForTenant[bool](tenantID, config.PrivateSiteKey, false)
 		if err != nil {
 			RespondError(c, http.StatusInternalServerError, "Failed to get configuration.")
 			c.Abort()
@@ -64,11 +71,11 @@ func PrivateSiteMiddleware() gin.HandlerFunc {
 				return false
 			}
 
-			tempKeyExpireTime, err := config.GetAs[int64]("tempory_share_token_expire_at", 0)
+			tempKeyExpireTime, err := config.GetAsForTenant[int64](tenantID, config.TempShareTokenExpireAtKey, 0)
 			if err != nil {
 				return false
 			}
-			allowTempKey, err := config.GetAs[string]("tempory_share_token", "")
+			allowTempKey, err := config.GetAsForTenant[string](tenantID, config.TempShareTokenKey, "")
 			if err != nil {
 				return false
 			}
