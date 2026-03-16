@@ -268,6 +268,111 @@ func RemoveCurrentTenantMember(c *gin.Context) {
 	api.RespondSuccess(c, gin.H{"user_uuid": targetUserUUID})
 }
 
+func LeaveCurrentTenant(c *gin.Context) {
+	tenantID, ok := requireCurrentTenantID(c)
+	if !ok {
+		return
+	}
+
+	userUUID, _ := c.Get("uuid")
+	nextTenant, err := database.LeaveTenant(tenantID, userUUID.(string))
+	if err != nil {
+		switch {
+		case errors.Is(err, gorm.ErrRecordNotFound):
+			api.RespondError(c, http.StatusNotFound, "Tenant member not found")
+		case errors.Is(err, database.ErrCannotRemoveLastTenantOwner):
+			api.RespondError(c, http.StatusBadRequest, "Cannot leave as the last tenant owner")
+		case errors.Is(err, database.ErrCannotLeaveLastAccessibleTenant):
+			api.RespondError(c, http.StatusBadRequest, "Cannot leave the last accessible tenant")
+		default:
+			api.RespondError(c, http.StatusInternalServerError, "Failed to leave tenant: "+err.Error())
+		}
+		return
+	}
+
+	api.AuditLogForTenant(tenantID, c.ClientIP(), userUUID.(string), "leave tenant: "+tenantID, "warn")
+	api.RespondSuccess(c, gin.H{"current": nextTenant})
+}
+
+func TransferCurrentTenantOwnership(c *gin.Context) {
+	tenantID, ok := requireCurrentTenantID(c)
+	if !ok {
+		return
+	}
+	if currentTenantRole(c) != database.RoleOwner {
+		api.RespondError(c, http.StatusForbidden, "Only tenant owners can transfer ownership")
+		return
+	}
+
+	var payload struct {
+		UserUUID string `json:"user_uuid" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&payload); err != nil {
+		api.RespondError(c, http.StatusBadRequest, "Invalid request: "+err.Error())
+		return
+	}
+
+	userUUID, _ := c.Get("uuid")
+	targetUserUUID := strings.TrimSpace(payload.UserUUID)
+	if targetUserUUID == "" {
+		api.RespondError(c, http.StatusBadRequest, "user_uuid is required")
+		return
+	}
+
+	if err := database.TransferTenantOwnership(tenantID, userUUID.(string), targetUserUUID); err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			api.RespondError(c, http.StatusNotFound, "Tenant owner or target member not found")
+			return
+		}
+		api.RespondError(c, http.StatusInternalServerError, "Failed to transfer tenant ownership: "+err.Error())
+		return
+	}
+
+	api.AuditLogForCurrentTenant(c, userUUID.(string), "transfer tenant ownership: "+userUUID.(string)+" -> "+targetUserUUID, "warn")
+	api.RespondSuccess(c, gin.H{"user_uuid": targetUserUUID, "role": database.RoleOwner})
+}
+
+func DeleteCurrentTenant(c *gin.Context) {
+	tenantID, ok := requireCurrentTenantID(c)
+	if !ok {
+		return
+	}
+
+	currentRole := currentTenantRole(c)
+	platformAdmin, err := isPlatformAdmin(c)
+	if err != nil {
+		api.RespondError(c, http.StatusInternalServerError, "Failed to resolve platform admin permissions: "+err.Error())
+		return
+	}
+	if currentRole != database.RoleOwner && !platformAdmin {
+		api.RespondError(c, http.StatusForbidden, "Tenant owner permission is required")
+		return
+	}
+
+	userUUID, hasUserUUID := c.Get("uuid")
+	if err := database.DeleteTenant(tenantID); err != nil {
+		switch {
+		case errors.Is(err, gorm.ErrRecordNotFound):
+			api.RespondError(c, http.StatusNotFound, "Tenant not found")
+		case errors.Is(err, database.ErrCannotDeleteDefaultTenant):
+			api.RespondError(c, http.StatusBadRequest, "Default tenant cannot be deleted")
+		default:
+			api.RespondError(c, http.StatusInternalServerError, "Failed to delete tenant: "+err.Error())
+		}
+		return
+	}
+
+	var nextTenant *database.AccessibleTenant
+	if hasUserUUID {
+		nextTenant, _, _ = database.ResolveAccessibleTenant(userUUID.(string), "")
+	}
+
+	api.RespondSuccess(c, gin.H{
+		"deleted_tenant_id": tenantID,
+		"current":           nextTenant,
+	})
+}
+
 func currentTenantRole(c *gin.Context) string {
 	role, _ := c.Get("tenant_role")
 	if text, ok := role.(string); ok {

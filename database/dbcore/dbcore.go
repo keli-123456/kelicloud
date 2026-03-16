@@ -506,6 +506,7 @@ func GetDBInstance() *gorm.DB {
 			&models.User{},
 			&models.Tenant{},
 			&models.TenantMember{},
+			&models.TenantInvite{},
 			&models.Client{},
 			&models.Record{},
 			&models.GPURecord{},

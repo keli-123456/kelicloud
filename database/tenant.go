@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
+	"github.com/komari-monitor/komari/common"
 	"github.com/komari-monitor/komari/config"
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
@@ -20,6 +21,12 @@ const (
 	RoleAdmin    = "admin"
 	RoleOperator = "operator"
 	RoleViewer   = "viewer"
+)
+
+var (
+	ErrCannotDeleteDefaultTenant       = errors.New("cannot delete default tenant")
+	ErrCannotLeaveLastAccessibleTenant = errors.New("cannot leave the last accessible tenant")
+	ErrCannotRemoveLastTenantOwner     = errors.New("cannot remove the last tenant owner")
 )
 
 type AccessibleTenant struct {
@@ -162,6 +169,11 @@ func EnsureDefaultTenantMembership(userUUID, role string) error {
 }
 
 func ListAccessibleTenantsByUser(userUUID string) ([]AccessibleTenant, error) {
+	db := dbcore.GetDBInstance()
+	return listAccessibleTenantsByUserWithDB(db, userUUID, "")
+}
+
+func listAccessibleTenantsByUserWithDB(db *gorm.DB, userUUID, excludeTenantID string) ([]AccessibleTenant, error) {
 	type tenantRow struct {
 		ID          string
 		Slug        string
@@ -172,12 +184,14 @@ func ListAccessibleTenantsByUser(userUUID string) ([]AccessibleTenant, error) {
 	}
 
 	var rows []tenantRow
-	db := dbcore.GetDBInstance()
-	if err := db.Table("tenant_members").
+	query := db.Table("tenant_members").
 		Select("tenants.id, tenants.slug, tenants.name, tenants.description, tenants.is_default, tenant_members.role").
 		Joins("JOIN tenants ON tenants.id = tenant_members.tenant_id").
-		Where("tenant_members.user_uuid = ?", userUUID).
-		Scan(&rows).Error; err != nil {
+		Where("tenant_members.user_uuid = ?", userUUID)
+	if strings.TrimSpace(excludeTenantID) != "" {
+		query = query.Where("tenant_members.tenant_id <> ?", excludeTenantID)
+	}
+	if err := query.Scan(&rows).Error; err != nil {
 		return nil, err
 	}
 
@@ -384,6 +398,59 @@ func AddTenantMember(tenantID, userUUID, role string) error {
 	})
 }
 
+func LeaveTenant(tenantID, userUUID string) (*AccessibleTenant, error) {
+	db := dbcore.GetDBInstance()
+	return leaveTenantWithDB(db, tenantID, userUUID)
+}
+
+func leaveTenantWithDB(db *gorm.DB, tenantID, userUUID string) (*AccessibleTenant, error) {
+	tenantID = strings.TrimSpace(tenantID)
+	userUUID = strings.TrimSpace(userUUID)
+	if tenantID == "" || userUUID == "" {
+		return nil, gorm.ErrRecordNotFound
+	}
+
+	var nextTenant *AccessibleTenant
+	err := db.Transaction(func(tx *gorm.DB) error {
+		member, err := getTenantMemberWithDB(tx, tenantID, userUUID)
+		if err != nil {
+			return err
+		}
+
+		if member.Role == RoleOwner {
+			ownerCount, err := countTenantMembersByRoleWithDB(tx, tenantID, RoleOwner)
+			if err != nil {
+				return err
+			}
+			if ownerCount <= 1 {
+				return ErrCannotRemoveLastTenantOwner
+			}
+		}
+
+		remainingTenants, err := listAccessibleTenantsByUserWithDB(tx, userUUID, tenantID)
+		if err != nil {
+			return err
+		}
+		if len(remainingTenants) == 0 {
+			return ErrCannotLeaveLastAccessibleTenant
+		}
+		nextTenant = &remainingTenants[0]
+
+		if err := tx.Where("tenant_id = ? AND user_uuid = ?", tenantID, userUUID).
+			Delete(&models.TenantMember{}).Error; err != nil {
+			return err
+		}
+
+		return tx.Model(&models.Session{}).
+			Where("uuid = ? AND current_tenant_id = ?", userUUID, tenantID).
+			Update("current_tenant_id", nextTenant.ID).Error
+	})
+	if err != nil {
+		return nil, err
+	}
+	return nextTenant, nil
+}
+
 func UpdateTenantMemberRole(tenantID, userUUID, role string) error {
 	db := dbcore.GetDBInstance()
 	role = NormalizeTenantRole(role)
@@ -397,15 +464,105 @@ func DeleteTenantMember(tenantID, userUUID string) error {
 	return db.Where("tenant_id = ? AND user_uuid = ?", tenantID, userUUID).Delete(&models.TenantMember{}).Error
 }
 
+func TransferTenantOwnership(tenantID, currentOwnerUUID, targetUserUUID string) error {
+	db := dbcore.GetDBInstance()
+	return transferTenantOwnershipWithDB(db, tenantID, currentOwnerUUID, targetUserUUID)
+}
+
+func transferTenantOwnershipWithDB(db *gorm.DB, tenantID, currentOwnerUUID, targetUserUUID string) error {
+	tenantID = strings.TrimSpace(tenantID)
+	currentOwnerUUID = strings.TrimSpace(currentOwnerUUID)
+	targetUserUUID = strings.TrimSpace(targetUserUUID)
+	if tenantID == "" || currentOwnerUUID == "" || targetUserUUID == "" {
+		return gorm.ErrRecordNotFound
+	}
+	if currentOwnerUUID == targetUserUUID {
+		return nil
+	}
+
+	return db.Transaction(func(tx *gorm.DB) error {
+		currentMember, err := getTenantMemberWithDB(tx, tenantID, currentOwnerUUID)
+		if err != nil {
+			return err
+		}
+		if currentMember.Role != RoleOwner {
+			return gorm.ErrRecordNotFound
+		}
+
+		if _, err := getTenantMemberWithDB(tx, tenantID, targetUserUUID); err != nil {
+			return err
+		}
+
+		if err := tx.Model(&models.TenantMember{}).
+			Where("tenant_id = ? AND user_uuid = ?", tenantID, targetUserUUID).
+			Update("role", RoleOwner).Error; err != nil {
+			return err
+		}
+
+		return tx.Model(&models.TenantMember{}).
+			Where("tenant_id = ? AND user_uuid = ?", tenantID, currentOwnerUUID).
+			Update("role", RoleAdmin).Error
+	})
+}
+
+func DeleteTenant(tenantID string) error {
+	db := dbcore.GetDBInstance()
+	return deleteTenantWithDB(db, tenantID)
+}
+
+func deleteTenantWithDB(db *gorm.DB, tenantID string) error {
+	tenantID = strings.TrimSpace(tenantID)
+	if tenantID == "" {
+		return gorm.ErrRecordNotFound
+	}
+
+	return db.Transaction(func(tx *gorm.DB) error {
+		tenant, err := getTenantByIDWithDB(tx, tenantID)
+		if err != nil {
+			return err
+		}
+		if tenant.IsDefault {
+			return ErrCannotDeleteDefaultTenant
+		}
+
+		memberUUIDs, err := listTenantMemberUUIDsWithDB(tx, tenantID)
+		if err != nil {
+			return err
+		}
+		sessionFallbacks, err := buildTenantSessionFallbacksWithDB(tx, tenantID, memberUUIDs)
+		if err != nil {
+			return err
+		}
+
+		if err := deleteTenantClientsWithDB(tx, tenantID); err != nil {
+			return err
+		}
+		if err := deleteTenantRowsByScopeTx(tx, tenantID); err != nil {
+			return err
+		}
+
+		if err := tx.Where("tenant_id = ?", tenantID).Delete(&models.TenantMember{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("id = ?", tenantID).Delete(&models.Tenant{}).Error; err != nil {
+			return err
+		}
+
+		for userUUID, nextTenantID := range sessionFallbacks {
+			if err := tx.Model(&models.Session{}).
+				Where("uuid = ? AND current_tenant_id = ?", userUUID, tenantID).
+				Update("current_tenant_id", nextTenantID).Error; err != nil {
+				return err
+			}
+		}
+
+		return nil
+	})
+}
+
 func CountTenantMembersByRole(tenantID, role string) (int64, error) {
 	db := dbcore.GetDBInstance()
-	var count int64
-	if err := db.Model(&models.TenantMember{}).
-		Where("tenant_id = ? AND role = ?", tenantID, NormalizeTenantRole(role)).
-		Count(&count).Error; err != nil {
-		return 0, err
-	}
-	return count, nil
+	return countTenantMembersByRoleWithDB(db, tenantID, role)
 }
 
 func getOrCreateDefaultTenantTx(tx *gorm.DB) (*models.Tenant, error) {
@@ -514,6 +671,142 @@ func ensureTenantScopedCloudSchemaTx(tx *gorm.DB) error {
 		return err
 	}
 	return ensureThemeConfigurationSchemaTx(tx)
+}
+
+func getTenantByIDWithDB(db *gorm.DB, tenantID string) (*models.Tenant, error) {
+	var tenant models.Tenant
+	if err := db.Where("id = ?", tenantID).First(&tenant).Error; err != nil {
+		return nil, err
+	}
+	return &tenant, nil
+}
+
+func getTenantMemberWithDB(db *gorm.DB, tenantID, userUUID string) (*models.TenantMember, error) {
+	var member models.TenantMember
+	if err := db.Where("tenant_id = ? AND user_uuid = ?", tenantID, userUUID).First(&member).Error; err != nil {
+		return nil, err
+	}
+	member.Role = NormalizeTenantRole(member.Role)
+	return &member, nil
+}
+
+func countTenantMembersByRoleWithDB(db *gorm.DB, tenantID, role string) (int64, error) {
+	var count int64
+	if err := db.Model(&models.TenantMember{}).
+		Where("tenant_id = ? AND role = ?", tenantID, NormalizeTenantRole(role)).
+		Count(&count).Error; err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
+func listTenantMemberUUIDsWithDB(db *gorm.DB, tenantID string) ([]string, error) {
+	var userUUIDs []string
+	if err := db.Model(&models.TenantMember{}).
+		Where("tenant_id = ?", tenantID).
+		Pluck("user_uuid", &userUUIDs).Error; err != nil {
+		return nil, err
+	}
+	return userUUIDs, nil
+}
+
+func buildTenantSessionFallbacksWithDB(db *gorm.DB, tenantID string, userUUIDs []string) (map[string]string, error) {
+	fallbacks := make(map[string]string, len(userUUIDs))
+	for _, userUUID := range userUUIDs {
+		tenants, err := listAccessibleTenantsByUserWithDB(db, userUUID, tenantID)
+		if err != nil {
+			return nil, err
+		}
+		if len(tenants) == 0 {
+			fallbacks[userUUID] = ""
+			continue
+		}
+		fallbacks[userUUID] = tenants[0].ID
+	}
+	return fallbacks, nil
+}
+
+func deleteTenantClientsWithDB(db *gorm.DB, tenantID string) error {
+	var clientUUIDs []string
+	if err := db.Model(&models.Client{}).
+		Where("tenant_id = ?", tenantID).
+		Pluck("uuid", &clientUUIDs).Error; err != nil {
+		return err
+	}
+
+	for _, clientUUID := range clientUUIDs {
+		if err := deleteTenantClientTx(db, clientUUID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func deleteTenantClientTx(tx *gorm.DB, clientUUID string) error {
+	cleanupModels := []struct {
+		model interface{}
+		query string
+	}{
+		{model: &common.ClientConfig{}, query: "client_uuid = ?"},
+		{model: &models.OfflineNotification{}, query: "client = ?"},
+		{model: &models.TaskResult{}, query: "client = ?"},
+		{model: &models.PingRecord{}, query: "client = ?"},
+		{model: &models.Record{}, query: "client = ?"},
+		{model: &models.GPURecord{}, query: "client = ?"},
+	}
+
+	for _, cleanup := range cleanupModels {
+		if !tx.Migrator().HasTable(cleanup.model) {
+			continue
+		}
+		if err := tx.Where(cleanup.query, clientUUID).Delete(cleanup.model).Error; err != nil {
+			return err
+		}
+	}
+
+	cleanupTables := []struct {
+		table string
+		model interface{}
+	}{
+		{table: "records_long_term", model: &models.Record{}},
+		{table: "gpu_records_long_term", model: &models.GPURecord{}},
+	}
+	for _, cleanup := range cleanupTables {
+		if !tx.Migrator().HasTable(cleanup.table) {
+			continue
+		}
+		if err := tx.Table(cleanup.table).Where("client = ?", clientUUID).Delete(cleanup.model).Error; err != nil {
+			return err
+		}
+	}
+
+	return tx.Where("uuid = ?", clientUUID).Delete(&models.Client{}).Error
+}
+
+func deleteTenantRowsByScopeTx(tx *gorm.DB, tenantID string) error {
+	cleanupModels := []interface{}{
+		&models.TenantInvite{},
+		&models.TaskResult{},
+		&models.Task{},
+		&models.LoadNotification{},
+		&models.PingTask{},
+		&models.Clipboard{},
+		&models.Log{},
+		&models.CloudProvider{},
+		&models.CloudInstanceShare{},
+		&models.ThemeConfiguration{},
+		&config.TenantConfigItem{},
+	}
+
+	for _, model := range cleanupModels {
+		if !tx.Migrator().HasTable(model) {
+			continue
+		}
+		if err := tx.Where("tenant_id = ?", tenantID).Delete(model).Error; err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func ensureCloudProviderSchemaTx(tx *gorm.DB) error {
