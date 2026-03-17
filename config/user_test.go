@@ -132,3 +132,69 @@ func TestResolveValidTempShareUserUUID(t *testing.T) {
 		t.Fatalf("expected expired token to be rejected, got ok=%v user=%q", ok, userUUID)
 	}
 }
+
+func TestUserPolicyDefaultsAndPersistence(t *testing.T) {
+	setupConfigTestDB(t)
+
+	policy, err := GetUserPolicy("user-a")
+	if err != nil {
+		t.Fatalf("failed to load default user policy: %v", err)
+	}
+	if policy.ServerQuota != 0 {
+		t.Fatalf("expected unlimited quota by default, got %d", policy.ServerQuota)
+	}
+	if len(policy.AllowedFeatures) != 0 {
+		t.Fatalf("expected default features to be unrestricted, got %+v", policy.AllowedFeatures)
+	}
+
+	quota := 3
+	features := []string{UserFeatureCloud, UserFeatureClients, "clients", "CLOUD"}
+	if err := SetUserPolicy("user-a", &quota, &features); err != nil {
+		t.Fatalf("failed to set user policy: %v", err)
+	}
+
+	policy, err = GetUserPolicy("user-a")
+	if err != nil {
+		t.Fatalf("failed to reload user policy: %v", err)
+	}
+	if policy.ServerQuota != 3 {
+		t.Fatalf("expected server quota 3, got %d", policy.ServerQuota)
+	}
+	if len(policy.AllowedFeatures) != 2 || policy.AllowedFeatures[0] != UserFeatureClients || policy.AllowedFeatures[1] != UserFeatureCloud {
+		t.Fatalf("unexpected normalized features: %+v", policy.AllowedFeatures)
+	}
+
+	allowed, err := IsUserFeatureAllowed("user-a", UserFeatureCloud)
+	if err != nil {
+		t.Fatalf("failed to check allowed feature: %v", err)
+	}
+	if !allowed {
+		t.Fatal("expected cloud feature to remain allowed")
+	}
+	allowed, err = IsUserFeatureAllowed("user-a", UserFeatureLogs)
+	if err != nil {
+		t.Fatalf("failed to check denied feature: %v", err)
+	}
+	if allowed {
+		t.Fatal("expected logs feature to be denied when not listed")
+	}
+}
+
+func TestSetUserPolicyRejectsInvalidFeature(t *testing.T) {
+	setupConfigTestDB(t)
+
+	features := []string{"invalid-feature"}
+	err := SetUserPolicy("user-a", nil, &features)
+	if err == nil {
+		t.Fatal("expected invalid feature to be rejected")
+	}
+}
+
+func TestGetUserPolicyRequiresScopedUserKey(t *testing.T) {
+	setupConfigTestDB(t)
+
+	_, err := FindUserUUIDByConfigValue(SitenameKey, "Komari")
+	if err == nil || err.Error() != "config key is not user scoped" {
+		t.Fatalf("expected non-user-scoped key lookup to fail, got %v", err)
+	}
+}

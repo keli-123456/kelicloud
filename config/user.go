@@ -30,6 +30,8 @@ var userScopedKeys = map[string]struct{}{
 	SendIpAddrToGuestKey:      {},
 	TempShareTokenKey:         {},
 	TempShareTokenExpireAtKey: {},
+	UserServerQuotaKey:        {},
+	UserAllowedFeaturesKey:    {},
 }
 
 func IsUserScopedKey(key string) bool {

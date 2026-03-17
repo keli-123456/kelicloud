@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/komari-monitor/komari/config"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 
@@ -157,8 +158,15 @@ func TestUserScopedClientQueriesIgnoreOwnerlessData(t *testing.T) {
 func TestCreateClientWithUserWithDBPersistsOwner(t *testing.T) {
 	db := openClientTestDB(t)
 
-	if err := db.AutoMigrate(&models.Client{}); err != nil {
+	config.SetDb(db)
+
+	if err := db.AutoMigrate(&models.User{}, &models.Client{}); err != nil {
 		t.Fatalf("failed to migrate test schema: %v", err)
+	}
+
+	now := models.FromTime(time.Now())
+	if err := db.Create(&models.User{UUID: "user-a", Username: "alice", Passwd: "hashed", CreatedAt: now, UpdatedAt: now}).Error; err != nil {
+		t.Fatalf("failed to create owner user: %v", err)
 	}
 
 	clientUUID, token, err := createClientWithUserWithDB(db, "user-a", "User Client", "edge")
@@ -178,5 +186,31 @@ func TestCreateClientWithUserWithDBPersistsOwner(t *testing.T) {
 	}
 	if client.Name != "User Client" || client.Group != "edge" {
 		t.Fatalf("unexpected created client payload: %+v", client)
+	}
+}
+
+func TestCreateClientWithUserWithDBHonorsQuota(t *testing.T) {
+	db := openClientTestDB(t)
+	config.SetDb(db)
+
+	if err := db.AutoMigrate(&models.User{}, &models.Client{}); err != nil {
+		t.Fatalf("failed to migrate test schema: %v", err)
+	}
+
+	now := models.FromTime(time.Now())
+	if err := db.Create(&models.User{UUID: "user-a", Username: "alice", Passwd: "hashed", CreatedAt: now, UpdatedAt: now}).Error; err != nil {
+		t.Fatalf("failed to create owner user: %v", err)
+	}
+
+	quota := 1
+	if err := config.SetUserPolicy("user-a", &quota, nil); err != nil {
+		t.Fatalf("failed to set user quota: %v", err)
+	}
+
+	if _, _, err := createClientWithUserWithDB(db, "user-a", "First", ""); err != nil {
+		t.Fatalf("failed to create first client under quota: %v", err)
+	}
+	if _, _, err := createClientWithUserWithDB(db, "user-a", "Second", ""); err == nil {
+		t.Fatal("expected second client creation to be blocked by quota")
 	}
 }

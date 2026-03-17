@@ -104,6 +104,10 @@ func RegisterClient(c *gin.Context) {
 
 	uuid, token, err := clients.CreateClientWithNameAndGroupForUser(userUUID, name, group)
 	if err != nil {
+		if errors.Is(err, clients.ErrClientQuotaExceeded) {
+			api.RespondError(c, 403, "Failed to create client: "+err.Error())
+			return
+		}
 		api.RespondError(c, 500, "Failed to create client: "+err.Error())
 		return
 	}

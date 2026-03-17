@@ -232,7 +232,7 @@ func RunServer() {
 			updateGroup.POST("/favicon", admin.RequirePlatformAdminMiddleware(), update.DeleteFavicon)
 		}
 		// tasks
-		taskGroup := adminAuthrized.Group("/task")
+		taskGroup := adminAuthrized.Group("/task", admin.RequireUserFeatureMiddleware(config.UserFeatureTasks))
 		{
 			taskGroup.GET("/all", admin.GetTasks)
 			taskGroup.POST("/exec", admin.Exec)
@@ -253,7 +253,7 @@ func RunServer() {
 			settingsGroup.POST("/message-sender", admin.RequirePlatformAdminMiddleware(), admin.SetMessageSenderProvider)
 			settingsGroup.GET("/message-sender", admin.RequirePlatformAdminMiddleware(), admin.GetMessageSenderProvider)
 		}
-		cloudGroup := adminAuthrized.Group("/cloud")
+		cloudGroup := adminAuthrized.Group("/cloud", admin.RequireUserFeatureMiddleware(config.UserFeatureCloud))
 		{
 			cloudGroup.GET("/providers", admin.GetCloudProviders)
 			cloudGroup.GET("/providers/:provider", admin.GetCloudProvider)
@@ -330,7 +330,7 @@ func RunServer() {
 			userGroup.DELETE("/:uuid", admin.DeleteUser)
 		}
 		// clients
-		clientGroup := adminAuthrized.Group("/client")
+		clientGroup := adminAuthrized.Group("/client", admin.RequireUserFeatureMiddleware(config.UserFeatureClients))
 		{
 			clientGroup.POST("/add", admin.AddClient)
 			clientGroup.GET("/list", admin.ListClients)
@@ -344,7 +344,7 @@ func RunServer() {
 		}
 
 		// records
-		recordGroup := adminAuthrized.Group("/record")
+		recordGroup := adminAuthrized.Group("/record", admin.RequireUserFeatureMiddleware(config.UserFeatureRecords))
 		{
 			recordGroup.POST("/clear", admin.ClearRecord)
 			recordGroup.POST("/clear/all", admin.ClearAllRecords)
@@ -367,10 +367,10 @@ func RunServer() {
 			two_factorGroup.POST("/enable", admin.Enable2FA)
 			two_factorGroup.POST("/disable", admin.Disable2FA)
 		}
-		adminAuthrized.GET("/logs", log_api.GetLogs)
+		adminAuthrized.GET("/logs", admin.RequireUserFeatureMiddleware(config.UserFeatureLogs), log_api.GetLogs)
 
 		// clipboard
-		clipboardGroup := adminAuthrized.Group("/clipboard")
+		clipboardGroup := adminAuthrized.Group("/clipboard", admin.RequireUserFeatureMiddleware(config.UserFeatureClipboard))
 		{
 			clipboardGroup.GET("/:id", clipboard.GetClipboard)
 			clipboardGroup.GET("", clipboard.ListClipboard)
@@ -380,7 +380,7 @@ func RunServer() {
 			clipboardGroup.POST("/:id/remove", clipboard.DeleteClipboard)
 		}
 
-		notificationGroup := adminAuthrized.Group("/notification")
+		notificationGroup := adminAuthrized.Group("/notification", admin.RequireUserFeatureMiddleware(config.UserFeatureNotifications))
 		{
 			// offline notifications
 			notificationGroup.GET("/offline", notification.ListOfflineNotifications)
@@ -396,7 +396,7 @@ func RunServer() {
 			}
 		}
 
-		pingTaskGroup := adminAuthrized.Group("/ping")
+		pingTaskGroup := adminAuthrized.Group("/ping", admin.RequireUserFeatureMiddleware(config.UserFeaturePing))
 		{
 			pingTaskGroup.GET("/", admin.GetAllPingTasks)
 			pingTaskGroup.POST("/add", admin.AddPingTask)

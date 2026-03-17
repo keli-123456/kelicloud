@@ -7,6 +7,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/api"
+	"github.com/komari-monitor/komari/database/accounts"
 	"github.com/komari-monitor/komari/database/models"
 	records "github.com/komari-monitor/komari/database/records"
 	"github.com/komari-monitor/komari/database/tasks"
@@ -16,7 +17,7 @@ func GetRecordsByUUID(c *gin.Context) {
 	uuid := c.Query("uuid")
 	loadType := c.Query("load_type")
 
-	userUUID, ok := api.RequireUserScopeFromSession(c)
+	user, ok := api.RequireSessionUser(c)
 	if !ok {
 		return
 	}
@@ -50,7 +51,13 @@ func GetRecordsByUUID(c *gin.Context) {
 
 	startTime := time.Now().Add(-time.Duration(hoursInt) * time.Hour)
 	endTime := time.Now()
-	clientRecords, err := records.GetRecordsByClientAndTimeForUser(userUUID, uuid, startTime, endTime)
+	isAdmin := accounts.IsUserRoleAtLeast(user.Role, accounts.RoleAdmin)
+	var clientRecords []models.Record
+	if isAdmin {
+		clientRecords, err = records.GetRecordsByClientAndTime(uuid, startTime, endTime)
+	} else {
+		clientRecords, err = records.GetRecordsByClientAndTimeForUser(user.UUID, uuid, startTime, endTime)
+	}
 	if err != nil {
 		api.RespondError(c, 500, "Failed to fetch records: "+err.Error())
 		return
@@ -74,7 +81,12 @@ func GetRecordsByUUID(c *gin.Context) {
 
 	// 自动检测是否有GPU数据并附加到响应中
 	if loadType == "" || loadType == "all" || loadType == "gpu" {
-		gpuRecords, err := records.GetGPURecordsByClientAndTimeForUser(userUUID, uuid, startTime, endTime)
+		var gpuRecords []models.GPURecord
+		if isAdmin {
+			gpuRecords, err = records.GetGPURecordsByClientAndTime(uuid, startTime, endTime)
+		} else {
+			gpuRecords, err = records.GetGPURecordsByClientAndTimeForUser(user.UUID, uuid, startTime, endTime)
+		}
 		if err == nil && len(gpuRecords) > 0 {
 			// 按设备索引分组数据，构建简化的设备结构
 			gpuDevices := make(map[string]interface{})
@@ -180,7 +192,7 @@ func GetPingRecords(c *gin.Context) {
 		return
 	}
 
-	userUUID, ok := api.RequireUserScopeFromSession(c)
+	user, ok := api.RequireSessionUser(c)
 	if !ok {
 		return
 	}
@@ -234,7 +246,12 @@ func GetPingRecords(c *gin.Context) {
 		taskId = parsedTaskID
 	}
 
-	records, err = tasks.GetPingRecordsByUser(userUUID, uuid, taskId, startTime, endTime)
+	isAdmin := accounts.IsUserRoleAtLeast(user.Role, accounts.RoleAdmin)
+	if isAdmin {
+		records, err = tasks.GetPingRecords(uuid, taskId, startTime, endTime)
+	} else {
+		records, err = tasks.GetPingRecordsByUser(user.UUID, uuid, taskId, startTime, endTime)
+	}
 	if err != nil {
 		api.RespondError(c, 500, "Failed to fetch ping records: "+err.Error())
 		return
@@ -305,7 +322,12 @@ func GetPingRecords(c *gin.Context) {
 	// 2. uuid != "" && taskId != -1 - 返回该客户端在指定任务的信息
 	// 3. taskId != -1 && uuid == "" - 返回该任务的所有客户端统计（通过 BasicInfo）
 	if uuid != "" || taskId != -1 {
-		pingTasks, err := tasks.GetAllPingTasksByUser(userUUID)
+		var pingTasks []models.PingTask
+		if isAdmin {
+			pingTasks, err = tasks.GetAllPingTasks()
+		} else {
+			pingTasks, err = tasks.GetAllPingTasksByUser(user.UUID)
+		}
 		if err != nil {
 			api.RespondError(c, 500, "Failed to fetch ping tasks: "+err.Error())
 			return

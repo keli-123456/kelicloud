@@ -1,11 +1,13 @@
 package clients
 
 import (
+	"errors"
 	"math"
 	"strings"
 	"time"
 
 	"github.com/komari-monitor/komari/common"
+	"github.com/komari-monitor/komari/config"
 	"github.com/komari-monitor/komari/database/accounts"
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
@@ -17,6 +19,8 @@ import (
 
 	"github.com/google/uuid"
 )
+
+var ErrClientQuotaExceeded = errors.New("client quota exceeded")
 
 // Deprecated: DeleteClientConfig is deprecated and will be removed in a future release. Use DeleteClient instead.
 func DeleteClientConfig(clientUuid string) error {
@@ -206,6 +210,12 @@ func getAllClientBasicInfoByUserWithDB(db *gorm.DB, userUUID string) (clients []
 	return clients, nil
 }
 
+func countClientsByUserWithDB(db *gorm.DB, userUUID string) (int64, error) {
+	var total int64
+	err := applyClientUserScopeWithDB(db.Model(&models.Client{}), userUUID).Count(&total).Error
+	return total, err
+}
+
 func saveClientWithDB(db *gorm.DB, updates map[string]interface{}) error {
 	clientUUID, ok := updates["uuid"].(string)
 	if !ok || clientUUID == "" {
@@ -389,6 +399,9 @@ func createClientWithUserWithDB(db *gorm.DB, userUUID, name, group string) (clie
 	if userUUID == "" {
 		return "", "", fmt.Errorf("user id is required")
 	}
+	if err := ensureClientQuotaWithDB(db, userUUID); err != nil {
+		return "", "", err
+	}
 
 	token = utils.GenerateToken()
 	clientUUID = uuid.New().String()
@@ -410,6 +423,25 @@ func createClientWithUserWithDB(db *gorm.DB, userUUID, name, group string) (clie
 		return "", "", err
 	}
 	return clientUUID, token, nil
+}
+
+func ensureClientQuotaWithDB(db *gorm.DB, userUUID string) error {
+	quota, err := config.GetUserServerQuota(userUUID)
+	if err != nil {
+		return err
+	}
+	if quota <= 0 {
+		return nil
+	}
+
+	total, err := countClientsByUserWithDB(db, userUUID)
+	if err != nil {
+		return err
+	}
+	if total >= int64(quota) {
+		return fmt.Errorf("%w: limit=%d", ErrClientQuotaExceeded, quota)
+	}
+	return nil
 }
 
 /*
@@ -475,6 +507,50 @@ func GetAllClientBasicInfo() (clients []models.Client, err error) {
 func GetAllClientBasicInfoByUser(userUUID string) (clients []models.Client, err error) {
 	db := dbcore.GetDBInstance()
 	return getAllClientBasicInfoByUserWithDB(db, userUUID)
+}
+
+func CountClientsByUsers(userUUIDs []string) (map[string]int64, error) {
+	db := dbcore.GetDBInstance()
+	normalized := make([]string, 0, len(userUUIDs))
+	seen := make(map[string]struct{}, len(userUUIDs))
+	for _, userUUID := range userUUIDs {
+		value := strings.TrimSpace(userUUID)
+		if value == "" {
+			continue
+		}
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		normalized = append(normalized, value)
+	}
+
+	result := make(map[string]int64, len(normalized))
+	if len(normalized) == 0 {
+		return result, nil
+	}
+
+	type row struct {
+		UserID string
+		Total  int64
+	}
+	var rows []row
+	if err := db.Model(&models.Client{}).
+		Select("user_id, COUNT(*) AS total").
+		Where("user_id IN ?", normalized).
+		Group("user_id").
+		Scan(&rows).Error; err != nil {
+		return nil, err
+	}
+	for _, row := range rows {
+		result[row.UserID] = row.Total
+	}
+	for _, userUUID := range normalized {
+		if _, ok := result[userUUID]; !ok {
+			result[userUUID] = 0
+		}
+	}
+	return result, nil
 }
 
 func NormalizeClientUUIDsForUser(userUUID string, clientUUIDs []string) ([]string, error) {
