@@ -88,11 +88,14 @@ func migrateInPlace() {
 			if err != nil {
 				panic("failed " + err.Error())
 			}
+			if err := db.AutoMigrate(&UserConfigItem{}); err != nil {
+				panic("failed " + err.Error())
+			}
 			return
 		}
 	}
 
-	if err := db.AutoMigrate(&ConfigItem{}, &TenantConfigItem{}); err != nil {
+	if err := db.AutoMigrate(&ConfigItem{}, &UserConfigItem{}); err != nil {
 		panic("failed " + err.Error())
 	}
 }

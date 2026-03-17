@@ -12,6 +12,6 @@ func UpdateMmdbGeoIP(c *gin.Context) {
 		return
 	}
 	uuid, _ := c.Get("uuid")
-	api.AuditLogForCurrentTenant(c, uuid.(string), "GeoIP database updated", "info")
+	api.AuditLogForCurrentUser(c, uuid.(string), "GeoIP database updated", "info")
 	api.RespondSuccess(c, nil)
 }

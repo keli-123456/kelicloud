@@ -9,7 +9,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/api"
 	"github.com/komari-monitor/komari/config"
-	"github.com/komari-monitor/komari/database"
+	"github.com/komari-monitor/komari/database/accounts"
 	"github.com/komari-monitor/komari/database/clients"
 	"github.com/komari-monitor/komari/utils"
 	"gorm.io/gorm"
@@ -73,10 +73,10 @@ func RegisterClient(c *gin.Context) {
 		return
 	}
 
-	tenantID, err := config.FindTenantIDByConfigValue(config.AutoDiscoveryKeyKey, requestKey)
+	userUUID, err := config.FindUserUUIDByConfigValue(config.AutoDiscoveryKeyKey, requestKey)
 	if err != nil {
 		if !errors.Is(err, gorm.ErrRecordNotFound) {
-			api.RespondError(c, 500, "Failed to resolve auto discovery tenant: "+err.Error())
+			api.RespondError(c, 500, "Failed to resolve auto discovery owner: "+err.Error())
 			return
 		}
 		legacyKey, legacyErr := config.GetAs[string](config.AutoDiscoveryKeyKey, "")
@@ -89,12 +89,11 @@ func RegisterClient(c *gin.Context) {
 			return
 		}
 
-		defaultTenantID, defaultErr := database.GetDefaultTenantID()
-		if defaultErr != nil {
-			api.RespondError(c, 500, "Failed to resolve auto discovery tenant: "+defaultErr.Error())
+		userUUID, err = accounts.GetPreferredAdminUserUUID()
+		if err != nil {
+			api.RespondError(c, 500, "Failed to resolve auto discovery owner: "+err.Error())
 			return
 		}
-		tenantID = defaultTenantID
 	}
 
 	name := c.Query("name")
@@ -103,7 +102,7 @@ func RegisterClient(c *gin.Context) {
 	}
 	name = "Auto-" + name
 
-	uuid, token, err := clients.CreateClientWithNameAndGroupForTenant(tenantID, name, group)
+	uuid, token, err := clients.CreateClientWithNameAndGroupForUser(userUUID, name, group)
 	if err != nil {
 		api.RespondError(c, 500, "Failed to create client: "+err.Error())
 		return

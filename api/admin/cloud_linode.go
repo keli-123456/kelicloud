@@ -14,7 +14,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/api"
-	"github.com/komari-monitor/komari/database"
 	"github.com/komari-monitor/komari/database/models"
 	linodecloud "github.com/komari-monitor/komari/utils/cloudprovider/linode"
 )
@@ -66,12 +65,12 @@ type linodeInstanceDetailView struct {
 }
 
 func GetLinodeTokens(c *gin.Context) {
-	tenantID, ok := requireCurrentTenantID(c)
+	scope, ok := requireCurrentOwnerScope(c)
 	if !ok {
 		return
 	}
 
-	_, addition, err := loadLinodeAddition(tenantID, true)
+	_, addition, err := loadLinodeAddition(scope, true)
 	if err != nil {
 		api.RespondError(c, http.StatusBadRequest, err.Error())
 		return
@@ -81,7 +80,7 @@ func GetLinodeTokens(c *gin.Context) {
 }
 
 func SaveLinodeTokens(c *gin.Context) {
-	tenantID, ok := requireCurrentTenantID(c)
+	scope, ok := requireCurrentOwnerScope(c)
 	if !ok {
 		return
 	}
@@ -100,7 +99,7 @@ func SaveLinodeTokens(c *gin.Context) {
 		return
 	}
 
-	_, addition, err := loadLinodeAddition(tenantID, true)
+	_, addition, err := loadLinodeAddition(scope, true)
 	if err != nil {
 		api.RespondError(c, http.StatusBadRequest, err.Error())
 		return
@@ -119,7 +118,7 @@ func SaveLinodeTokens(c *gin.Context) {
 		}
 	}
 
-	if err := saveLinodeAdditionPreservingSecrets(tenantID, addition); err != nil {
+	if err := saveLinodeAdditionPreservingSecrets(scope, addition); err != nil {
 		api.RespondError(c, http.StatusInternalServerError, "Failed to save Linode tokens: "+err.Error())
 		return
 	}
@@ -129,7 +128,7 @@ func SaveLinodeTokens(c *gin.Context) {
 }
 
 func SetLinodeActiveToken(c *gin.Context) {
-	tenantID, ok := requireCurrentTenantID(c)
+	scope, ok := requireCurrentOwnerScope(c)
 	if !ok {
 		return
 	}
@@ -142,7 +141,7 @@ func SetLinodeActiveToken(c *gin.Context) {
 		return
 	}
 
-	_, addition, err := loadLinodeAddition(tenantID, false)
+	_, addition, err := loadLinodeAddition(scope, false)
 	if err != nil {
 		api.RespondError(c, http.StatusBadRequest, err.Error())
 		return
@@ -153,7 +152,7 @@ func SetLinodeActiveToken(c *gin.Context) {
 		return
 	}
 
-	if err := saveLinodeAdditionPreservingSecrets(tenantID, addition); err != nil {
+	if err := saveLinodeAdditionPreservingSecrets(scope, addition); err != nil {
 		api.RespondError(c, http.StatusInternalServerError, "Failed to update active token: "+err.Error())
 		return
 	}
@@ -163,7 +162,7 @@ func SetLinodeActiveToken(c *gin.Context) {
 }
 
 func CheckLinodeTokens(c *gin.Context) {
-	tenantID, ok := requireCurrentTenantID(c)
+	scope, ok := requireCurrentOwnerScope(c)
 	if !ok {
 		return
 	}
@@ -178,7 +177,7 @@ func CheckLinodeTokens(c *gin.Context) {
 		}
 	}
 
-	_, addition, err := loadLinodeAddition(tenantID, false)
+	_, addition, err := loadLinodeAddition(scope, false)
 	if err != nil {
 		api.RespondError(c, http.StatusBadRequest, err.Error())
 		return
@@ -240,7 +239,7 @@ func CheckLinodeTokens(c *gin.Context) {
 
 	wg.Wait()
 
-	if err := saveLinodeAdditionPreservingSecrets(tenantID, addition); err != nil {
+	if err := saveLinodeAdditionPreservingSecrets(scope, addition); err != nil {
 		api.RespondError(c, http.StatusInternalServerError, "Failed to save token health: "+err.Error())
 		return
 	}
@@ -250,7 +249,7 @@ func CheckLinodeTokens(c *gin.Context) {
 }
 
 func DeleteLinodeToken(c *gin.Context) {
-	tenantID, ok := requireCurrentTenantID(c)
+	scope, ok := requireCurrentOwnerScope(c)
 	if !ok {
 		return
 	}
@@ -261,7 +260,7 @@ func DeleteLinodeToken(c *gin.Context) {
 		return
 	}
 
-	_, addition, err := loadLinodeAddition(tenantID, false)
+	_, addition, err := loadLinodeAddition(scope, false)
 	if err != nil {
 		api.RespondError(c, http.StatusBadRequest, err.Error())
 		return
@@ -272,7 +271,7 @@ func DeleteLinodeToken(c *gin.Context) {
 		return
 	}
 
-	if err := saveLinodeAddition(tenantID, addition); err != nil {
+	if err := saveLinodeAddition(scope, addition); err != nil {
 		api.RespondError(c, http.StatusInternalServerError, "Failed to delete token: "+err.Error())
 		return
 	}
@@ -282,7 +281,7 @@ func DeleteLinodeToken(c *gin.Context) {
 }
 
 func GetLinodeTokenSecret(c *gin.Context) {
-	tenantID, ok := requireCurrentTenantID(c)
+	scope, ok := requireCurrentOwnerScope(c)
 	if !ok {
 		return
 	}
@@ -293,7 +292,7 @@ func GetLinodeTokenSecret(c *gin.Context) {
 		return
 	}
 
-	_, addition, err := loadLinodeAddition(tenantID, false)
+	_, addition, err := loadLinodeAddition(scope, false)
 	if err != nil {
 		api.RespondError(c, http.StatusBadRequest, err.Error())
 		return
@@ -309,7 +308,7 @@ func GetLinodeTokenSecret(c *gin.Context) {
 }
 
 func GetLinodeInstancePassword(c *gin.Context) {
-	tenantID, ok := requireCurrentTenantID(c)
+	scope, ok := requireCurrentOwnerScope(c)
 	if !ok {
 		return
 	}
@@ -320,7 +319,7 @@ func GetLinodeInstancePassword(c *gin.Context) {
 		return
 	}
 
-	_, addition, err := loadLinodeAddition(tenantID, false)
+	_, addition, err := loadLinodeAddition(scope, false)
 	if err != nil {
 		api.RespondError(c, http.StatusBadRequest, err.Error())
 		return
@@ -349,12 +348,12 @@ func GetLinodeInstancePassword(c *gin.Context) {
 }
 
 func GetLinodeAccount(c *gin.Context) {
-	tenantID, ok := requireCurrentTenantID(c)
+	scope, ok := requireCurrentOwnerScope(c)
 	if !ok {
 		return
 	}
 
-	client, ctx, cancel, err := getLinodeClient(c, tenantID)
+	client, ctx, cancel, err := getLinodeClient(c, scope)
 	if err != nil {
 		respondLinodeError(c, err)
 		return
@@ -382,12 +381,12 @@ func GetLinodeAccount(c *gin.Context) {
 }
 
 func GetLinodeCatalog(c *gin.Context) {
-	tenantID, ok := requireCurrentTenantID(c)
+	scope, ok := requireCurrentOwnerScope(c)
 	if !ok {
 		return
 	}
 
-	client, ctx, cancel, err := getLinodeClient(c, tenantID)
+	client, ctx, cancel, err := getLinodeClient(c, scope)
 	if err != nil {
 		respondLinodeError(c, err)
 		return
@@ -452,12 +451,12 @@ func GetLinodeCatalog(c *gin.Context) {
 }
 
 func ListLinodeInstances(c *gin.Context) {
-	tenantID, ok := requireCurrentTenantID(c)
+	scope, ok := requireCurrentOwnerScope(c)
 	if !ok {
 		return
 	}
 
-	client, addition, activeToken, ctx, cancel, err := getLinodeActiveTokenClient(c, tenantID)
+	client, addition, activeToken, ctx, cancel, err := getLinodeActiveTokenClient(c, scope)
 	if err != nil {
 		respondLinodeError(c, err)
 		return
@@ -496,19 +495,19 @@ func ListLinodeInstances(c *gin.Context) {
 		credentialsChanged = true
 	}
 	if credentialsChanged {
-		_ = saveLinodeAddition(tenantID, addition)
+		_ = saveLinodeAddition(scope, addition)
 	}
 
 	api.RespondSuccess(c, views)
 }
 
 func GetLinodeInstanceDetail(c *gin.Context) {
-	tenantID, ok := requireCurrentTenantID(c)
+	scope, ok := requireCurrentOwnerScope(c)
 	if !ok {
 		return
 	}
 
-	client, _, activeToken, ctx, cancel, err := getLinodeActiveTokenClient(c, tenantID)
+	client, _, activeToken, ctx, cancel, err := getLinodeActiveTokenClient(c, scope)
 	if err != nil {
 		respondLinodeError(c, err)
 		return
@@ -558,12 +557,12 @@ func GetLinodeInstanceDetail(c *gin.Context) {
 }
 
 func CreateLinodeInstance(c *gin.Context) {
-	tenantID, ok := requireCurrentTenantID(c)
+	scope, ok := requireCurrentOwnerScope(c)
 	if !ok {
 		return
 	}
 
-	client, addition, activeToken, ctx, cancel, err := getLinodeActiveTokenClient(c, tenantID)
+	client, addition, activeToken, ctx, cancel, err := getLinodeActiveTokenClient(c, scope)
 	if err != nil {
 		respondLinodeError(c, err)
 		return
@@ -653,7 +652,7 @@ func CreateLinodeInstance(c *gin.Context) {
 	if instance != nil && rootPassword != "" && activeToken != nil {
 		if saveErr := activeToken.SaveInstancePassword(instance.ID, instance.Label, passwordMode, rootPassword, time.Now()); saveErr != nil {
 			passwordSaveError = saveErr.Error()
-		} else if saveErr := saveLinodeAdditionPreservingSecrets(tenantID, addition); saveErr != nil {
+		} else if saveErr := saveLinodeAdditionPreservingSecrets(scope, addition); saveErr != nil {
 			activeToken.RemoveSavedInstancePassword(instance.ID)
 			passwordSaveError = "Failed to save root password: " + saveErr.Error()
 		} else {
@@ -676,12 +675,12 @@ func CreateLinodeInstance(c *gin.Context) {
 }
 
 func DeleteLinodeInstance(c *gin.Context) {
-	tenantID, ok := requireCurrentTenantID(c)
+	scope, ok := requireCurrentOwnerScope(c)
 	if !ok {
 		return
 	}
 
-	client, addition, activeToken, ctx, cancel, err := getLinodeActiveTokenClient(c, tenantID)
+	client, addition, activeToken, ctx, cancel, err := getLinodeActiveTokenClient(c, scope)
 	if err != nil {
 		respondLinodeError(c, err)
 		return
@@ -700,7 +699,7 @@ func DeleteLinodeInstance(c *gin.Context) {
 	}
 
 	if activeToken != nil && activeToken.RemoveSavedInstancePassword(instanceID) {
-		_ = saveLinodeAddition(tenantID, addition)
+		_ = saveLinodeAddition(scope, addition)
 	}
 
 	logCloudAudit(c, fmt.Sprintf("delete linode instance: %d", instanceID))
@@ -708,12 +707,12 @@ func DeleteLinodeInstance(c *gin.Context) {
 }
 
 func PostLinodeInstanceAction(c *gin.Context) {
-	tenantID, ok := requireCurrentTenantID(c)
+	scope, ok := requireCurrentOwnerScope(c)
 	if !ok {
 		return
 	}
 
-	client, addition, activeToken, ctx, cancel, err := getLinodeActiveTokenClient(c, tenantID)
+	client, addition, activeToken, ctx, cancel, err := getLinodeActiveTokenClient(c, scope)
 	if err != nil {
 		respondLinodeError(c, err)
 		return
@@ -793,7 +792,7 @@ func PostLinodeInstanceAction(c *gin.Context) {
 			if saveErr := activeToken.SaveInstancePassword(instanceID, label, passwordMode, rootPassword, time.Now()); saveErr != nil {
 				response["password_saved"] = false
 				response["password_save_error"] = saveErr.Error()
-			} else if saveErr := saveLinodeAdditionPreservingSecrets(tenantID, addition); saveErr != nil {
+			} else if saveErr := saveLinodeAdditionPreservingSecrets(scope, addition); saveErr != nil {
 				activeToken.RemoveSavedInstancePassword(instanceID)
 				response["password_saved"] = false
 				response["password_save_error"] = "Failed to save root password: " + saveErr.Error()
@@ -851,7 +850,7 @@ func PostLinodeInstanceAction(c *gin.Context) {
 			if saveErr := activeToken.SaveInstancePassword(instanceID, label, passwordMode, rootPassword, time.Now()); saveErr != nil {
 				response["password_saved"] = false
 				response["password_save_error"] = saveErr.Error()
-			} else if saveErr := saveLinodeAdditionPreservingSecrets(tenantID, addition); saveErr != nil {
+			} else if saveErr := saveLinodeAdditionPreservingSecrets(scope, addition); saveErr != nil {
 				activeToken.RemoveSavedInstancePassword(instanceID)
 				response["password_saved"] = false
 				response["password_save_error"] = "Failed to save root password: " + saveErr.Error()
@@ -874,13 +873,13 @@ func PostLinodeInstanceAction(c *gin.Context) {
 	api.RespondSuccess(c, response)
 }
 
-func getLinodeClient(c *gin.Context, tenantID string) (*linodecloud.Client, context.Context, context.CancelFunc, error) {
-	client, _, _, ctx, cancel, err := getLinodeActiveTokenClient(c, tenantID)
+func getLinodeClient(c *gin.Context, scope ownerScope) (*linodecloud.Client, context.Context, context.CancelFunc, error) {
+	client, _, _, ctx, cancel, err := getLinodeActiveTokenClient(c, scope)
 	return client, ctx, cancel, err
 }
 
-func getLinodeActiveTokenClient(c *gin.Context, tenantID string) (*linodecloud.Client, *linodecloud.Addition, *linodecloud.TokenRecord, context.Context, context.CancelFunc, error) {
-	_, addition, err := loadLinodeAddition(tenantID, false)
+func getLinodeActiveTokenClient(c *gin.Context, scope ownerScope) (*linodecloud.Client, *linodecloud.Addition, *linodecloud.TokenRecord, context.Context, context.CancelFunc, error) {
+	_, addition, err := loadLinodeAddition(scope, false)
 	if err != nil {
 		return nil, nil, nil, nil, nil, err
 	}
@@ -928,8 +927,8 @@ func buildLinodeInstanceView(instance *linodecloud.Instance, token *linodecloud.
 	return view
 }
 
-func loadLinodeAddition(tenantID string, allowMissing bool) (*models.CloudProvider, *linodecloud.Addition, error) {
-	config, err := database.GetCloudProviderConfigByTenantAndName(tenantID, linodeProviderName)
+func loadLinodeAddition(scope ownerScope, allowMissing bool) (*models.CloudProvider, *linodecloud.Addition, error) {
+	config, err := getCloudProviderConfigForScope(scope, linodeProviderName)
 	if err != nil {
 		if allowMissing {
 			addition := &linodecloud.Addition{}
@@ -952,7 +951,7 @@ func loadLinodeAddition(tenantID string, allowMissing bool) (*models.CloudProvid
 	return config, addition, nil
 }
 
-func saveLinodeAddition(tenantID string, addition *linodecloud.Addition) error {
+func saveLinodeAddition(scope ownerScope, addition *linodecloud.Addition) error {
 	if addition == nil {
 		addition = &linodecloud.Addition{}
 	}
@@ -963,23 +962,19 @@ func saveLinodeAddition(tenantID string, addition *linodecloud.Addition) error {
 		return err
 	}
 
-	return database.SaveCloudProviderConfigForTenant(&models.CloudProvider{
-		TenantID: tenantID,
-		Name:     linodeProviderName,
-		Addition: string(payload),
-	})
+	return saveCloudProviderConfigForScope(scope, linodeProviderName, string(payload))
 }
 
-func saveLinodeAdditionPreservingSecrets(tenantID string, addition *linodecloud.Addition) error {
+func saveLinodeAdditionPreservingSecrets(scope ownerScope, addition *linodecloud.Addition) error {
 	if addition == nil {
 		addition = &linodecloud.Addition{}
 	}
 
-	if _, current, err := loadLinodeAddition(tenantID, true); err == nil {
+	if _, current, err := loadLinodeAddition(scope, true); err == nil {
 		addition.MergePersistentStateFrom(current)
 	}
 
-	return saveLinodeAddition(tenantID, addition)
+	return saveLinodeAddition(scope, addition)
 }
 
 func normalizeLinodeRootPasswordMode(mode string) string {

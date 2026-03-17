@@ -1,0 +1,48 @@
+name: Verify Runtime
+
+on:
+  workflow_dispatch:
+    inputs:
+      frontend_ref:
+        description: Override the pinned frontend git ref for this verification run
+        required: false
+        type: string
+      frontend_repo:
+        description: Override the pinned frontend repository URL for this verification run
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  verify-runtime:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    env:
+      KOMARI_FRONTEND_REF: ${{ inputs.frontend_ref }}
+      KOMARI_FRONTEND_REPO: ${{ inputs.frontend_repo }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "23"
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+
+      - name: Prepare frontend bundle
+        run: bash scripts/prepare-frontend.sh
+
+      - name: Run Go regression tests
+        run: GOCACHE=$PWD/.gocache GOMODCACHE=$PWD/.gomodcache go test ./api/... ./cmd/... ./database/... ./config ./public ./utils/cloudshare
+
+      - name: Verify MySQL empty-db bootstrap and legacy upgrade
+        run: bash scripts/verify-mysql-runtime.sh

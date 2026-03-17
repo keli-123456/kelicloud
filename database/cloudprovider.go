@@ -1,6 +1,7 @@
 package database
 
 import (
+	"errors"
 	"strings"
 
 	"github.com/komari-monitor/komari/database/dbcore"
@@ -8,33 +9,31 @@ import (
 	"gorm.io/gorm"
 )
 
-func normalizeTenantScopeID(tenantID string) (string, error) {
-	tenantID = strings.TrimSpace(tenantID)
-	if tenantID != "" {
-		return tenantID, nil
+func normalizeCloudUserID(userID string) (string, error) {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return "", errors.New("user id is required")
 	}
-	return GetDefaultTenantID()
+	return userID, nil
 }
 
-func getCloudProviderConfigWithDB(db *gorm.DB, tenantID, name string) (*models.CloudProvider, error) {
+func getCloudProviderConfigByUserWithDB(db *gorm.DB, userID, name string) (*models.CloudProvider, error) {
+	userID, err := normalizeCloudUserID(userID)
+	if err != nil {
+		return nil, err
+	}
+
 	var config models.CloudProvider
-	if err := db.Where("tenant_id = ? AND name = ?", tenantID, name).First(&config).Error; err != nil {
+	query := db.Where("user_id = ? AND name = ?", userID, strings.TrimSpace(name))
+	if err := query.First(&config).Error; err != nil {
 		return nil, err
 	}
 	return &config, nil
 }
 
-func GetCloudProviderConfigByTenantAndName(tenantID, name string) (*models.CloudProvider, error) {
-	resolvedTenantID, err := normalizeTenantScopeID(tenantID)
-	if err != nil {
-		return nil, err
-	}
+func GetCloudProviderConfigByUserAndName(userID, name string) (*models.CloudProvider, error) {
 	db := dbcore.GetDBInstance()
-	return getCloudProviderConfigWithDB(db, resolvedTenantID, strings.TrimSpace(name))
-}
-
-func GetCloudProviderConfigByName(name string) (*models.CloudProvider, error) {
-	return GetCloudProviderConfigByTenantAndName("", name)
+	return getCloudProviderConfigByUserWithDB(db, userID, name)
 }
 
 func saveCloudProviderConfigWithDB(db *gorm.DB, config *models.CloudProvider) error {
@@ -44,30 +43,30 @@ func saveCloudProviderConfigWithDB(db *gorm.DB, config *models.CloudProvider) er
 	return db.Save(config).Error
 }
 
-func SaveCloudProviderConfigForTenant(config *models.CloudProvider) error {
+func saveCloudProviderConfigForUserWithDB(db *gorm.DB, config *models.CloudProvider) error {
 	if config == nil {
 		return nil
 	}
-	resolvedTenantID, err := normalizeTenantScopeID(config.TenantID)
+	userID, err := normalizeCloudUserID(config.UserID)
 	if err != nil {
 		return err
 	}
-	config.TenantID = resolvedTenantID
+	config.UserID = userID
 	config.Name = strings.TrimSpace(config.Name)
-	db := dbcore.GetDBInstance()
+	result := db.Model(&models.CloudProvider{}).
+		Where("user_id = ? AND name = ?", config.UserID, config.Name).
+		Updates(map[string]interface{}{
+			"addition": config.Addition,
+		})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected > 0 {
+		return nil
+	}
 	return saveCloudProviderConfigWithDB(db, config)
 }
 
-func SaveCloudProviderConfig(config *models.CloudProvider) error {
-	if config == nil {
-		return nil
-	}
-	if strings.TrimSpace(config.TenantID) == "" {
-		resolvedTenantID, err := normalizeTenantScopeID("")
-		if err != nil {
-			return err
-		}
-		config.TenantID = resolvedTenantID
-	}
-	return SaveCloudProviderConfigForTenant(config)
+func SaveCloudProviderConfigForUser(config *models.CloudProvider) error {
+	return saveCloudProviderConfigForUserWithDB(dbcore.GetDBInstance(), config)
 }

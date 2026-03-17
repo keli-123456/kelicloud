@@ -4,28 +4,37 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
-	"github.com/komari-monitor/komari/database"
 	"github.com/komari-monitor/komari/database/accounts"
 )
 
-func ResolveTenantScopeFromSession(c *gin.Context) (tenantID string, loggedIn bool, err error) {
+func ResolveUserScopeFromSession(c *gin.Context) (userUUID string, loggedIn bool, err error) {
 	session, cookieErr := c.Cookie("session_token")
-	if cookieErr == nil && session != "" {
-		return accounts.ResolveTenantScope(session)
+	if cookieErr != nil || strings.TrimSpace(session) == "" {
+		return "", false, nil
 	}
 
-	for _, candidate := range []string{
-		strings.TrimSpace(c.GetHeader("X-Komari-Tenant")),
-		strings.TrimSpace(c.Query("tenant")),
-	} {
-		if candidate == "" {
-			continue
-		}
-		tenant, err := database.GetTenantByIdentifier(candidate)
-		if err == nil {
-			return tenant.ID, false, nil
-		}
+	sessionRecord, err := accounts.GetSessionRecord(session)
+	if err != nil {
+		return "", false, err
 	}
 
-	return accounts.ResolveTenantScope("")
+	return sessionRecord.UUID, true, nil
+}
+
+func RequireUserScopeFromSession(c *gin.Context) (userUUID string, ok bool) {
+	if c == nil {
+		return "", false
+	}
+
+	userUUID, loggedIn, err := ResolveUserScopeFromSession(c)
+	if err != nil {
+		RespondError(c, 500, "Failed to resolve user scope: "+err.Error())
+		return "", false
+	}
+	userUUID = strings.TrimSpace(userUUID)
+	if !loggedIn || userUUID == "" {
+		RespondError(c, 401, "Login required")
+		return "", false
+	}
+	return userUUID, true
 }

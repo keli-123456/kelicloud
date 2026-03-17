@@ -1,6 +1,7 @@
 package database
 
 import (
+	"errors"
 	"strings"
 
 	"github.com/komari-monitor/komari/database/dbcore"
@@ -8,31 +9,37 @@ import (
 	"gorm.io/gorm"
 )
 
-func GetCloudInstanceShare(provider, resourceType, resourceID string) (*models.CloudInstanceShare, error) {
-	return GetCloudInstanceShareByTenant("", provider, resourceType, resourceID)
+func normalizeCloudShareUserID(userID string) (string, error) {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return "", errors.New("user id is required")
+	}
+	return userID, nil
 }
 
-func getCloudInstanceShareWithDB(db *gorm.DB, tenantID, provider, resourceType, resourceID string) (*models.CloudInstanceShare, error) {
+func getCloudInstanceShareByUserWithDB(db *gorm.DB, userID, provider, resourceType, resourceID string) (*models.CloudInstanceShare, error) {
+	userID, err := normalizeCloudShareUserID(userID)
+	if err != nil {
+		return nil, err
+	}
+
 	var share models.CloudInstanceShare
-	if err := db.Where(
-		"tenant_id = ? AND provider = ? AND resource_type = ? AND resource_id = ?",
-		tenantID,
+	query := db.Where(
+		"user_id = ? AND provider = ? AND resource_type = ? AND resource_id = ?",
+		userID,
 		strings.TrimSpace(provider),
 		strings.TrimSpace(resourceType),
 		strings.TrimSpace(resourceID),
-	).First(&share).Error; err != nil {
+	)
+	if err := query.First(&share).Error; err != nil {
 		return nil, err
 	}
 	return &share, nil
 }
 
-func GetCloudInstanceShareByTenant(tenantID, provider, resourceType, resourceID string) (*models.CloudInstanceShare, error) {
-	resolvedTenantID, err := normalizeTenantScopeID(tenantID)
-	if err != nil {
-		return nil, err
-	}
+func GetCloudInstanceShareByUser(userID, provider, resourceType, resourceID string) (*models.CloudInstanceShare, error) {
 	db := dbcore.GetDBInstance()
-	return getCloudInstanceShareWithDB(db, resolvedTenantID, provider, resourceType, resourceID)
+	return getCloudInstanceShareByUserWithDB(db, userID, provider, resourceType, resourceID)
 }
 
 func GetCloudInstanceShareByToken(token string) (*models.CloudInstanceShare, error) {
@@ -57,16 +64,21 @@ func saveCloudInstanceShareWithDB(db *gorm.DB, share *models.CloudInstanceShare)
 	if share == nil {
 		return nil
 	}
-	resolvedTenantID, err := normalizeTenantScopeID(share.TenantID)
+	userID, err := normalizeCloudShareUserID(share.UserID)
 	if err != nil {
 		return err
 	}
-	share.TenantID = resolvedTenantID
+	share.UserID = userID
 	share.ShareToken = strings.TrimSpace(share.ShareToken)
 	share.Provider = strings.TrimSpace(share.Provider)
 	share.ResourceType = strings.TrimSpace(share.ResourceType)
 	share.ResourceID = strings.TrimSpace(share.ResourceID)
 	return db.Save(share).Error
+}
+
+func SaveCloudInstanceShareForUser(share *models.CloudInstanceShare) error {
+	db := dbcore.GetDBInstance()
+	return saveCloudInstanceShareWithDB(db, share)
 }
 
 func DeleteCloudInstanceShare(share *models.CloudInstanceShare) error {

@@ -21,7 +21,7 @@ var _ = func() bool {
 	return true
 }()
 
-// TestCompactRecord tests the database compaction logic by inserting 4h30m of data (one record per minute),
+// TestCompactRecord tests the database compaction logic by inserting 12h30m of data (one record per minute),
 // then running migrateOldRecords and verifying the aggregation and cleanup.
 func TestCompactRecord(t *testing.T) {
 	const totalMinutes = 12*60 + 30
@@ -127,4 +127,52 @@ func TestCompactRecord(t *testing.T) {
 			strconv.FormatInt(r.Ram, 10),
 		})
 	}
+}
+
+func TestCompactGPURecord(t *testing.T) {
+	const totalMinutes = 12*60 + 30
+	now := time.Now()
+	threshold := now.Add(-4 * time.Hour)
+
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	assert.NoError(t, err)
+	assert.NoError(t, db.AutoMigrate(&models.GPURecord{}))
+	assert.NoError(t, db.Table("gpu_records_long_term").AutoMigrate(&models.GPURecord{}))
+
+	expectedGroups := make(map[time.Time]struct{})
+	expectedRemain := 0
+
+	for i := 0; i < totalMinutes; i++ {
+		recTime := now.Add(-time.Duration(i) * time.Minute)
+		rec := models.GPURecord{
+			Client:      uuid,
+			Time:        models.FromTime(recTime),
+			DeviceIndex: 0,
+			DeviceName:  "GPU 0",
+			MemTotal:    int64(1000 + i),
+			MemUsed:     int64(500 + i),
+			Utilization: float32(i),
+			Temperature: 40 + i%10,
+		}
+		err := db.Create(&rec).Error
+		assert.NoError(t, err)
+
+		if recTime.Before(threshold) {
+			slot := recTime.Truncate(time.Hour)
+			expectedGroups[slot] = struct{}{}
+		} else {
+			expectedRemain++
+		}
+	}
+
+	err = migrateGPURecords(db)
+	assert.NoError(t, err)
+
+	var longCount int64
+	assert.NoError(t, db.Table("gpu_records_long_term").Count(&longCount).Error)
+	assert.Equal(t, int64(len(expectedGroups)), longCount)
+
+	var remainCount int64
+	assert.NoError(t, db.Table("gpu_records").Count(&remainCount).Error)
+	assert.Equal(t, int64(expectedRemain), remainCount+1)
 }

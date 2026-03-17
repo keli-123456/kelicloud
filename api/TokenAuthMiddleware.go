@@ -70,7 +70,7 @@ func TokenAuthMiddleware() gin.HandlerFunc {
 		}
 
 		c.Set("client_uuid", client.UUID)
-		c.Set("tenant_id", client.TenantID)
+		c.Set("user_id", client.UserID)
 		c.Next()
 	}
 }

@@ -178,11 +178,7 @@ func BuildAdminShareView(share *models.CloudInstanceShare, state *AdminResourceS
 	return view
 }
 
-func ResolveActiveResource(provider, resourceType, resourceID string) (*AdminResourceState, error) {
-	return ResolveActiveResourceForTenant("", provider, resourceType, resourceID)
-}
-
-func ResolveActiveResourceForTenant(tenantID, provider, resourceType, resourceID string) (*AdminResourceState, error) {
+func ResolveActiveResourceForUser(userID, provider, resourceType, resourceID string) (*AdminResourceState, error) {
 	provider, resourceType, resourceID, err := NormalizeReference(provider, resourceType, resourceID)
 	if err != nil {
 		return nil, err
@@ -190,14 +186,14 @@ func ResolveActiveResourceForTenant(tenantID, provider, resourceType, resourceID
 
 	switch provider {
 	case ProviderDigitalOcean:
-		return resolveDigitalOceanActiveResource(tenantID, resourceID)
+		return resolveDigitalOceanActiveResource(userID, resourceID)
 	case ProviderLinode:
-		return resolveLinodeActiveResource(tenantID, resourceID)
+		return resolveLinodeActiveResource(userID, resourceID)
 	case ProviderAWS:
 		if resourceType == ResourceTypeEC2 {
-			return resolveAWSEC2ActiveResource(tenantID, resourceID)
+			return resolveAWSEC2ActiveResource(userID, resourceID)
 		}
-		return resolveAWSLightsailActiveResource(tenantID, resourceID)
+		return resolveAWSLightsailActiveResource(userID, resourceID)
 	default:
 		return nil, ErrInvalidReference
 	}
@@ -228,8 +224,8 @@ func ResolvePublicShare(share *models.CloudInstanceShare) (*PublicShareView, err
 	}
 }
 
-func resolveDigitalOceanActiveResource(tenantID, resourceID string) (*AdminResourceState, error) {
-	addition, err := loadDigitalOceanAddition(tenantID)
+func resolveDigitalOceanActiveResource(userID, resourceID string) (*AdminResourceState, error) {
+	addition, err := loadDigitalOceanAddition(userID)
 	if err != nil {
 		return nil, err
 	}
@@ -265,8 +261,8 @@ func resolveDigitalOceanActiveResource(tenantID, resourceID string) (*AdminResou
 	}, nil
 }
 
-func resolveLinodeActiveResource(tenantID, resourceID string) (*AdminResourceState, error) {
-	addition, err := loadLinodeAddition(tenantID)
+func resolveLinodeActiveResource(userID, resourceID string) (*AdminResourceState, error) {
+	addition, err := loadLinodeAddition(userID)
 	if err != nil {
 		return nil, err
 	}
@@ -302,8 +298,8 @@ func resolveLinodeActiveResource(tenantID, resourceID string) (*AdminResourceSta
 	}, nil
 }
 
-func resolveAWSEC2ActiveResource(tenantID, resourceID string) (*AdminResourceState, error) {
-	addition, err := loadAWSAddition(tenantID)
+func resolveAWSEC2ActiveResource(userID, resourceID string) (*AdminResourceState, error) {
+	addition, err := loadAWSAddition(userID)
 	if err != nil {
 		return nil, err
 	}
@@ -340,8 +336,8 @@ func resolveAWSEC2ActiveResource(tenantID, resourceID string) (*AdminResourceSta
 	}, nil
 }
 
-func resolveAWSLightsailActiveResource(tenantID, resourceID string) (*AdminResourceState, error) {
-	addition, err := loadAWSAddition(tenantID)
+func resolveAWSLightsailActiveResource(userID, resourceID string) (*AdminResourceState, error) {
+	addition, err := loadAWSAddition(userID)
 	if err != nil {
 		return nil, err
 	}
@@ -374,12 +370,12 @@ func resolveAWSLightsailActiveResource(tenantID, resourceID string) (*AdminResou
 }
 
 func resolvePublicDigitalOceanShare(share *models.CloudInstanceShare, resourceID string) (*PublicShareView, error) {
-	tenantID, err := resolveShareTenantID(share)
+	userID, err := resolveShareOwnerUserID(share)
 	if err != nil {
 		return nil, err
 	}
 
-	addition, err := loadDigitalOceanAddition(tenantID)
+	addition, err := loadDigitalOceanAddition(userID)
 	if err != nil {
 		return nil, err
 	}
@@ -438,12 +434,12 @@ func resolvePublicDigitalOceanShare(share *models.CloudInstanceShare, resourceID
 }
 
 func resolvePublicLinodeShare(share *models.CloudInstanceShare, resourceID string) (*PublicShareView, error) {
-	tenantID, err := resolveShareTenantID(share)
+	userID, err := resolveShareOwnerUserID(share)
 	if err != nil {
 		return nil, err
 	}
 
-	addition, err := loadLinodeAddition(tenantID)
+	addition, err := loadLinodeAddition(userID)
 	if err != nil {
 		return nil, err
 	}
@@ -521,12 +517,12 @@ func resolvePublicLinodeShare(share *models.CloudInstanceShare, resourceID strin
 }
 
 func resolvePublicAWSEC2Share(share *models.CloudInstanceShare, resourceID string) (*PublicShareView, error) {
-	tenantID, err := resolveShareTenantID(share)
+	userID, err := resolveShareOwnerUserID(share)
 	if err != nil {
 		return nil, err
 	}
 
-	addition, err := loadAWSAddition(tenantID)
+	addition, err := loadAWSAddition(userID)
 	if err != nil {
 		return nil, err
 	}
@@ -565,12 +561,12 @@ func resolvePublicAWSEC2Share(share *models.CloudInstanceShare, resourceID strin
 }
 
 func resolvePublicAWSLightsailShare(share *models.CloudInstanceShare, resourceID string) (*PublicShareView, error) {
-	tenantID, err := resolveShareTenantID(share)
+	userID, err := resolveShareOwnerUserID(share)
 	if err != nil {
 		return nil, err
 	}
 
-	addition, err := loadAWSAddition(tenantID)
+	addition, err := loadAWSAddition(userID)
 	if err != nil {
 		return nil, err
 	}
@@ -608,8 +604,8 @@ func resolvePublicAWSLightsailShare(share *models.CloudInstanceShare, resourceID
 	}, nil
 }
 
-func loadDigitalOceanAddition(tenantID string) (*digitalocean.Addition, error) {
-	config, err := database.GetCloudProviderConfigByTenantAndName(tenantID, ProviderDigitalOcean)
+func loadDigitalOceanAddition(userID string) (*digitalocean.Addition, error) {
+	config, err := database.GetCloudProviderConfigByUserAndName(userID, ProviderDigitalOcean)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %s", ErrProviderNotConfigured, ProviderDigitalOcean)
 	}
@@ -626,8 +622,8 @@ func loadDigitalOceanAddition(tenantID string) (*digitalocean.Addition, error) {
 	return addition, nil
 }
 
-func loadLinodeAddition(tenantID string) (*linodecloud.Addition, error) {
-	config, err := database.GetCloudProviderConfigByTenantAndName(tenantID, ProviderLinode)
+func loadLinodeAddition(userID string) (*linodecloud.Addition, error) {
+	config, err := database.GetCloudProviderConfigByUserAndName(userID, ProviderLinode)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %s", ErrProviderNotConfigured, ProviderLinode)
 	}
@@ -644,8 +640,8 @@ func loadLinodeAddition(tenantID string) (*linodecloud.Addition, error) {
 	return addition, nil
 }
 
-func loadAWSAddition(tenantID string) (*awscloud.Addition, error) {
-	config, err := database.GetCloudProviderConfigByTenantAndName(tenantID, ProviderAWS)
+func loadAWSAddition(userID string) (*awscloud.Addition, error) {
+	config, err := database.GetCloudProviderConfigByUserAndName(userID, ProviderAWS)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %s", ErrProviderNotConfigured, ProviderAWS)
 	}
@@ -681,15 +677,16 @@ func findDigitalOceanDroplet(ctx context.Context, client *digitalocean.Client, r
 	return nil, ErrInstanceNotFound
 }
 
-func resolveShareTenantID(share *models.CloudInstanceShare) (string, error) {
+func resolveShareOwnerUserID(share *models.CloudInstanceShare) (string, error) {
 	if share == nil {
 		return "", ErrInstanceNotFound
 	}
-	tenantID := strings.TrimSpace(share.TenantID)
-	if tenantID != "" {
-		return tenantID, nil
+
+	userID := strings.TrimSpace(share.UserID)
+	if userID == "" {
+		return "", ErrProviderNotConfigured
 	}
-	return database.GetDefaultTenantID()
+	return userID, nil
 }
 
 func formatTime(value time.Time) string {

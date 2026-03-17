@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/komari-monitor/komari/common"
-	"github.com/komari-monitor/komari/database"
+	"github.com/komari-monitor/komari/database/accounts"
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/utils"
@@ -79,14 +79,31 @@ func deleteClientTx(tx *gorm.DB, clientUuid string) error {
 	return tx.Where("uuid = ?", clientUuid).Delete(&models.Client{}).Error
 }
 
-func DeleteClientForTenant(tenantID, clientUUID string) error {
+func DeleteClientForUser(userUUID, clientUUID string) error {
 	db := dbcore.GetDBInstance()
 	return db.Transaction(func(tx *gorm.DB) error {
-		if _, err := getClientByUUIDForTenantWithDB(tx, clientUUID, tenantID); err != nil {
+		if _, err := getClientByUUIDForUserWithDB(tx, clientUUID, userUUID); err != nil {
 			return err
 		}
 		return deleteClientTx(tx, clientUUID)
 	})
+}
+
+func applyClientUserScopeWithDB(db *gorm.DB, userUUID string) *gorm.DB {
+	userUUID = strings.TrimSpace(userUUID)
+	if userUUID == "" {
+		return db.Where("1 = 0")
+	}
+
+	return db.Where("user_id = ?", userUUID)
+}
+
+func ClientUUIDScopeByUserWithDB(db *gorm.DB, userUUID string) *gorm.DB {
+	return applyClientUserScopeWithDB(db.Model(&models.Client{}).Select("uuid"), userUUID)
+}
+
+func ClientUUIDScopeByUser(userUUID string) *gorm.DB {
+	return ClientUUIDScopeByUserWithDB(dbcore.GetDBInstance(), userUUID)
 }
 
 // Deprecated: UpdateOrInsertBasicInfo is deprecated and will be removed in a future release. Use SaveClientInfo instead.
@@ -171,16 +188,18 @@ func getClientByUUIDWithDB(db *gorm.DB, clientUUID string) (client models.Client
 	return client, nil
 }
 
-func getClientByUUIDForTenantWithDB(db *gorm.DB, clientUUID, tenantID string) (client models.Client, err error) {
-	err = db.Where("uuid = ? AND tenant_id = ?", clientUUID, tenantID).First(&client).Error
+func getClientByUUIDForUserWithDB(db *gorm.DB, clientUUID, userUUID string) (client models.Client, err error) {
+	err = applyClientUserScopeWithDB(db, userUUID).
+		Where("uuid = ?", clientUUID).
+		First(&client).Error
 	if err != nil {
 		return models.Client{}, err
 	}
 	return client, nil
 }
 
-func getAllClientBasicInfoWithDB(db *gorm.DB, tenantID string) (clients []models.Client, err error) {
-	err = db.Where("tenant_id = ?", tenantID).Find(&clients).Error
+func getAllClientBasicInfoByUserWithDB(db *gorm.DB, userUUID string) (clients []models.Client, err error) {
+	err = applyClientUserScopeWithDB(db, userUUID).Find(&clients).Error
 	if err != nil {
 		return nil, err
 	}
@@ -206,7 +225,7 @@ func saveClientWithDB(db *gorm.DB, updates map[string]interface{}) error {
 	return nil
 }
 
-func saveClientForTenantWithDB(db *gorm.DB, tenantID string, updates map[string]interface{}) error {
+func saveClientForUserWithDB(db *gorm.DB, userUUID string, updates map[string]interface{}) error {
 	clientUUID, ok := updates["uuid"].(string)
 	if !ok || clientUUID == "" {
 		return fmt.Errorf("invalid client UUID")
@@ -217,9 +236,10 @@ func saveClientForTenantWithDB(db *gorm.DB, tenantID string, updates map[string]
 	}
 
 	updates["updated_at"] = time.Now()
+	delete(updates, "user_id")
 
-	result := db.Model(&models.Client{}).
-		Where("uuid = ? AND tenant_id = ?", clientUUID, tenantID).
+	result := applyClientUserScopeWithDB(db.Model(&models.Client{}), userUUID).
+		Where("uuid = ?", clientUUID).
 		Updates(updates)
 	if result.Error != nil {
 		return result.Error
@@ -325,43 +345,51 @@ func EditClientToken(clientUUID, token string) error {
 
 // CreateClient 创建新客户端
 func CreateClient() (clientUUID, token string, err error) {
-	tenantID, err := database.GetDefaultTenantID()
+	userUUID, err := getDefaultClientOwnerUserUUID()
 	if err != nil {
 		return "", "", err
 	}
-	return CreateClientForTenant(tenantID)
+	return CreateClientForUser(userUUID)
 }
 
 func CreateClientWithName(name string) (clientUUID, token string, err error) {
-	tenantID, err := database.GetDefaultTenantID()
+	userUUID, err := getDefaultClientOwnerUserUUID()
 	if err != nil {
 		return "", "", err
 	}
-	return CreateClientWithNameForTenant(tenantID, name)
+	return CreateClientWithNameForUser(userUUID, name)
 }
 
 func CreateClientWithNameAndGroup(name, group string) (clientUUID, token string, err error) {
-	tenantID, err := database.GetDefaultTenantID()
+	userUUID, err := getDefaultClientOwnerUserUUID()
 	if err != nil {
 		return "", "", err
 	}
-	return CreateClientWithNameAndGroupForTenant(tenantID, name, group)
+	return CreateClientWithNameAndGroupForUser(userUUID, name, group)
 }
 
-func CreateClientForTenant(tenantID string) (clientUUID, token string, err error) {
-	return CreateClientWithNameAndGroupForTenant(tenantID, "", "")
+func CreateClientForUser(userUUID string) (clientUUID, token string, err error) {
+	return CreateClientWithNameAndGroupForUser(userUUID, "", "")
 }
 
-func CreateClientWithNameForTenant(tenantID, name string) (clientUUID, token string, err error) {
-	return CreateClientWithNameAndGroupForTenant(tenantID, name, "")
+func CreateClientWithNameForUser(userUUID, name string) (clientUUID, token string, err error) {
+	return CreateClientWithNameAndGroupForUser(userUUID, name, "")
 }
 
-func CreateClientWithNameAndGroupForTenant(tenantID, name, group string) (clientUUID, token string, err error) {
-	if tenantID == "" {
-		return "", "", fmt.Errorf("tenant id is required")
+func CreateClientWithNameAndGroupForUser(userUUID, name, group string) (clientUUID, token string, err error) {
+	return createClientWithUserWithDB(dbcore.GetDBInstance(), userUUID, name, group)
+}
+
+func getDefaultClientOwnerUserUUID() (string, error) {
+	return accounts.GetPreferredAdminUserUUID()
+}
+
+func createClientWithUserWithDB(db *gorm.DB, userUUID, name, group string) (clientUUID, token string, err error) {
+	userUUID = strings.TrimSpace(userUUID)
+	if userUUID == "" {
+		return "", "", fmt.Errorf("user id is required")
 	}
 
-	db := dbcore.GetDBInstance()
 	token = utils.GenerateToken()
 	clientUUID = uuid.New().String()
 	if name == "" {
@@ -370,7 +398,7 @@ func CreateClientWithNameAndGroupForTenant(tenantID, name, group string) (client
 	client := models.Client{
 		UUID:      clientUUID,
 		Token:     token,
-		TenantID:  tenantID,
+		UserID:    userUUID,
 		Name:      name,
 		Group:     group,
 		CreatedAt: models.FromTime(time.Now()),
@@ -401,9 +429,9 @@ func GetClientByUUID(uuid string) (client models.Client, err error) {
 	return getClientByUUIDWithDB(db, uuid)
 }
 
-func GetClientByUUIDForTenant(uuid, tenantID string) (client models.Client, err error) {
+func GetClientByUUIDForUser(uuid, userUUID string) (client models.Client, err error) {
 	db := dbcore.GetDBInstance()
-	return getClientByUUIDForTenantWithDB(db, uuid, tenantID)
+	return getClientByUUIDForUserWithDB(db, uuid, userUUID)
 }
 
 // GetClientBasicInfo 获取指定 UUID 的客户端基本信息
@@ -427,8 +455,8 @@ func GetClientTokenByUUID(uuid string) (token string, err error) {
 	return client.Token, nil
 }
 
-func GetClientTokenByUUIDForTenant(uuid, tenantID string) (token string, err error) {
-	client, err := GetClientByUUIDForTenant(uuid, tenantID)
+func GetClientTokenByUUIDForUser(uuid, userUUID string) (token string, err error) {
+	client, err := GetClientByUUIDForUser(uuid, userUUID)
 	if err != nil {
 		return "", err
 	}
@@ -444,14 +472,15 @@ func GetAllClientBasicInfo() (clients []models.Client, err error) {
 	return clients, nil
 }
 
-func GetAllClientBasicInfoByTenant(tenantID string) (clients []models.Client, err error) {
+func GetAllClientBasicInfoByUser(userUUID string) (clients []models.Client, err error) {
 	db := dbcore.GetDBInstance()
-	return getAllClientBasicInfoWithDB(db, tenantID)
+	return getAllClientBasicInfoByUserWithDB(db, userUUID)
 }
 
-func NormalizeClientUUIDsForTenant(tenantID string, clientUUIDs []string) ([]string, error) {
-	if tenantID == "" {
-		return nil, fmt.Errorf("tenant id is required")
+func NormalizeClientUUIDsForUser(userUUID string, clientUUIDs []string) ([]string, error) {
+	userUUID = strings.TrimSpace(userUUID)
+	if userUUID == "" {
+		return nil, fmt.Errorf("user id is required")
 	}
 
 	normalized := make([]string, 0, len(clientUUIDs))
@@ -474,8 +503,8 @@ func NormalizeClientUUIDsForTenant(tenantID string, clientUUIDs []string) ([]str
 
 	db := dbcore.GetDBInstance()
 	var matched []string
-	if err := db.Model(&models.Client{}).
-		Where("tenant_id = ? AND uuid IN ?", tenantID, normalized).
+	if err := applyClientUserScopeWithDB(db.Model(&models.Client{}), userUUID).
+		Where("uuid IN ?", normalized).
 		Pluck("uuid", &matched).Error; err != nil {
 		return nil, err
 	}
@@ -491,7 +520,7 @@ func NormalizeClientUUIDsForTenant(tenantID string, clientUUIDs []string) ([]str
 				missing = append(missing, item)
 			}
 		}
-		return nil, fmt.Errorf("clients not found in current tenant: %s", strings.Join(missing, ", "))
+		return nil, fmt.Errorf("clients not found for current user: %s", strings.Join(missing, ", "))
 	}
 
 	return normalized, nil
@@ -502,7 +531,7 @@ func SaveClient(updates map[string]interface{}) error {
 	return saveClientWithDB(db, updates)
 }
 
-func SaveClientForTenant(tenantID string, updates map[string]interface{}) error {
+func SaveClientForUser(userUUID string, updates map[string]interface{}) error {
 	db := dbcore.GetDBInstance()
-	return saveClientForTenantWithDB(db, tenantID, updates)
+	return saveClientForUserWithDB(db, userUUID, updates)
 }

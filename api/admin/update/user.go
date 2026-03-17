@@ -13,13 +13,14 @@ func UpdateUser(c *gin.Context) {
 		Name     *string `json:"username"`
 		Password *string `json:"password"`
 		SsoType  *string `json:"sso_type"`
+		Role     *string `json:"role"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		api.RespondError(c, 400, "Invalid or missing request body: "+err.Error())
 		return
 	}
-	if req.Password == nil && req.Name == nil {
-		api.RespondError(c, 400, "At least one field (username or password) must be provided")
+	if req.Password == nil && req.Name == nil && req.SsoType == nil && req.Role == nil {
+		api.RespondError(c, 400, "At least one field must be provided")
 		return
 	}
 	if req.Name != nil && len(*req.Name) < 3 {
@@ -32,16 +33,28 @@ func UpdateUser(c *gin.Context) {
 	}
 
 	currentUUID, _ := c.Get("uuid")
-	if currentUUID == nil || currentUUID.(string) != req.Uuid {
+	currentUserUUID := ""
+	if currentUUID != nil {
+		currentUserUUID, _ = currentUUID.(string)
+	}
+	isSelf := currentUserUUID == req.Uuid
+	if !isSelf {
 		if !adminapi.EnsurePlatformAdmin(c) {
 			return
 		}
 	}
-	if err := accounts.UpdateUser(req.Uuid, req.Name, req.Password, req.SsoType); err != nil {
+	if isSelf && req.Role != nil {
+		api.RespondError(c, 403, "You cannot change your own role")
+		return
+	}
+	if err := accounts.UpdateUser(req.Uuid, req.Name, req.Password, req.SsoType, req.Role); err != nil {
 		api.RespondError(c, 500, "Failed to update user: "+err.Error())
 		return
 	}
-	uuid, _ := c.Get("uuid")
-	api.AuditLogForCurrentTenant(c, uuid.(string), "User updated", "warn")
+	if uuid, ok := c.Get("uuid"); ok {
+		if actorUUID, ok := uuid.(string); ok {
+			api.AuditLogForCurrentUser(c, actorUUID, "User updated", "warn")
+		}
+	}
 	api.RespondSuccess(c, gin.H{"uuid": req.Uuid})
 }

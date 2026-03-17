@@ -26,7 +26,7 @@ func UploadFavicon(c *gin.Context) {
 		return
 	}
 	uuid, _ := c.Get("uuid")
-	api.AuditLogForCurrentTenant(c, uuid.(string), "Favicon uploaded", "info")
+	api.AuditLogForCurrentUser(c, uuid.(string), "Favicon uploaded", "info")
 	api.RespondSuccess(c, nil)
 }
 
@@ -40,6 +40,6 @@ func DeleteFavicon(c *gin.Context) {
 		return
 	}
 	uuid, _ := c.Get("uuid")
-	api.AuditLogForCurrentTenant(c, uuid.(string), "Favicon deleted", "info")
+	api.AuditLogForCurrentUser(c, uuid.(string), "Favicon deleted", "info")
 	api.RespondSuccess(c, nil)
 }

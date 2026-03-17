@@ -14,7 +14,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/api"
-	"github.com/komari-monitor/komari/database"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/utils/cloudprovider/digitalocean"
 	"github.com/komari-monitor/komari/utils/cloudprovider/factory"
@@ -59,7 +58,7 @@ func GetCloudProviders(c *gin.Context) {
 }
 
 func GetCloudProvider(c *gin.Context) {
-	tenantID, ok := requireCurrentTenantID(c)
+	scope, ok := requireCurrentOwnerScope(c)
 	if !ok {
 		return
 	}
@@ -70,7 +69,7 @@ func GetCloudProvider(c *gin.Context) {
 		return
 	}
 
-	config, err := database.GetCloudProviderConfigByTenantAndName(tenantID, providerName)
+	config, err := getCloudProviderConfigForScope(scope, providerName)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			response, buildErr := buildCloudProviderResponse(providerName, nil)
@@ -95,7 +94,7 @@ func GetCloudProvider(c *gin.Context) {
 }
 
 func SetCloudProvider(c *gin.Context) {
-	tenantID, ok := requireCurrentTenantID(c)
+	scope, ok := requireCurrentOwnerScope(c)
 	if !ok {
 		return
 	}
@@ -136,11 +135,7 @@ func SetCloudProvider(c *gin.Context) {
 		return
 	}
 
-	if err := database.SaveCloudProviderConfigForTenant(&models.CloudProvider{
-		TenantID: tenantID,
-		Name:     providerName,
-		Addition: addition,
-	}); err != nil {
+	if err := saveCloudProviderConfigForScope(scope, providerName, addition); err != nil {
 		api.RespondError(c, http.StatusInternalServerError, "Failed to save cloud provider configuration: "+err.Error())
 		return
 	}
@@ -153,12 +148,12 @@ func SetCloudProvider(c *gin.Context) {
 }
 
 func GetDigitalOceanTokens(c *gin.Context) {
-	tenantID, ok := requireCurrentTenantID(c)
+	scope, ok := requireCurrentOwnerScope(c)
 	if !ok {
 		return
 	}
 
-	_, addition, err := loadDigitalOceanAddition(tenantID, true)
+	_, addition, err := loadDigitalOceanAddition(scope, true)
 	if err != nil {
 		api.RespondError(c, http.StatusBadRequest, err.Error())
 		return
@@ -168,7 +163,7 @@ func GetDigitalOceanTokens(c *gin.Context) {
 }
 
 func SaveDigitalOceanTokens(c *gin.Context) {
-	tenantID, ok := requireCurrentTenantID(c)
+	scope, ok := requireCurrentOwnerScope(c)
 	if !ok {
 		return
 	}
@@ -187,7 +182,7 @@ func SaveDigitalOceanTokens(c *gin.Context) {
 		return
 	}
 
-	_, addition, err := loadDigitalOceanAddition(tenantID, true)
+	_, addition, err := loadDigitalOceanAddition(scope, true)
 	if err != nil {
 		api.RespondError(c, http.StatusBadRequest, err.Error())
 		return
@@ -206,7 +201,7 @@ func SaveDigitalOceanTokens(c *gin.Context) {
 		}
 	}
 
-	if err := saveDigitalOceanAdditionPreservingSecrets(tenantID, addition); err != nil {
+	if err := saveDigitalOceanAdditionPreservingSecrets(scope, addition); err != nil {
 		api.RespondError(c, http.StatusInternalServerError, "Failed to save DigitalOcean tokens: "+err.Error())
 		return
 	}
@@ -216,7 +211,7 @@ func SaveDigitalOceanTokens(c *gin.Context) {
 }
 
 func SetDigitalOceanActiveToken(c *gin.Context) {
-	tenantID, ok := requireCurrentTenantID(c)
+	scope, ok := requireCurrentOwnerScope(c)
 	if !ok {
 		return
 	}
@@ -229,7 +224,7 @@ func SetDigitalOceanActiveToken(c *gin.Context) {
 		return
 	}
 
-	_, addition, err := loadDigitalOceanAddition(tenantID, false)
+	_, addition, err := loadDigitalOceanAddition(scope, false)
 	if err != nil {
 		api.RespondError(c, http.StatusBadRequest, err.Error())
 		return
@@ -240,7 +235,7 @@ func SetDigitalOceanActiveToken(c *gin.Context) {
 		return
 	}
 
-	if err := saveDigitalOceanAdditionPreservingSecrets(tenantID, addition); err != nil {
+	if err := saveDigitalOceanAdditionPreservingSecrets(scope, addition); err != nil {
 		api.RespondError(c, http.StatusInternalServerError, "Failed to update active token: "+err.Error())
 		return
 	}
@@ -250,7 +245,7 @@ func SetDigitalOceanActiveToken(c *gin.Context) {
 }
 
 func CheckDigitalOceanTokens(c *gin.Context) {
-	tenantID, ok := requireCurrentTenantID(c)
+	scope, ok := requireCurrentOwnerScope(c)
 	if !ok {
 		return
 	}
@@ -265,7 +260,7 @@ func CheckDigitalOceanTokens(c *gin.Context) {
 		}
 	}
 
-	_, addition, err := loadDigitalOceanAddition(tenantID, false)
+	_, addition, err := loadDigitalOceanAddition(scope, false)
 	if err != nil {
 		api.RespondError(c, http.StatusBadRequest, err.Error())
 		return
@@ -323,7 +318,7 @@ func CheckDigitalOceanTokens(c *gin.Context) {
 
 	wg.Wait()
 
-	if err := saveDigitalOceanAdditionPreservingSecrets(tenantID, addition); err != nil {
+	if err := saveDigitalOceanAdditionPreservingSecrets(scope, addition); err != nil {
 		api.RespondError(c, http.StatusInternalServerError, "Failed to save token health: "+err.Error())
 		return
 	}
@@ -333,7 +328,7 @@ func CheckDigitalOceanTokens(c *gin.Context) {
 }
 
 func DeleteDigitalOceanToken(c *gin.Context) {
-	tenantID, ok := requireCurrentTenantID(c)
+	scope, ok := requireCurrentOwnerScope(c)
 	if !ok {
 		return
 	}
@@ -344,7 +339,7 @@ func DeleteDigitalOceanToken(c *gin.Context) {
 		return
 	}
 
-	_, addition, err := loadDigitalOceanAddition(tenantID, false)
+	_, addition, err := loadDigitalOceanAddition(scope, false)
 	if err != nil {
 		api.RespondError(c, http.StatusBadRequest, err.Error())
 		return
@@ -355,7 +350,7 @@ func DeleteDigitalOceanToken(c *gin.Context) {
 		return
 	}
 
-	if err := saveDigitalOceanAddition(tenantID, addition); err != nil {
+	if err := saveDigitalOceanAddition(scope, addition); err != nil {
 		api.RespondError(c, http.StatusInternalServerError, "Failed to delete token: "+err.Error())
 		return
 	}
@@ -365,7 +360,7 @@ func DeleteDigitalOceanToken(c *gin.Context) {
 }
 
 func GetDigitalOceanManagedSSHKey(c *gin.Context) {
-	tenantID, ok := requireCurrentTenantID(c)
+	scope, ok := requireCurrentOwnerScope(c)
 	if !ok {
 		return
 	}
@@ -376,7 +371,7 @@ func GetDigitalOceanManagedSSHKey(c *gin.Context) {
 		return
 	}
 
-	_, addition, err := loadDigitalOceanAddition(tenantID, false)
+	_, addition, err := loadDigitalOceanAddition(scope, false)
 	if err != nil {
 		api.RespondError(c, http.StatusBadRequest, err.Error())
 		return
@@ -398,7 +393,7 @@ func GetDigitalOceanManagedSSHKey(c *gin.Context) {
 }
 
 func GetDigitalOceanTokenSecret(c *gin.Context) {
-	tenantID, ok := requireCurrentTenantID(c)
+	scope, ok := requireCurrentOwnerScope(c)
 	if !ok {
 		return
 	}
@@ -409,7 +404,7 @@ func GetDigitalOceanTokenSecret(c *gin.Context) {
 		return
 	}
 
-	_, addition, err := loadDigitalOceanAddition(tenantID, false)
+	_, addition, err := loadDigitalOceanAddition(scope, false)
 	if err != nil {
 		api.RespondError(c, http.StatusBadRequest, err.Error())
 		return
@@ -425,7 +420,7 @@ func GetDigitalOceanTokenSecret(c *gin.Context) {
 }
 
 func GetDigitalOceanDropletPassword(c *gin.Context) {
-	tenantID, ok := requireCurrentTenantID(c)
+	scope, ok := requireCurrentOwnerScope(c)
 	if !ok {
 		return
 	}
@@ -436,7 +431,7 @@ func GetDigitalOceanDropletPassword(c *gin.Context) {
 		return
 	}
 
-	_, addition, err := loadDigitalOceanAddition(tenantID, false)
+	_, addition, err := loadDigitalOceanAddition(scope, false)
 	if err != nil {
 		api.RespondError(c, http.StatusBadRequest, err.Error())
 		return
@@ -465,12 +460,12 @@ func GetDigitalOceanDropletPassword(c *gin.Context) {
 }
 
 func GetDigitalOceanAccount(c *gin.Context) {
-	tenantID, ok := requireCurrentTenantID(c)
+	scope, ok := requireCurrentOwnerScope(c)
 	if !ok {
 		return
 	}
 
-	client, ctx, cancel, err := getDigitalOceanClient(c, tenantID)
+	client, ctx, cancel, err := getDigitalOceanClient(c, scope)
 	if err != nil {
 		respondCloudError(c, err)
 		return
@@ -487,12 +482,12 @@ func GetDigitalOceanAccount(c *gin.Context) {
 }
 
 func GetDigitalOceanCatalog(c *gin.Context) {
-	tenantID, ok := requireCurrentTenantID(c)
+	scope, ok := requireCurrentOwnerScope(c)
 	if !ok {
 		return
 	}
 
-	client, ctx, cancel, err := getDigitalOceanClient(c, tenantID)
+	client, ctx, cancel, err := getDigitalOceanClient(c, scope)
 	if err != nil {
 		respondCloudError(c, err)
 		return
@@ -556,12 +551,12 @@ func GetDigitalOceanCatalog(c *gin.Context) {
 }
 
 func ListDigitalOceanDroplets(c *gin.Context) {
-	tenantID, ok := requireCurrentTenantID(c)
+	scope, ok := requireCurrentOwnerScope(c)
 	if !ok {
 		return
 	}
 
-	client, addition, activeToken, ctx, cancel, err := getDigitalOceanActiveTokenClient(c, tenantID)
+	client, addition, activeToken, ctx, cancel, err := getDigitalOceanActiveTokenClient(c, scope)
 	if err != nil {
 		respondCloudError(c, err)
 		return
@@ -600,19 +595,19 @@ func ListDigitalOceanDroplets(c *gin.Context) {
 		credentialsChanged = true
 	}
 	if credentialsChanged {
-		_ = saveDigitalOceanAddition(tenantID, addition)
+		_ = saveDigitalOceanAddition(scope, addition)
 	}
 
 	api.RespondSuccess(c, views)
 }
 
 func CreateDigitalOceanDroplet(c *gin.Context) {
-	tenantID, ok := requireCurrentTenantID(c)
+	scope, ok := requireCurrentOwnerScope(c)
 	if !ok {
 		return
 	}
 
-	client, addition, activeToken, ctx, cancel, err := getDigitalOceanActiveTokenClient(c, tenantID)
+	client, addition, activeToken, ctx, cancel, err := getDigitalOceanActiveTokenClient(c, scope)
 	if err != nil {
 		respondCloudError(c, err)
 		return
@@ -685,7 +680,7 @@ func CreateDigitalOceanDroplet(c *gin.Context) {
 		return
 	}
 
-	managedSSHKey, err = ensureManagedDigitalOceanSSHKey(ctx, tenantID, addition, activeToken, client)
+	managedSSHKey, err = ensureManagedDigitalOceanSSHKey(ctx, scope, addition, activeToken, client)
 	if err != nil {
 		var apiErr *digitalocean.APIError
 		if errors.As(err, &apiErr) {
@@ -714,7 +709,7 @@ func CreateDigitalOceanDroplet(c *gin.Context) {
 	if droplet != nil && rootPassword != "" && activeToken != nil {
 		if saveErr := activeToken.SaveDropletPassword(droplet.ID, droplet.Name, passwordMode, rootPassword, time.Now()); saveErr != nil {
 			passwordSaveError = saveErr.Error()
-		} else if saveErr := saveDigitalOceanAdditionPreservingSecrets(tenantID, addition); saveErr != nil {
+		} else if saveErr := saveDigitalOceanAdditionPreservingSecrets(scope, addition); saveErr != nil {
 			activeToken.RemoveSavedDropletPassword(droplet.ID)
 			passwordSaveError = "Failed to save root password: " + saveErr.Error()
 		} else {
@@ -738,12 +733,12 @@ func CreateDigitalOceanDroplet(c *gin.Context) {
 }
 
 func DeleteDigitalOceanDroplet(c *gin.Context) {
-	tenantID, ok := requireCurrentTenantID(c)
+	scope, ok := requireCurrentOwnerScope(c)
 	if !ok {
 		return
 	}
 
-	client, addition, activeToken, ctx, cancel, err := getDigitalOceanActiveTokenClient(c, tenantID)
+	client, addition, activeToken, ctx, cancel, err := getDigitalOceanActiveTokenClient(c, scope)
 	if err != nil {
 		respondCloudError(c, err)
 		return
@@ -762,7 +757,7 @@ func DeleteDigitalOceanDroplet(c *gin.Context) {
 	}
 
 	if activeToken != nil && activeToken.RemoveSavedDropletPassword(dropletID) {
-		_ = saveDigitalOceanAddition(tenantID, addition)
+		_ = saveDigitalOceanAddition(scope, addition)
 	}
 
 	logCloudAudit(c, fmt.Sprintf("delete digitalocean droplet: %d", dropletID))
@@ -770,12 +765,12 @@ func DeleteDigitalOceanDroplet(c *gin.Context) {
 }
 
 func PostDigitalOceanDropletAction(c *gin.Context) {
-	tenantID, ok := requireCurrentTenantID(c)
+	scope, ok := requireCurrentOwnerScope(c)
 	if !ok {
 		return
 	}
 
-	client, ctx, cancel, err := getDigitalOceanClient(c, tenantID)
+	client, ctx, cancel, err := getDigitalOceanClient(c, scope)
 	if err != nil {
 		respondCloudError(c, err)
 		return
@@ -810,13 +805,13 @@ func PostDigitalOceanDropletAction(c *gin.Context) {
 	api.RespondSuccess(c, action)
 }
 
-func getDigitalOceanClient(c *gin.Context, tenantID string) (*digitalocean.Client, context.Context, context.CancelFunc, error) {
-	client, _, _, ctx, cancel, err := getDigitalOceanActiveTokenClient(c, tenantID)
+func getDigitalOceanClient(c *gin.Context, scope ownerScope) (*digitalocean.Client, context.Context, context.CancelFunc, error) {
+	client, _, _, ctx, cancel, err := getDigitalOceanActiveTokenClient(c, scope)
 	return client, ctx, cancel, err
 }
 
-func getDigitalOceanActiveTokenClient(c *gin.Context, tenantID string) (*digitalocean.Client, *digitalocean.Addition, *digitalocean.TokenRecord, context.Context, context.CancelFunc, error) {
-	_, addition, err := loadDigitalOceanAddition(tenantID, false)
+func getDigitalOceanActiveTokenClient(c *gin.Context, scope ownerScope) (*digitalocean.Client, *digitalocean.Addition, *digitalocean.TokenRecord, context.Context, context.CancelFunc, error) {
+	_, addition, err := loadDigitalOceanAddition(scope, false)
 	if err != nil {
 		return nil, nil, nil, nil, nil, err
 	}
@@ -924,7 +919,7 @@ func buildDigitalOceanDropletView(droplet *digitalocean.Droplet, token *digitalo
 	return view
 }
 
-func ensureManagedDigitalOceanSSHKey(ctx context.Context, tenantID string, addition *digitalocean.Addition, token *digitalocean.TokenRecord, client *digitalocean.Client) (*digitalocean.ManagedSSHKeyMaterialView, error) {
+func ensureManagedDigitalOceanSSHKey(ctx context.Context, scope ownerScope, addition *digitalocean.Addition, token *digitalocean.TokenRecord, client *digitalocean.Client) (*digitalocean.ManagedSSHKeyMaterialView, error) {
 	if token == nil {
 		return nil, fmt.Errorf("DigitalOcean token is not configured")
 	}
@@ -974,7 +969,7 @@ func ensureManagedDigitalOceanSSHKey(ctx context.Context, tenantID string, addit
 				changed = true
 			}
 			if changed {
-				if err := saveDigitalOceanAdditionPreservingSecrets(tenantID, addition); err != nil {
+				if err := saveDigitalOceanAdditionPreservingSecrets(scope, addition); err != nil {
 					return nil, err
 				}
 			}
@@ -994,7 +989,7 @@ func ensureManagedDigitalOceanSSHKey(ctx context.Context, tenantID string, addit
 			changed = true
 		}
 		if changed {
-			if err := saveDigitalOceanAdditionPreservingSecrets(tenantID, addition); err != nil {
+			if err := saveDigitalOceanAdditionPreservingSecrets(scope, addition); err != nil {
 				return nil, err
 			}
 		}
@@ -1017,7 +1012,7 @@ func ensureManagedDigitalOceanSSHKey(ctx context.Context, tenantID string, addit
 		changed = true
 	}
 	if changed {
-		if err := saveDigitalOceanAdditionPreservingSecrets(tenantID, addition); err != nil {
+		if err := saveDigitalOceanAdditionPreservingSecrets(scope, addition); err != nil {
 			return nil, err
 		}
 	}
@@ -1051,8 +1046,8 @@ func syncDigitalOceanTokenAccount(token *digitalocean.TokenRecord, account *digi
 	return changed
 }
 
-func loadDigitalOceanAddition(tenantID string, allowMissing bool) (*models.CloudProvider, *digitalocean.Addition, error) {
-	config, err := database.GetCloudProviderConfigByTenantAndName(tenantID, digitalOceanProviderName)
+func loadDigitalOceanAddition(scope ownerScope, allowMissing bool) (*models.CloudProvider, *digitalocean.Addition, error) {
+	config, err := getCloudProviderConfigForScope(scope, digitalOceanProviderName)
 	if err != nil {
 		if allowMissing {
 			addition := &digitalocean.Addition{}
@@ -1075,7 +1070,7 @@ func loadDigitalOceanAddition(tenantID string, allowMissing bool) (*models.Cloud
 	return config, addition, nil
 }
 
-func saveDigitalOceanAddition(tenantID string, addition *digitalocean.Addition) error {
+func saveDigitalOceanAddition(scope ownerScope, addition *digitalocean.Addition) error {
 	if addition == nil {
 		addition = &digitalocean.Addition{}
 	}
@@ -1086,23 +1081,19 @@ func saveDigitalOceanAddition(tenantID string, addition *digitalocean.Addition) 
 		return err
 	}
 
-	return database.SaveCloudProviderConfigForTenant(&models.CloudProvider{
-		TenantID: tenantID,
-		Name:     digitalOceanProviderName,
-		Addition: string(payload),
-	})
+	return saveCloudProviderConfigForScope(scope, digitalOceanProviderName, string(payload))
 }
 
-func saveDigitalOceanAdditionPreservingSecrets(tenantID string, addition *digitalocean.Addition) error {
+func saveDigitalOceanAdditionPreservingSecrets(scope ownerScope, addition *digitalocean.Addition) error {
 	if addition == nil {
 		addition = &digitalocean.Addition{}
 	}
 
-	if _, current, err := loadDigitalOceanAddition(tenantID, true); err == nil {
+	if _, current, err := loadDigitalOceanAddition(scope, true); err == nil {
 		addition.MergePersistentStateFrom(current)
 	}
 
-	return saveDigitalOceanAddition(tenantID, addition)
+	return saveDigitalOceanAddition(scope, addition)
 }
 
 func logCloudAudit(c *gin.Context, message string) {
@@ -1114,5 +1105,5 @@ func logCloudAudit(c *gin.Context, message string) {
 	if !ok || userUUID == "" {
 		return
 	}
-	api.AuditLogForCurrentTenant(c, userUUID, message, "info")
+	api.AuditLogForCurrentUser(c, userUUID, message, "info")
 }

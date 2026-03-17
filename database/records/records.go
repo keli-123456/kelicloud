@@ -8,6 +8,7 @@ import (
 
 	"gorm.io/gorm"
 
+	clientdb "github.com/komari-monitor/komari/database/clients"
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
 )
@@ -36,9 +37,9 @@ func DeleteAll() error {
 	return db.Exec("DELETE FROM records").Error
 }
 
-func DeleteAllByTenant(tenantID string) error {
+func DeleteAllByUser(userUUID string) error {
 	db := dbcore.GetDBInstance()
-	clientScope := db.Model(&models.Client{}).Select("uuid").Where("tenant_id = ?", tenantID)
+	clientScope := clientdb.ClientUUIDScopeByUserWithDB(db, userUUID)
 
 	if err := db.Table("records_long_term").Where("client IN (?)", clientScope).Delete(&models.Record{}).Error; err != nil {
 		return err
@@ -88,12 +89,15 @@ func GetGPURecordsByClientAndTime(uuid string, start, end time.Time) ([]models.G
 	return records, nil
 }
 
-func GetGPURecordsByClientAndTimeForTenant(tenantID, uuid string, start, end time.Time) ([]models.GPURecord, error) {
+func GetGPURecordsByClientAndTimeForUser(userUUID, uuid string, start, end time.Time) ([]models.GPURecord, error) {
 	db := dbcore.GetDBInstance()
 	var records []models.GPURecord
 
 	fourHoursAgo := time.Now().Add(-4*time.Hour - time.Minute)
-	clientScope := db.Model(&models.Client{}).Select("uuid").Where("tenant_id = ? AND uuid = ?", tenantID, uuid)
+	clientScope := clientdb.ClientUUIDScopeByUserWithDB(db, userUUID)
+	if uuid != "" {
+		clientScope = clientScope.Where("uuid = ?", uuid)
+	}
 
 	var recentRecords []models.GPURecord
 	recentStart := start
@@ -104,7 +108,7 @@ func GetGPURecordsByClientAndTimeForTenant(tenantID, uuid string, start, end tim
 		err := db.Where("client IN (?) AND time >= ? AND time <= ?", clientScope, recentStart, end).
 			Order("time ASC, device_index ASC").Find(&recentRecords).Error
 		if err != nil {
-			log.Printf("Error fetching recent GPU records for client %s between %s and %s: %v", uuid, recentStart, end, err)
+			log.Printf("Error fetching recent GPU records for user client %s between %s and %s: %v", uuid, recentStart, end, err)
 			return nil, err
 		}
 	}
@@ -113,7 +117,7 @@ func GetGPURecordsByClientAndTimeForTenant(tenantID, uuid string, start, end tim
 	err := db.Table("gpu_records_long_term").Where("client IN (?) AND time >= ? AND time <= ?", clientScope, start, end).
 		Order("time ASC, device_index ASC").Find(&longTermRecords).Error
 	if err != nil {
-		log.Printf("Error fetching long-term GPU records for client %s between %s and %s: %v", uuid, start, end, err)
+		log.Printf("Error fetching long-term GPU records for user client %s between %s and %s: %v", uuid, start, end, err)
 		return recentRecords, nil
 	}
 
@@ -188,12 +192,15 @@ func GetRecordsByClientAndTime(uuid string, start, end time.Time) ([]models.Reco
 	return records, nil
 }
 
-func GetRecordsByClientAndTimeForTenant(tenantID, uuid string, start, end time.Time) ([]models.Record, error) {
+func GetRecordsByClientAndTimeForUser(userUUID, uuid string, start, end time.Time) ([]models.Record, error) {
 	db := dbcore.GetDBInstance()
 	var records []models.Record
 
 	fourHoursAgo := time.Now().Add(-4*time.Hour - time.Minute)
-	clientScope := db.Model(&models.Client{}).Select("uuid").Where("tenant_id = ? AND uuid = ?", tenantID, uuid)
+	clientScope := clientdb.ClientUUIDScopeByUserWithDB(db, userUUID)
+	if uuid != "" {
+		clientScope = clientScope.Where("uuid = ?", uuid)
+	}
 
 	var recentRecords []models.Record
 	recentStart := start
@@ -203,7 +210,7 @@ func GetRecordsByClientAndTimeForTenant(tenantID, uuid string, start, end time.T
 		}
 		err := db.Where("client IN (?) AND time >= ? AND time <= ?", clientScope, recentStart, end).Order("time ASC").Find(&recentRecords).Error
 		if err != nil {
-			log.Printf("Error fetching recent records for client %s between %s and %s: %v", uuid, recentStart, end, err)
+			log.Printf("Error fetching recent user records for client %s between %s and %s: %v", uuid, recentStart, end, err)
 			return nil, err
 		}
 	}
@@ -211,7 +218,7 @@ func GetRecordsByClientAndTimeForTenant(tenantID, uuid string, start, end time.T
 	var longTerm []models.Record
 	err := db.Table("records_long_term").Where("client IN (?) AND time >= ? AND time <= ?", clientScope, start, end).Order("time ASC").Find(&longTerm).Error
 	if err != nil {
-		log.Printf("Error fetching long-term records for client %s between %s and %s: %v", uuid, start, end, err)
+		log.Printf("Error fetching long-term user records for client %s between %s and %s: %v", uuid, start, end, err)
 		return recentRecords, nil
 	}
 
@@ -238,7 +245,6 @@ func GetRecordsByClientAndTimeForTenant(tenantID, uuid string, start, end time.T
 	records = append(records, longTerm...)
 	return records, nil
 }
-
 func GetAllRecords() ([]models.Record, error) {
 	db := dbcore.GetDBInstance()
 	var records []models.Record
@@ -296,7 +302,7 @@ func migrateOldRecords(db *gorm.DB) error {
 		return nil
 	}
 
-	// 按 Client 和 15 分钟时间段分组，并存储所有记录以计算分位数
+	// 按 Client 和 1 小时时间段分组，并存储所有记录以计算分位数
 	type groupData struct {
 		Cpu            []float32
 		Gpu            []float32
@@ -320,7 +326,7 @@ func migrateOldRecords(db *gorm.DB) error {
 
 	groupedRecords := make(map[string]*groupData)
 	for _, record := range records {
-		key := record.Client + "_" + record.Time.ToTime().Truncate(15*time.Minute).Format(time.RFC3339)
+		key := record.Client + "_" + record.Time.ToTime().Truncate(time.Hour).Format(time.RFC3339)
 		if _, ok := groupedRecords[key]; !ok {
 			groupedRecords[key] = &groupData{}
 		}
@@ -452,8 +458,8 @@ func migrateOldRecords(db *gorm.DB) error {
 			}
 		}
 
-		// 删除 records 表中的旧数据
-		if err := tx.Table("records").Where("time < ?", fourHoursAgo.Add(-1*time.Hour)).Delete(&models.Record{}).Error; err != nil {
+		// 删除已经归档的原始数据，仅保留最近 4 小时的原始记录
+		if err := tx.Table("records").Where("time < ?", fourHoursAgo).Delete(&models.Record{}).Error; err != nil {
 			return err
 		}
 
@@ -475,7 +481,7 @@ func migrateGPURecords(db *gorm.DB) error {
 		return nil
 	}
 
-	// 按Client + DeviceIndex + 15分钟时间窗口分组
+	// 按 Client + DeviceIndex + 1 小时时间窗口分组
 	type gpuGroupKey struct {
 		Client      string
 		DeviceIndex int
@@ -496,7 +502,7 @@ func migrateGPURecords(db *gorm.DB) error {
 		key := gpuGroupKey{
 			Client:      record.Client,
 			DeviceIndex: record.DeviceIndex,
-			TimeSlot:    record.Time.ToTime().Truncate(15 * time.Minute),
+			TimeSlot:    record.Time.ToTime().Truncate(time.Hour),
 			DeviceName:  record.DeviceName,
 		}
 
@@ -596,8 +602,8 @@ func migrateGPURecords(db *gorm.DB) error {
 			}
 		}
 
-		// 删除已压缩的原始GPU数据
-		if err := tx.Where("time < ?", fourHoursAgo.Add(-1*time.Hour)).Delete(&models.GPURecord{}).Error; err != nil {
+		// 删除已经归档的原始 GPU 数据，仅保留最近 4 小时的原始记录
+		if err := tx.Where("time < ?", fourHoursAgo).Delete(&models.GPURecord{}).Error; err != nil {
 			return err
 		}
 

@@ -6,33 +6,20 @@ import (
 )
 
 func GetNodesInformation(c *gin.Context) {
-	tenantID, isLogin, err := ResolveTenantScopeFromSession(c)
-	if err != nil {
-		RespondError(c, 500, "Failed to resolve tenant scope: "+err.Error())
+	userUUID, ok := RequireUserScopeFromSession(c)
+	if !ok {
 		return
 	}
 
-	clientList, err := clients.GetAllClientBasicInfoByTenant(tenantID)
+	clientList, err := clients.GetAllClientBasicInfoByUser(userUUID)
 	if err != nil {
 		RespondError(c, 500, "Failed to retrieve client information: "+err.Error())
 		return
 	}
 
-	// 过滤掉 Hidden 的客户端，并清理需要隐藏的字段
-	j := 0
-	for i := 0; i < len(clientList); i++ {
-		if clientList[i].Hidden && !isLogin { // 不返回 Hidden 客户端
-			continue
-		}
-		clientList[i].IPv4 = ""
-		clientList[i].IPv6 = ""
-		clientList[i].Remark = "" // 私有备注不展示
-		clientList[i].Version = ""
-		clientList[i].Token = ""
-		clientList[j] = clientList[i]
-		j++
+	for index := range clientList {
+		clientList[index].Token = ""
 	}
-	clientList = clientList[:j]
 
 	RespondSuccess(c, clientList)
 }

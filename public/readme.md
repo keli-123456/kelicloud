@@ -4,13 +4,13 @@
 
 ### Frontend Repository
 
-- **Frontend project repository**: https://github.com/komari-monitor/komari-web
+- **Pinned frontend source**: see `../frontend-source.env`
 
 ### Build Requirements
 
-1. Clone the frontend repository and build the static files
-2. Copy the generated static files to the `defaultTheme` folder in the Komari backend project root directory
-3. Ensure the `defaultTheme/dist` folder contains `index.html`
+1. Run `bash scripts/prepare-frontend.sh` from the Komari repository root
+2. The script clones the repo/ref pinned in `../frontend-source.env` unless you override it
+3. Ensure the `frontend/dist` folder contains `index.html`
 
 ### Important Note
 
@@ -22,13 +22,13 @@
 
 ### 前端项目仓库
 
-- **前端项目地址**: https://github.com/komari-monitor/komari-web
+- **固定前端来源**: 查看 `../frontend-source.env`
 
 ### 构建要求
 
-1. 克隆前端仓库并构建静态文件
-2. 将生成的静态文件复制到 Komari 后端项目根目录下的 `defaultTheme` 文件夹
-3. 确保 `dist` 文件夹内包含 `index.html`
+1. 在 Komari 仓库根目录执行 `bash scripts/prepare-frontend.sh`
+2. 脚本默认会克隆 `../frontend-source.env` 中固定的仓库和提交，除非你显式覆盖
+3. 确保 `frontend/dist` 文件夹内包含 `index.html`
 
 ### 重要提醒
 
@@ -40,13 +40,13 @@
 
 ### フロントエンドプロジェクトリポジトリ
 
-- **フロントエンドプロジェクトアドレス**: https://github.com/komari-monitor/komari-web
+- **固定されたフロントエンドソース**: `../frontend-source.env` を参照
 
 ### ビルド要件
 
-1. フロントエンドリポジトリをクローンして静的ファイルをビルドする
-2. 生成された静的ファイルを Komari バックエンドプロジェクトのルートディレクトリ下の `defaultTheme` フォルダーにコピーする
-3. `dist` フォルダー内に `index.html` が含まれていることを確認する
+1. Komari リポジトリのルートで `bash scripts/prepare-frontend.sh` を実行する
+2. スクリプトは `../frontend-source.env` に固定されたリポジトリとコミットを、明示的に上書きしない限り利用する
+3. `frontend/dist` フォルダー内に `index.html` が含まれていることを確認する
 
 ### 重要な注意事項
 
@@ -57,14 +57,13 @@
 ## Quick Setup / 快速设置 / クイックセットアップ
 
 ```bash
-# Clone frontend repository / 克隆前端仓库 / フロントエンドリポジトリをクローン
-git clone https://github.com/komari-monitor/komari-web
-cd komari-web
+# Clone backend repository / 克隆后端仓库 / バックエンドリポジトリをクローン
+git clone https://github.com/komari-monitor/komari
+cd komari
 
-# Install dependencies and build / 安装依赖并构建 / 依存関係をインストールしてビルド
-npm install
-npm run build
+# Build pinned frontend bundle / 构建固定前端产物 / 固定されたフロントエンド成果物をビルド
+bash scripts/prepare-frontend.sh
 
-# Copy dist folder to Komari backend project / 将 dist 文件夹复制到 Komari 后端项目 / dist フォルダーを Komari バックエンドプロジェクトにコピー
-cp -r dist /path/to/komari/public/defaultTheme
+# Update the pin from a local checkout when needed / 需要时从本地检出更新 pin / 必要に応じてローカルチェックアウトから pin を更新
+bash scripts/update-frontend-pin.sh --from-local /path/to/komari-web
 ```

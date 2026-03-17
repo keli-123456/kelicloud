@@ -21,6 +21,10 @@ func init() {
 
 func getRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
 	meta := rpc.MetaFromContext(ctx)
+	userUUID, rpcErr := requireRPCUserUUID(meta)
+	if rpcErr != nil {
+		return nil, rpcErr
+	}
 	var params struct {
 		Type     string `json:"type"`      // "load" | "ping"; default "load"
 		UUID     string `json:"uuid"`      // client uuid; empty = all clients
@@ -70,41 +74,16 @@ func getRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpc
 	}
 
 	// Hidden filtering for non-admin
-	isAdmin := meta.Permission == "admin"
-	tenantID := tenantIDFromRPCMeta(meta)
-	hidden := map[string]bool{}
-	if !isAdmin {
-		cinfo, err := clients.GetAllClientBasicInfoByTenant(tenantID)
-		if err != nil {
-			return nil, rpc.MakeError(rpc.InternalError, "Failed to get client info", err.Error())
-		}
-		for _, c := range cinfo {
-			if c.Hidden {
-				hidden[c.UUID] = true
-			}
-		}
-		if params.UUID != "" && hidden[params.UUID] {
-			return nil, rpc.MakeError(rpc.InvalidParams, "UUID not found", params.UUID)
-		}
-	}
-
 	switch params.Type {
 	case "load":
 		// fetch load records
-		recs, err := getLoadRecordsCombinedForTenant(tenantID, params.UUID, startTime, endTime)
+		var (
+			recs []models.Record
+			err  error
+		)
+		recs, err = getLoadRecordsCombinedForUser(userUUID, params.UUID, startTime, endTime)
 		if err != nil {
 			return nil, rpc.MakeError(rpc.InternalError, "Failed to fetch records", err.Error())
-		}
-		// hidden filter on non-admin
-		if !isAdmin {
-			filtered := recs[:0]
-			for _, r := range recs {
-				if hidden[r.Client] {
-					continue
-				}
-				filtered = append(filtered, r)
-			}
-			recs = filtered
 		}
 
 		// resolve maxCount default for load
@@ -195,20 +174,13 @@ func getRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpc
 		if taskId == 0 {
 			taskId = -1
 		}
-		recs, err := tasks.GetPingRecordsByTenant(tenantID, params.UUID, taskId, startTime, endTime)
+		var (
+			recs []models.PingRecord
+			err  error
+		)
+		recs, err = tasks.GetPingRecordsByUser(userUUID, params.UUID, taskId, startTime, endTime)
 		if err != nil {
 			return nil, rpc.MakeError(rpc.InternalError, "Failed to fetch ping records", err.Error())
-		}
-		// hidden filter
-		if !isAdmin {
-			filtered := recs[:0]
-			for _, r := range recs {
-				if r.Client != "" && hidden[r.Client] {
-					continue
-				}
-				filtered = append(filtered, r)
-			}
-			recs = filtered
 		}
 
 		type RecordsResp struct {
@@ -268,9 +240,6 @@ func getRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpc
 		if len(clientStats) > 0 {
 			response.BasicInfo = make([]ClientBasicInfo, 0, len(clientStats))
 			for client, st := range clientStats {
-				if client != "" && !isAdmin && hidden[client] {
-					continue
-				}
 				loss := float64(0)
 				if st.total > 0 {
 					loss = float64(st.loss) / float64(st.total) * 100
@@ -285,7 +254,7 @@ func getRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpc
 		}
 
 		// tasks summary (always included for ping type; do not expose target field)
-		pingTasks, err := tasks.GetAllPingTasksByTenant(tenantID)
+		pingTasks, err := tasks.GetAllPingTasksByUser(userUUID)
 		if err != nil {
 			return nil, rpc.MakeError(rpc.InternalError, "Failed to fetch ping tasks", err.Error())
 		}
@@ -510,16 +479,13 @@ func getRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpc
 
 // ---------- helpers for load records ----------
 
-// getLoadRecordsCombined fetches records for a client or all clients within a time range,
-// combining recent short-term table and long-term table with 15-min grouping for recent part.
-func getLoadRecordsCombinedForTenant(tenantID, uuid string, start, end time.Time) ([]models.Record, error) {
-	// prefer the existing function when uuid provided
+func getLoadRecordsCombinedForUser(userUUID, uuid string, start, end time.Time) ([]models.Record, error) {
 	if uuid != "" {
-		return recordsdb.GetRecordsByClientAndTimeForTenant(tenantID, uuid, start, end)
+		return recordsdb.GetRecordsByClientAndTimeForUser(userUUID, uuid, start, end)
 	}
 	db := dbcore.GetDBInstance()
 	fourHoursAgo := time.Now().Add(-4*time.Hour - time.Minute)
-	clientScope := db.Model(&models.Client{}).Select("uuid").Where("tenant_id = ?", tenantID)
+	clientScope := clients.ClientUUIDScopeByUserWithDB(db, userUUID)
 
 	var recent []models.Record
 	recentStart := start
@@ -533,12 +499,10 @@ func getLoadRecordsCombinedForTenant(tenantID, uuid string, start, end time.Time
 	var longTerm []models.Record
 	_ = db.Table("records_long_term").Where("client IN (?) AND time >= ? AND time <= ?", clientScope, start, end).Order("time ASC").Find(&longTerm).Error
 
-	// if no long term, return all recent
 	if len(longTerm) == 0 {
 		return recent, nil
 	}
 
-	// group recent by client+15min, keep latest in bucket
 	type key struct {
 		c    string
 		slot string
@@ -554,7 +518,12 @@ func getLoadRecordsCombinedForTenant(tenantID, uuid string, start, end time.Time
 	for _, rec := range grouped {
 		flat = append(flat, rec)
 	}
-	sort.Slice(flat, func(i, j int) bool { return flat[i].Time.ToTime().Before(flat[j].Time.ToTime()) })
+	sort.Slice(flat, func(i, j int) bool {
+		if flat[i].Client == flat[j].Client {
+			return flat[i].Time.ToTime().Before(flat[j].Time.ToTime())
+		}
+		return flat[i].Client < flat[j].Client
+	})
 	flat = append(flat, longTerm...)
 	return flat, nil
 }

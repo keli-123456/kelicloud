@@ -1,7 +1,8 @@
 package notification
 
 import (
-	"github.com/komari-monitor/komari/database"
+	"strings"
+
 	clientdb "github.com/komari-monitor/komari/database/clients"
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
@@ -9,22 +10,27 @@ import (
 	"gorm.io/gorm"
 )
 
-func AddLoadNotification(clients []string, name string, metric string, threshold float32, ratio float32, interval int) (uint, error) {
-	tenantID, err := database.GetDefaultTenantID()
+func normalizeLoadNotificationOwnerScope(userUUID, tenantID string) (string, string, error) {
+	userUUID = strings.TrimSpace(userUUID)
+	if userUUID != "" {
+		return userUUID, "", nil
+	}
+	return "", strings.TrimSpace(tenantID), nil
+}
+
+func AddLoadNotificationForUser(userUUID string, clientUUIDs []string, name string, metric string, threshold float32, ratio float32, interval int) (uint, error) {
+	userUUID, _, err := normalizeLoadNotificationOwnerScope(userUUID, "")
 	if err != nil {
 		return 0, err
 	}
-	return AddLoadNotificationForTenant(tenantID, clients, name, metric, threshold, ratio, interval)
-}
 
-func AddLoadNotificationForTenant(tenantID string, clientUUIDs []string, name string, metric string, threshold float32, ratio float32, interval int) (uint, error) {
-	normalizedClients, err := clientdb.NormalizeClientUUIDsForTenant(tenantID, clientUUIDs)
+	normalizedClients, err := clientdb.NormalizeClientUUIDsForUser(userUUID, clientUUIDs)
 	if err != nil {
 		return 0, err
 	}
 	db := dbcore.GetDBInstance()
 	notification := models.LoadNotification{
-		TenantID:  tenantID,
+		UserID:    userUUID,
 		Clients:   normalizedClients,
 		Name:      name,
 		Metric:    metric,
@@ -48,9 +54,18 @@ func DeleteLoadNotification(id []uint) error {
 	return ReloadLoadNotificationSchedule()
 }
 
-func DeleteLoadNotificationForTenant(tenantID string, id []uint) error {
+func DeleteLoadNotificationForUser(userUUID string, id []uint) error {
+	userUUID, _, err := normalizeLoadNotificationOwnerScope(userUUID, "")
+	if err != nil {
+		return err
+	}
+
 	db := dbcore.GetDBInstance()
-	result := db.Where("tenant_id = ? AND id IN ?", tenantID, id).Delete(&models.LoadNotification{})
+	result := db.Where(
+		"user_id = ? AND id IN ?",
+		userUUID,
+		id,
+	).Delete(&models.LoadNotification{})
 	if result.RowsAffected == 0 {
 		return gorm.ErrRecordNotFound
 	}
@@ -69,17 +84,22 @@ func EditLoadNotification(notifications []*models.LoadNotification) error {
 	return ReloadLoadNotificationSchedule()
 }
 
-func EditLoadNotificationForTenant(tenantID string, notifications []*models.LoadNotification) error {
+func EditLoadNotificationForUser(userUUID string, notifications []*models.LoadNotification) error {
+	userUUID, _, err := normalizeLoadNotificationOwnerScope(userUUID, "")
+	if err != nil {
+		return err
+	}
+
 	db := dbcore.GetDBInstance()
 	for _, notification := range notifications {
-		normalizedClients, err := clientdb.NormalizeClientUUIDsForTenant(tenantID, notification.Clients)
+		normalizedClients, err := clientdb.NormalizeClientUUIDsForUser(userUUID, notification.Clients)
 		if err != nil {
 			return err
 		}
-		notification.TenantID = tenantID
+		notification.UserID = userUUID
 		notification.Clients = normalizedClients
 		result := db.Model(&models.LoadNotification{}).
-			Where("id = ? AND tenant_id = ?", notification.Id, tenantID).
+			Where("id = ? AND user_id = ?", notification.Id, userUUID).
 			Updates(notification)
 		if result.Error != nil {
 			return result.Error
@@ -93,7 +113,14 @@ func EditLoadNotificationForTenant(tenantID string, notifications []*models.Load
 }
 
 func GetAllLoadNotifications() ([]models.LoadNotification, error) {
-	db := dbcore.GetDBInstance()
+	return getAllLoadNotificationsWithDB(dbcore.GetDBInstance())
+}
+
+func GetAllLoadNotificationsByUser(userUUID string) ([]models.LoadNotification, error) {
+	return getAllLoadNotificationsByUserWithDB(dbcore.GetDBInstance(), userUUID)
+}
+
+func getAllLoadNotificationsWithDB(db *gorm.DB) ([]models.LoadNotification, error) {
 	var notifications []models.LoadNotification
 	if err := db.Find(&notifications).Error; err != nil {
 		return nil, err
@@ -101,10 +128,14 @@ func GetAllLoadNotifications() ([]models.LoadNotification, error) {
 	return notifications, nil
 }
 
-func GetAllLoadNotificationsByTenant(tenantID string) ([]models.LoadNotification, error) {
-	db := dbcore.GetDBInstance()
+func getAllLoadNotificationsByUserWithDB(db *gorm.DB, userUUID string) ([]models.LoadNotification, error) {
+	userUUID, _, err := normalizeLoadNotificationOwnerScope(userUUID, "")
+	if err != nil {
+		return nil, err
+	}
+
 	var notifications []models.LoadNotification
-	if err := db.Where("tenant_id = ?", tenantID).Find(&notifications).Error; err != nil {
+	if err := db.Where("user_id = ?", userUUID).Find(&notifications).Error; err != nil {
 		return nil, err
 	}
 	return notifications, nil

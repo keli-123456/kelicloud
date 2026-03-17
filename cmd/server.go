@@ -69,9 +69,6 @@ func init() {
 
 func RunServer() {
 	// #region 初始化
-	if err := os.MkdirAll("./data/theme", os.ModePerm); err != nil {
-		log.Fatalf("Failed to create theme directory: %v", err)
-	}
 	InitDatabase()
 	if utils.VersionHash != "unknown" {
 		gin.SetMode(gin.ReleaseMode)
@@ -172,7 +169,7 @@ func RunServer() {
 		c.Next()
 	})
 
-	r.Use(api.PrivateSiteMiddleware())
+	r.Use(api.RequireLoginForPanelDataMiddleware())
 
 	r.Use(func(c *gin.Context) {
 		if len(c.Request.URL.Path) >= 4 && c.Request.URL.Path[:4] == "/api" {
@@ -191,8 +188,6 @@ func RunServer() {
 	r.GET("/api/nodes", api.GetNodesInformation)
 	r.GET("/api/public", api.GetPublicSettings)
 	r.GET("/api/public/cloud/shares/:token", api.GetPublicCloudInstanceShare)
-	r.GET("/api/tenant-invites/:token", api.GetTenantInvite)
-	r.POST("/api/tenant-invites/:token/accept", api.AcceptTenantInvite)
 	r.GET("/api/oauth", api.OAuth)
 	r.GET("/api/oauth_callback", api.OAuthCallback)
 	r.GET("/api/logout", api.Logout)
@@ -328,16 +323,11 @@ func RunServer() {
 				}
 			}
 		}
-		// themes
-		themeGroup := adminAuthrized.Group("/theme")
+		userGroup := adminAuthrized.Group("/users", admin.RequirePlatformAdminMiddleware())
 		{
-			themeGroup.PUT("/upload", admin.RequirePlatformAdminMiddleware(), admin.UploadTheme)
-			themeGroup.GET("/list", admin.ListThemes)
-			themeGroup.POST("/delete", admin.RequirePlatformAdminMiddleware(), admin.DeleteTheme)
-			themeGroup.GET("/set", admin.SetTheme)
-			themeGroup.POST("/update", admin.RequirePlatformAdminMiddleware(), admin.UpdateTheme)
-			themeGroup.POST("/import", admin.RequirePlatformAdminMiddleware(), admin.ImportTheme)
-			themeGroup.POST("/settings", admin.UpdateThemeSettings)
+			userGroup.GET("", admin.ListUsers)
+			userGroup.POST("", admin.CreateUser)
+			userGroup.DELETE("/:uuid", admin.DeleteUser)
 		}
 		// clients
 		clientGroup := adminAuthrized.Group("/client")
@@ -370,22 +360,6 @@ func RunServer() {
 			sessionGroup.GET("/get", admin.GetSessions)
 			sessionGroup.POST("/remove", admin.DeleteSession)
 			sessionGroup.POST("/remove/all", admin.DeleteAllSession)
-		}
-		tenantGroup := adminAuthrized.Group("/tenants")
-		{
-			tenantGroup.POST("", admin.CreateTenant)
-			tenantGroup.GET("", admin.GetAccessibleTenants)
-			tenantGroup.POST("/current", admin.SwitchCurrentTenant)
-			tenantGroup.DELETE("/current", admin.DeleteCurrentTenant)
-			tenantGroup.POST("/current/leave", admin.LeaveCurrentTenant)
-			tenantGroup.POST("/current/owner", admin.TransferCurrentTenantOwnership)
-			tenantGroup.GET("/current/invites", admin.GetCurrentTenantInvites)
-			tenantGroup.POST("/current/invites", admin.CreateCurrentTenantInvite)
-			tenantGroup.DELETE("/current/invites/:invite_id", admin.RevokeCurrentTenantInvite)
-			tenantGroup.GET("/current/members", admin.GetCurrentTenantMembers)
-			tenantGroup.POST("/current/members", admin.AddCurrentTenantMember)
-			tenantGroup.POST("/current/members/:user_uuid/role", admin.UpdateCurrentTenantMemberRole)
-			tenantGroup.DELETE("/current/members/:user_uuid", admin.RemoveCurrentTenantMember)
 		}
 		two_factorGroup := adminAuthrized.Group("/2fa")
 		{
@@ -480,9 +454,6 @@ func InitDatabase() {
 			panic(err)
 		}
 		log.Println("Default admin account created. Username:", user, ", Password:", passwd)
-	}
-	if err := database.EnsureTenantBootstrap(); err != nil {
-		panic(err)
 	}
 }
 

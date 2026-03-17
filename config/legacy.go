@@ -7,8 +7,6 @@ type Legacy struct {
 	Sitename               string `json:"sitename" default:"Komari"`                           // 站点名称，默认 "Komari"
 	Description            string `json:"description" default:"A simple server monitor tool."` // 站点描述
 	AllowCors              bool   `json:"allow_cors" default:"false"`                          // 是否允许跨域，默认 false
-	Theme                  string `json:"theme" default:"default"`                             // 主题名称，默认 'default'
-	PrivateSite            bool   `json:"private_site" default:"false"`                        // 是否为私有站点，默认 false
 	ApiKey                 string `json:"api_key" default:""`                                  // API 密钥，默认空字符串
 	AutoDiscoveryKey       string `json:"auto_discovery_key" default:""`                       // 自动发现密钥
 	ScriptDomain           string `json:"script_domain" default:""`                            // 自定义脚本域名
@@ -50,8 +48,6 @@ const (
 	SitenameKey                   = "sitename"
 	DescriptionKey                = "description"
 	AllowCorsKey                  = "allow_cors"
-	ThemeKey                      = "theme"
-	PrivateSiteKey                = "private_site"
 	ApiKeyKey                     = "api_key"
 	AutoDiscoveryKeyKey           = "auto_discovery_key"
 	ScriptDomainKey               = "script_domain"

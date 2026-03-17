@@ -112,31 +112,52 @@ sudo ./install-komari.sh
 
 - Go 1.18+ and Node.js 20+ (for manual build)
 
-1. Build the frontend static files:
-   ```bash
-   git clone https://github.com/komari-monitor/komari-web
-   cd komari-web
-   npm install
-   npm run build
-   ```
-2. Build the backend:
+1. Clone the backend:
    ```bash
    git clone https://github.com/komari-monitor/komari
    cd komari
    ```
-   Copy the static files generated in step 1 to the `/public/defaultTheme/dist` folder in the root of the `komari` project, and copy `komari-theme.json` + `preview.png`/`perview.png` to `/public/defaultTheme`.
+2. Prepare the frontend static files:
+   ```bash
+   bash scripts/prepare-frontend.sh
+   ```
+   By default this uses the repo/ref pinned in [`frontend-source.env`](./frontend-source.env), so GitHub builds and local builds resolve the same frontend revision.
+   If you already have a local checkout of `komari-web`, you can reuse it:
+   ```bash
+   KOMARI_FRONTEND_PATH=/path/to/komari-web bash scripts/prepare-frontend.sh
+   ```
+   To update the pinned frontend revision tracked by this repo:
+   ```bash
+   bash scripts/update-frontend-pin.sh --from-local /path/to/komari-web
+   ```
+   You can also temporarily override the pinned source:
+   ```bash
+   KOMARI_FRONTEND_REPO=https://github.com/komari-monitor/komari-web.git \
+   KOMARI_FRONTEND_REF=<commit-or-tag> \
+   bash scripts/prepare-frontend.sh
+   ```
+3. Build the backend:
    ```bash
    go build -o komari
    ```
-3. Run:
+4. Run:
    ```bash
    ./komari server -l 0.0.0.0:25774
    ```
    The default listening port is `25774`. Access `http://localhost:25774`.
 
-## Frontend Development Guide
+#### MySQL Release Check
 
-[Komari Theme Development Guide | Komari](https://komari-document.pages.dev/dev/theme.html)
+Before cutting a release, you can replay the runtime database checks against a real MariaDB instance:
+
+```bash
+bash scripts/verify-mysql-runtime.sh
+```
+
+The script verifies both an empty-database bootstrap and a legacy-schema upgrade path. It requires Docker on the local machine.
+
+GitHub Actions build and release workflows also use the pinned frontend source from [`frontend-source.env`](./frontend-source.env) unless you explicitly override it in the manual `Verify Runtime` workflow.
+
 
 ## Client Agent Development Guide
 

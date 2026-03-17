@@ -8,13 +8,21 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/komari-monitor/komari/common"
 	"github.com/komari-monitor/komari/config"
-	"github.com/komari-monitor/komari/database/accounts"
-	"github.com/komari-monitor/komari/database/dbcore"
-	"github.com/komari-monitor/komari/database/models"
+	"github.com/komari-monitor/komari/database/clients"
 	"github.com/komari-monitor/komari/ws"
 )
 
 func GetClients(c *gin.Context) {
+	userUUID, ok := RequireUserScopeFromSession(c)
+	if !ok {
+		return
+	}
+	clientList, err := clients.GetAllClientBasicInfoByUser(userUUID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"status": "error", "error": "Failed to retrieve client information"})
+		return
+	}
+
 	// 升级到ws
 	if !websocket.IsWebSocketUpgrade(c.Request) {
 		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "Require WebSocket upgrade"})
@@ -37,27 +45,9 @@ func GetClients(c *gin.Context) {
 	}
 	defer conn.Close()
 
-	// 初始化用户信息
-	var (
-		isLogin    = false
-		hiddenMap  = map[string]bool{}
-		session, _ = c.Cookie("session_token")
-	)
-
-	// 登录状态检查
-	_, err = accounts.GetUserBySession(session)
-	if err == nil {
-		isLogin = true
-	}
-
-	// 仅在未登录时需要 Hidden 信息做过滤
-	if !isLogin {
-		var hiddenClients []models.Client
-		db := dbcore.GetDBInstance()
-		_ = db.Select("uuid").Where("hidden = ?", true).Find(&hiddenClients).Error
-		for _, cli := range hiddenClients {
-			hiddenMap[cli.UUID] = true
-		}
+	allowed := make(map[string]struct{}, len(clientList))
+	for _, client := range clientList {
+		allowed[client.UUID] = struct{}{}
 	}
 
 	// 请求
@@ -72,7 +62,6 @@ func GetClients(c *gin.Context) {
 
 		_, data, err := conn.ReadMessage()
 		if err != nil {
-			//log.Println("Error reading message:", err)
 			return
 		}
 		message := string(data)
@@ -87,9 +76,15 @@ func GetClients(c *gin.Context) {
 			}
 		}
 
-		// 在线客户端uuid列表（WebSocket 与非 WebSocket）
+		if uuID != "" {
+			if _, exists := allowed[uuID]; !exists {
+				conn.WriteJSON(gin.H{"status": "success", "data": resp})
+				continue
+			}
+		}
+
 		for _, key := range ws.GetAllOnlineUUIDs() {
-			if !isLogin && hiddenMap[key] {
+			if _, exists := allowed[key]; !exists {
 				continue
 			}
 			if uuID != "" && key != uuID {
@@ -98,24 +93,22 @@ func GetClients(c *gin.Context) {
 			resp.Online = append(resp.Online, key)
 		}
 
-		//过往节点数据信息
 		for key, report := range ws.GetLatestReport() {
-			if !isLogin && hiddenMap[key] {
+			if _, exists := allowed[key]; !exists {
 				continue
 			}
 			if uuID != "" && key != uuID {
 				continue
 			}
 
-			report.UUID = "" // 不暴露 uuid
+			report.UUID = ""
 			if report.CPU.Usage == 0 {
 				report.CPU.Usage = 0.01
 			}
 			resp.Data[key] = *report
 		}
 
-		err = conn.WriteJSON(gin.H{"status": "success", "data": resp})
-		if err != nil {
+		if err := conn.WriteJSON(gin.H{"status": "success", "data": resp}); err != nil {
 			return
 		}
 	}

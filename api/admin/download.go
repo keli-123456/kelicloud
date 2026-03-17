@@ -7,12 +7,10 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/api"
-	"github.com/komari-monitor/komari/database/dbcore"
 )
 
 // copyFile 复制单个文件到目标路径（会确保父目录存在）
@@ -39,8 +37,8 @@ func copyFile(srcPath, destPath string) error {
 	return nil
 }
 
-// copyDataToTempExcludingDB 将 ./data 下除了 sqlite 数据库文件之外的所有文件复制到临时目录
-func copyDataToTempExcludingDB(tempDir string) error {
+// copyDataToTemp 将 ./data 下的文件复制到临时目录
+func copyDataToTemp(tempDir string) error {
 	dataRoot := "./data"
 
 	// 如果 data 目录不存在，视为无文件可复制
@@ -66,14 +64,6 @@ func copyDataToTempExcludingDB(tempDir string) error {
 			return nil
 		}
 
-		// 跳过数据库相关文件
-		name := info.Name()
-		if strings.HasSuffix(strings.ToLower(name), ".db") ||
-			strings.HasSuffix(strings.ToLower(name), ".db-wal") ||
-			strings.HasSuffix(strings.ToLower(name), ".db-shm") {
-			return nil
-		}
-
 		dst := filepath.Join(tempDir, rel)
 		if info.IsDir() {
 			return os.MkdirAll(dst, 0o755)
@@ -82,27 +72,7 @@ func copyDataToTempExcludingDB(tempDir string) error {
 	})
 }
 
-// backupSQLiteTo 使用 SQLite VACUUM INTO 将当前数据库一致性备份到指定路径
-func backupSQLiteTo(destDBPath string) error {
-	if err := os.MkdirAll(filepath.Dir(destDBPath), 0o755); err != nil {
-		return fmt.Errorf("failed to create parent directory for db: %v", err)
-	}
-
-	db := dbcore.GetDBInstance()
-	sqlDB, err := db.DB()
-	if err != nil {
-		return fmt.Errorf("failed to get underlying database connection: %v", err)
-	}
-
-	safePath := strings.ReplaceAll(destDBPath, "'", "''")
-	vacuumSQL := fmt.Sprintf("VACUUM INTO '%s'", safePath)
-	if _, err = sqlDB.Exec(vacuumSQL); err != nil {
-		return fmt.Errorf("sqlite VACUUM INTO failed: %v", err)
-	}
-	return nil
-}
-
-// DownloadBackup 用于打包 ./data 目录及数据库文件为 zip 并通过 HTTP 下载
+// DownloadBackup 打包 ./data 目录用于下载；数据库备份请使用 MySQL 原生工具。
 func DownloadBackup(c *gin.Context) {
 	// 1) 创建临时目录
 	tempDir, err := os.MkdirTemp("", "komari-backup-*")
@@ -112,29 +82,13 @@ func DownloadBackup(c *gin.Context) {
 	}
 	defer os.RemoveAll(tempDir)
 
-	// 2) 复制 ./data 下除 .db/.db-wal/.db-shm 外的所有文件到临时目录
-	if err := copyDataToTempExcludingDB(tempDir); err != nil {
+	// 2) 复制 ./data 下的所有文件到临时目录
+	if err := copyDataToTemp(tempDir); err != nil {
 		api.RespondError(c, http.StatusInternalServerError, fmt.Sprintf("Error copying data to temp: %v", err))
 		return
 	}
 
-	// 3) 处理数据库备份 -> 临时目录/komari.db
-	destDB := filepath.Join(tempDir, "komari.db")
-	if dbcore.GetDBInstance().Dialector.Name() == "sqlite" {
-		if err := backupSQLiteTo(destDB); err != nil {
-			api.RespondError(c, http.StatusInternalServerError, fmt.Sprintf("Error backing up sqlite database: %v", err))
-			return
-		}
-	} else {
-		api.RespondError(
-			c,
-			http.StatusNotImplemented,
-			"MySQL backup is not available from the web panel yet. Please use mysqldump or a database volume snapshot.",
-		)
-		return
-	}
-
-	// 4) 开始写出 ZIP（以临时目录为根）
+	// 3) 开始写出 ZIP（以临时目录为根）
 	backupFileName := fmt.Sprintf("backup-%d.zip", time.Now().UnixMicro())
 	c.Writer.Header().Set("Content-Type", "application/zip")
 	c.Writer.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", backupFileName))
@@ -185,8 +139,8 @@ func DownloadBackup(c *gin.Context) {
 		return
 	}
 
-	// 5) 追加备份标记文件（放在 zip 根目录）
-	markupContent := "此文件为 Komari 备份标记文件，请勿删除。\nThis is a Komari backup markup file, please do not delete.\n\n备份时间 / Backup Time: " + time.Now().Format(time.RFC3339)
+	// 4) 追加备份标记文件（放在 zip 根目录）
+	markupContent := "此文件为 Komari 数据目录备份标记文件，请勿删除。\nThis is a Komari data-directory backup markup file, please do not delete.\n\n注意 / Note: 数据库未包含在此压缩包中，请使用 mysqldump 或数据库快照完成 MySQL 备份。\n\n备份时间 / Backup Time: " + time.Now().Format(time.RFC3339)
 	markupWriter, err := zipWriter.CreateHeader(&zip.FileHeader{
 		Name:     "komari-backup-markup",
 		Method:   zip.Deflate,

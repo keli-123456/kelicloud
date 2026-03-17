@@ -6,7 +6,7 @@ import (
 
 	"github.com/komari-monitor/komari/api"
 	"github.com/komari-monitor/komari/config"
-	"github.com/komari-monitor/komari/database"
+	"github.com/komari-monitor/komari/database/accounts"
 	"github.com/komari-monitor/komari/database/records"
 	"github.com/komari-monitor/komari/database/tasks"
 
@@ -15,8 +15,12 @@ import (
 )
 
 var systemSettingKeys = map[string]struct{}{
+	config.SitenameKey:                   {},
+	config.DescriptionKey:                {},
 	config.AllowCorsKey:                  {},
 	config.ApiKeyKey:                     {},
+	config.CustomHeadKey:                 {},
+	config.CustomBodyKey:                 {},
 	config.CNConnectivityEnabledKey:      {},
 	config.CNConnectivityTargetKey:       {},
 	config.CNConnectivityIntervalKey:     {},
@@ -56,14 +60,14 @@ func filterSystemSettings(cfg map[string]any) map[string]any {
 }
 
 func splitEditableSettings(cfg map[string]any) (map[string]any, map[string]any, []string) {
-	tenantValues := make(map[string]any)
+	userValues := make(map[string]any)
 	systemValues := make(map[string]any)
 	ignored := make([]string, 0)
 
 	for key, value := range cfg {
 		switch {
-		case config.IsTenantScopedKey(key):
-			tenantValues[key] = value
+		case config.IsUserScopedKey(key):
+			userValues[key] = value
 		case isSystemSettingKey(key):
 			systemValues[key] = value
 		default:
@@ -71,33 +75,19 @@ func splitEditableSettings(cfg map[string]any) (map[string]any, map[string]any, 
 		}
 	}
 
-	return tenantValues, systemValues, ignored
+	return userValues, systemValues, ignored
 }
 
 func isPlatformAdmin(c *gin.Context) (bool, error) {
 	if _, ok := c.Get("api_key"); ok {
 		return true, nil
 	}
-
-	userUUID, ok := c.Get("uuid")
+	roleValue, ok := c.Get("user_role")
 	if !ok {
 		return false, nil
 	}
-
-	defaultTenantID, err := database.GetDefaultTenantID()
-	if err != nil {
-		return false, err
-	}
-
-	member, err := database.GetAccessibleTenantByUser(userUUID.(string), defaultTenantID)
-	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return false, nil
-		}
-		return false, err
-	}
-
-	return database.IsTenantRoleAtLeast(member.Role, database.RoleAdmin), nil
+	role, _ := roleValue.(string)
+	return accounts.IsUserRoleAtLeast(role, accounts.RoleAdmin), nil
 }
 
 func requirePlatformAdmin(c *gin.Context) bool {
@@ -160,15 +150,31 @@ func GetSystemSettings(c *gin.Context) {
 
 // GetSettings 获取自定义配置
 func GetSettings(c *gin.Context) {
-	tenantID, ok := requireCurrentTenantID(c)
-	if !ok {
-		return
-	}
-
-	cst, err := config.GetAllForTenant(tenantID)
+	cst, err := config.GetAll()
 	if err != nil {
 		api.RespondError(c, 500, "Failed to get settings: "+err.Error())
 		return
+	}
+	for _, key := range config.UserScopedKeys() {
+		delete(cst, key)
+	}
+	if userUUID, ok := currentUserUUID(c); ok {
+		userSettings, err := config.GetAllForUser(userUUID)
+		if err != nil {
+			api.RespondError(c, 500, "Failed to get user settings: "+err.Error())
+			return
+		}
+		for key, value := range userSettings {
+			if config.IsUserScopedKey(key) {
+				cst[key] = value
+			}
+		}
+		if autoDiscoveryKey, err := config.EnsureAutoDiscoveryKeyForUser(userUUID); err == nil {
+			cst[config.AutoDiscoveryKeyKey] = autoDiscoveryKey
+		} else {
+			api.RespondError(c, 500, "Failed to ensure user auto discovery key: "+err.Error())
+			return
+		}
 	}
 	allowed, err := isPlatformAdmin(c)
 	if err != nil {
@@ -191,19 +197,18 @@ func EditSettings(c *gin.Context) {
 		return
 	}
 
-	tenantID, ok := requireCurrentTenantID(c)
-	if !ok {
-		return
-	}
-
-	tenantValues, systemValues, ignoredKeys := splitEditableSettings(cfg)
-	if len(tenantValues) > 0 {
-		if err := config.SetManyForTenant(tenantID, tenantValues); err != nil {
-			api.RespondError(c, 500, "Failed to update tenant settings: "+err.Error())
+	userValues, systemValues, ignoredKeys := splitEditableSettings(cfg)
+	if len(userValues) > 0 {
+		userUUID, ok := currentUserUUID(c)
+		if !ok {
+			api.RespondError(c, 403, "User context is required to update user settings")
+			return
+		}
+		if err := config.SetManyForUser(userUUID, userValues); err != nil {
+			api.RespondError(c, 500, "Failed to update user settings: "+err.Error())
 			return
 		}
 	}
-
 	updatedSystemKeys := make([]string, 0)
 	ignoredSystemKeys := make([]string, 0)
 	if len(systemValues) > 0 {
@@ -228,10 +233,10 @@ func EditSettings(c *gin.Context) {
 	}
 
 	message := "update settings"
-	if len(tenantValues) > 0 || len(updatedSystemKeys) > 0 {
+	if len(userValues) > 0 || len(updatedSystemKeys) > 0 {
 		message += ": "
 	}
-	for key := range tenantValues {
+	for key := range userValues {
 		message += key + ", "
 	}
 	for _, key := range updatedSystemKeys {
@@ -243,10 +248,10 @@ func EditSettings(c *gin.Context) {
 
 	uuid, exists := c.Get("uuid")
 	if exists {
-		api.AuditLogForCurrentTenant(c, uuid.(string), message, "info")
+		api.AuditLogForCurrentUser(c, uuid.(string), message, "info")
 	}
 	api.RespondSuccess(c, gin.H{
-		"updated_tenant_keys":  tenantValues,
+		"updated_user_keys":    userValues,
 		"updated_system_keys":  updatedSystemKeys,
 		"ignored_system_keys":  ignoredSystemKeys,
 		"ignored_unknown_keys": ignoredKeys,
@@ -282,26 +287,27 @@ func EditSystemSettings(c *gin.Context) {
 		if len(message) > 2 && message[len(message)-2:] == ", " {
 			message = message[:len(message)-2]
 		}
-		api.AuditLogForCurrentTenant(c, uuid.(string), message, "info")
+		api.AuditLogForCurrentUser(c, uuid.(string), message, "info")
 	}
 	api.RespondSuccess(c, nil)
 }
 
 func ClearAllRecords(c *gin.Context) {
-	tenantID, ok := currentTenantID(c)
+	scope, ok := requireCurrentOwnerScope(c)
 	if !ok {
-		api.RespondError(c, 403, "Tenant context is required")
 		return
 	}
-	if err := records.DeleteAllByTenant(tenantID); err != nil {
+	err := records.DeleteAllByUser(scope.UserUUID)
+	if err != nil {
 		api.RespondError(c, 500, "Failed to clear records: "+err.Error())
 		return
 	}
-	if err := tasks.DeletePingRecordsByTenant(tenantID); err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+	err = tasks.DeletePingRecordsByUser(scope.UserUUID)
+	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 		api.RespondError(c, 500, "Failed to clear ping records: "+err.Error())
 		return
 	}
-	uuid, _ := c.Get("uuid")
-	api.AuditLogForCurrentTenant(c, uuid.(string), "clear all records", "info")
+	userUUID, _ := currentUserUUID(c)
+	api.AuditLogForCurrentUser(c, userUUID, "clear all records", "info")
 	api.RespondSuccess(c, nil)
 }

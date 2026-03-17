@@ -29,16 +29,20 @@ func GetLogs(c *gin.Context) {
 		api.RespondError(c, 400, "Invalid page: "+page)
 		return
 	}
-	tenantValue, ok := c.Get("tenant_id")
-	tenantID, _ := tenantValue.(string)
-	if !ok || tenantID == "" {
-		api.RespondError(c, 403, "Tenant context is required")
+	userValue, ok := c.Get("uuid")
+	userUUID, _ := userValue.(string)
+	if !ok || userUUID == "" {
+		api.RespondError(c, 403, "User context is required")
 		return
 	}
 	// 添加分页：计算偏移量并限制数量
 	offset := (pageInt - 1) * limitInt
 
-	logs, total, err := auditlog.ListLogsByTenant(tenantID, limitInt, offset)
+	var (
+		logs  interface{}
+		total int64
+	)
+	logs, total, err = auditlog.ListLogsByUser(userUUID, limitInt, offset)
 	if err != nil {
 		api.RespondError(c, 500, "Failed to retrieve logs: "+err.Error())
 		return

@@ -30,8 +30,7 @@ COPY --from=builder /usr/share/zoneinfo /usr/share/zoneinfo
 COPY --from=builder /out/komari /app/komari
 
 ENV GIN_MODE=release
-ENV KOMARI_DB_TYPE=sqlite
-ENV KOMARI_DB_FILE=/app/data/komari.db
+ENV KOMARI_DB_TYPE=mysql
 ENV KOMARI_DB_HOST=localhost
 ENV KOMARI_DB_PORT=3306
 ENV KOMARI_DB_USER=root

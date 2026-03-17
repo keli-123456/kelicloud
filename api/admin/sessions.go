@@ -33,7 +33,7 @@ func DeleteSession(c *gin.Context) {
 		api.RespondError(c, 500, "Failed to delete session: "+err.Error())
 		return
 	}
-	api.AuditLogForCurrentTenant(c, uuid.(string), "delete session", "info")
+	api.AuditLogForCurrentUser(c, uuid.(string), "delete session", "info")
 	api.RespondSuccess(c, nil)
 }
 
@@ -44,6 +44,6 @@ func DeleteAllSession(c *gin.Context) {
 		api.RespondError(c, 500, "Failed to delete all sessions: "+err.Error())
 		return
 	}
-	api.AuditLogForCurrentTenant(c, uuid.(string), "delete all sessions", "warn")
+	api.AuditLogForCurrentUser(c, uuid.(string), "delete all sessions", "warn")
 	api.RespondSuccess(c, nil)
 }

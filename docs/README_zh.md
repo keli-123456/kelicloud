@@ -111,17 +111,20 @@ sudo ./install-komari.sh
 
 1. 构建前端静态文件：
    ```bash
-   git clone https://github.com/komari-monitor/komari-web
-   cd komari-web
-   npm install
-   npm run build
-   ```
-2. 构建后端：
-   ```bash
    git clone https://github.com/komari-monitor/komari
    cd komari
+   bash scripts/prepare-frontend.sh
    ```
-   将步骤1中生成的静态文件复制到 `komari` 项目根目录下的 `/public/defaultTheme/dist` 文件夹，并将 `komari-theme.json` 与 `preview.png`/`perview.png` 复制到 `/public/defaultTheme`。
+   默认会使用仓库中 [`frontend-source.env`](../frontend-source.env) 固定的前端仓库和提交。
+   如果你已经有本地 `komari-web` 检出，也可以这样复用：
+   ```bash
+   KOMARI_FRONTEND_PATH=/path/to/komari-web bash scripts/prepare-frontend.sh
+   ```
+   如果要更新仓库里固定的前端版本：
+   ```bash
+   bash scripts/update-frontend-pin.sh --from-local /path/to/komari-web
+   ```
+2. 构建后端：
    ```bash
    go build -o komari
    ```

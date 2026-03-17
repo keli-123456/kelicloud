@@ -80,17 +80,20 @@ sudo ./install-komari.sh
 
 1. フロントエンドの静的ファイルをビルドします:
    ```bash
-   git clone https://github.com/komari-monitor/komari-web
-   cd komari-web
-   npm install
-   npm run build
-   ```
-2. バックエンドをビルドします:
-   ```bash
    git clone https://github.com/komari-monitor/komari
    cd komari
+   bash scripts/prepare-frontend.sh
    ```
-   ステップ1で生成された静的ファイルを `komari` プロジェクトのルートにある `/public/defaultTheme/dist` フォルダにコピーし、`komari-theme.json` と `preview.png`/`perview.png` を `/public/defaultTheme` にコピーします。
+   デフォルトでは、リポジトリ内の [`frontend-source.env`](../frontend-source.env) に固定されたフロントエンドのリポジトリとコミットを使用します。
+   すでにローカルに `komari-web` のチェックアウトがある場合は、次のように再利用できます:
+   ```bash
+   KOMARI_FRONTEND_PATH=/path/to/komari-web bash scripts/prepare-frontend.sh
+   ```
+   リポジトリで固定しているフロントエンドのバージョンを更新する場合:
+   ```bash
+   bash scripts/update-frontend-pin.sh --from-local /path/to/komari-web
+   ```
+2. バックエンドをビルドします:
    ```bash
    go build -o komari
    ```

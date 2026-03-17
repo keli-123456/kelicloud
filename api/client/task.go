@@ -15,12 +15,8 @@ func TaskResult(c *gin.Context) {
 		c.JSON(400, gin.H{"status": "error", "message": "Invalid or missing token"})
 		return
 	}
-	tenantValue, ok := c.Get("tenant_id")
-	tenantID, _ := tenantValue.(string)
-	if !ok || tenantID == "" {
-		c.JSON(400, gin.H{"status": "error", "message": "Invalid or missing tenant context"})
-		return
-	}
+	userValue, _ := c.Get("user_id")
+	userUUID, _ := userValue.(string)
 	var req struct {
 		TaskId     string    `json:"task_id" binding:"required"`
 		Result     string    `json:"result" binding:"required"`
@@ -32,7 +28,13 @@ func TaskResult(c *gin.Context) {
 		return
 	}
 
-	if err := tasks.SaveTaskResultForTenant(tenantID, req.TaskId, clientId, req.Result, req.ExitCode, models.FromTime(req.FinishedAt)); err != nil {
+	var err error
+	if userUUID == "" {
+		c.JSON(400, gin.H{"status": "error", "message": "Missing user context"})
+		return
+	}
+	err = tasks.SaveTaskResultForUser(userUUID, req.TaskId, clientId, req.Result, req.ExitCode, models.FromTime(req.FinishedAt))
+	if err != nil {
 		c.JSON(500, gin.H{"status": "error", "message": "Failed to update task result: " + err.Error()})
 		return
 	}

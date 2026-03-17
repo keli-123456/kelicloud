@@ -1,52 +1,48 @@
 package clipboard
 
 import (
+	"fmt"
+	"strings"
+
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
 	"gorm.io/gorm"
 )
 
-// CreateClipboard 创建剪贴板记录
-func CreateClipboard(cb *models.Clipboard) error {
-	db := dbcore.GetDBInstance()
+func normalizeClipboardUserID(userUUID string) (string, error) {
+	userUUID = strings.TrimSpace(userUUID)
+	if userUUID == "" {
+		return "", fmt.Errorf("user id is required")
+	}
+	return userUUID, nil
+}
+
+func createClipboardWithDB(db *gorm.DB, cb *models.Clipboard) error {
 	return db.Create(cb).Error
 }
 
-func CreateClipboardForTenant(tenantID string, cb *models.Clipboard) error {
-	cb.TenantID = tenantID
-	return CreateClipboard(cb)
-}
+func getClipboardByIDForUserWithDB(db *gorm.DB, id int, userUUID string) (*models.Clipboard, error) {
+	userUUID, err := normalizeClipboardUserID(userUUID)
+	if err != nil {
+		return nil, err
+	}
 
-// GetClipboardByID 根据ID获取剪贴板记录
-func GetClipboardByID(id int) (*models.Clipboard, error) {
 	var cb models.Clipboard
-	db := dbcore.GetDBInstance()
-	if err := db.First(&cb, id).Error; err != nil {
+	if err := db.Where("id = ? AND user_id = ?", id, userUUID).First(&cb).Error; err != nil {
 		return nil, err
 	}
 	return &cb, nil
 }
 
-func GetClipboardByIDForTenant(id int, tenantID string) (*models.Clipboard, error) {
-	var cb models.Clipboard
-	db := dbcore.GetDBInstance()
-	if err := db.Where("id = ? AND tenant_id = ?", id, tenantID).First(&cb).Error; err != nil {
-		return nil, err
+func updateClipboardFieldsForUserWithDB(db *gorm.DB, id int, userUUID string, fields map[string]interface{}) error {
+	userUUID, err := normalizeClipboardUserID(userUUID)
+	if err != nil {
+		return err
 	}
-	return &cb, nil
-}
 
-// UpdateClipboardFields 更新剪贴板记录
-func UpdateClipboardFields(id int, fields map[string]interface{}) error {
-	db := dbcore.GetDBInstance()
-	return db.Model(&models.Clipboard{}).Where("id = ?", id).Updates(fields).Error
-}
-
-func UpdateClipboardFieldsForTenant(id int, tenantID string, fields map[string]interface{}) error {
-	delete(fields, "tenant_id")
+	delete(fields, "user_id")
 	delete(fields, "id")
-	db := dbcore.GetDBInstance()
-	result := db.Model(&models.Clipboard{}).Where("id = ? AND tenant_id = ?", id, tenantID).Updates(fields)
+	result := db.Model(&models.Clipboard{}).Where("id = ? AND user_id = ?", id, userUUID).Updates(fields)
 	if result.Error != nil {
 		return result.Error
 	}
@@ -56,58 +52,73 @@ func UpdateClipboardFieldsForTenant(id int, tenantID string, fields map[string]i
 	return nil
 }
 
-// DeleteClipboard 删除剪贴板记录
-func DeleteClipboard(id int) error {
-	db := dbcore.GetDBInstance()
-	// Check if record exists first
-	var cb models.Clipboard
-	if err := db.First(&cb, id).Error; err != nil {
-		return err // Record not found or other error
-	}
-	return db.Delete(&cb).Error
-}
-
-func DeleteClipboardForTenant(id int, tenantID string) error {
-	db := dbcore.GetDBInstance()
-	var cb models.Clipboard
-	if err := db.Where("id = ? AND tenant_id = ?", id, tenantID).First(&cb).Error; err != nil {
+func deleteClipboardForUserWithDB(db *gorm.DB, id int, userUUID string) error {
+	cb, err := getClipboardByIDForUserWithDB(db, id, userUUID)
+	if err != nil {
 		return err
 	}
-	return db.Delete(&cb).Error
+	return db.Delete(cb).Error
 }
 
-// DeleteClipboardBatch 批量删除剪贴板记录
-func DeleteClipboardBatch(ids []int) error {
+func deleteClipboardBatchForUserWithDB(db *gorm.DB, ids []int, userUUID string) error {
+	userUUID, err := normalizeClipboardUserID(userUUID)
+	if err != nil {
+		return err
+	}
 	if len(ids) == 0 {
 		return nil
 	}
-	db := dbcore.GetDBInstance()
-	return db.Where("id IN ?", ids).Delete(&models.Clipboard{}).Error
+	return db.Where("user_id = ? AND id IN ?", userUUID, ids).Delete(&models.Clipboard{}).Error
 }
 
-func DeleteClipboardBatchForTenant(ids []int, tenantID string) error {
-	if len(ids) == 0 {
-		return nil
+func listClipboardByUserWithDB(db *gorm.DB, userUUID string) ([]models.Clipboard, error) {
+	userUUID, err := normalizeClipboardUserID(userUUID)
+	if err != nil {
+		return nil, err
 	}
-	db := dbcore.GetDBInstance()
-	return db.Where("tenant_id = ? AND id IN ?", tenantID, ids).Delete(&models.Clipboard{}).Error
-}
 
-// ListClipboard 列出所有剪贴板记录
-func ListClipboard() ([]models.Clipboard, error) {
 	var list []models.Clipboard
-	db := dbcore.GetDBInstance()
-	if err := db.Find(&list).Error; err != nil {
+	if err := db.Where("user_id = ?", userUUID).Find(&list).Error; err != nil {
 		return nil, err
 	}
 	return list, nil
 }
 
-func ListClipboardByTenant(tenantID string) ([]models.Clipboard, error) {
-	var list []models.Clipboard
+func CreateClipboard(cb *models.Clipboard) error {
 	db := dbcore.GetDBInstance()
-	if err := db.Where("tenant_id = ?", tenantID).Find(&list).Error; err != nil {
-		return nil, err
+	return createClipboardWithDB(db, cb)
+}
+
+func CreateClipboardForUser(userUUID string, cb *models.Clipboard) error {
+	userUUID, err := normalizeClipboardUserID(userUUID)
+	if err != nil {
+		return err
 	}
-	return list, nil
+	cb.UserID = userUUID
+	return CreateClipboard(cb)
+}
+
+func GetClipboardByIDForUser(id int, userUUID string) (*models.Clipboard, error) {
+	db := dbcore.GetDBInstance()
+	return getClipboardByIDForUserWithDB(db, id, userUUID)
+}
+
+func UpdateClipboardFieldsForUser(id int, userUUID string, fields map[string]interface{}) error {
+	db := dbcore.GetDBInstance()
+	return updateClipboardFieldsForUserWithDB(db, id, userUUID, fields)
+}
+
+func DeleteClipboardForUser(id int, userUUID string) error {
+	db := dbcore.GetDBInstance()
+	return deleteClipboardForUserWithDB(db, id, userUUID)
+}
+
+func DeleteClipboardBatchForUser(ids []int, userUUID string) error {
+	db := dbcore.GetDBInstance()
+	return deleteClipboardBatchForUserWithDB(db, ids, userUUID)
+}
+
+func ListClipboardByUser(userUUID string) ([]models.Clipboard, error) {
+	db := dbcore.GetDBInstance()
+	return listClipboardByUserWithDB(db, userUUID)
 }

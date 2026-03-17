@@ -4,13 +4,12 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/api"
 	"github.com/komari-monitor/komari/database/clients"
-	"github.com/komari-monitor/komari/database/dbcore"
-	"github.com/komari-monitor/komari/database/models"
 )
 
 func OrderWeight(c *gin.Context) {
-	tenantID, ok := requireCurrentTenantID(c)
+	userUUID, ok := currentUserUUID(c)
 	if !ok {
+		api.RespondError(c, 403, "User context is required")
 		return
 	}
 
@@ -23,20 +22,22 @@ func OrderWeight(c *gin.Context) {
 	for uuid := range req {
 		requestedUUIDs = append(requestedUUIDs, uuid)
 	}
-	normalizedUUIDs, err := clients.NormalizeClientUUIDsForTenant(tenantID, requestedUUIDs)
+	normalizedUUIDs, err := clients.NormalizeClientUUIDsForUser(userUUID, requestedUUIDs)
 	if err != nil {
 		api.RespondError(c, 400, err.Error())
 		return
 	}
-	db := dbcore.GetDBInstance()
 	for _, uuid := range normalizedUUIDs {
-		err := db.Model(&models.Client{}).Where("uuid = ? AND tenant_id = ?", uuid, tenantID).Update("weight", req[uuid]).Error
+		err = clients.SaveClientForUser(userUUID, map[string]interface{}{
+			"uuid":   uuid,
+			"weight": req[uuid],
+		})
 		if err != nil {
 			api.RespondError(c, 500, "Failed to update client weight: "+err.Error())
 			return
 		}
 	}
 	uuid, _ := c.Get("uuid")
-	api.AuditLogForCurrentTenant(c, uuid.(string), "order clients", "info")
+	api.AuditLogForCurrentUser(c, uuid.(string), "order clients", "info")
 	api.RespondSuccess(c, nil)
 }

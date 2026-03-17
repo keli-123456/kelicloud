@@ -14,16 +14,11 @@ import (
 
 func RequestTerminal(c *gin.Context) {
 	uuid := c.Param("uuid")
-	user_uuid, _ := c.Get("uuid")
-	tenantID, ok := c.Get("tenant_id")
+	userID, ok := RequireUserScopeFromSession(c)
 	if !ok {
-		c.JSON(http.StatusForbidden, gin.H{
-			"status":  "error",
-			"message": "Tenant context is required",
-		})
 		return
 	}
-	_, err := clients.GetClientByUUIDForTenant(uuid, tenantID.(string))
+	_, err := clients.GetClientByUUIDForUser(uuid, userID)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{
 			"status":  "error",
@@ -46,9 +41,8 @@ func RequestTerminal(c *gin.Context) {
 	// 新建一个终端连接
 	id := utils.GenerateRandomString(32)
 	session := &TerminalSession{
-		UserUUID:    user_uuid.(string),
+		UserUUID:    userID,
 		UUID:        uuid,
-		TenantID:    tenantID.(string),
 		Browser:     conn,
 		Agent:       nil,
 		RequesterIp: c.ClientIP(),
@@ -111,7 +105,7 @@ func ForwardTerminal(id string) {
 	if !exists || session == nil || session.Agent == nil || session.Browser == nil {
 		return
 	}
-	AuditLogForTenant(session.TenantID, session.RequesterIp, session.UserUUID, "established, terminal id:"+id, "terminal")
+	AuditLogForUser(session.RequesterIp, session.UserUUID, "established, terminal id:"+id, "terminal")
 	established_time := time.Now()
 	errChan := make(chan error, 1)
 
@@ -168,7 +162,7 @@ func ForwardTerminal(id string) {
 		session.Browser.Close()
 	}
 	disconnect_time := time.Now()
-	AuditLogForTenant(session.TenantID, session.RequesterIp, session.UserUUID, "disconnected, terminal id:"+id+", duration:"+disconnect_time.Sub(established_time).String(), "terminal")
+	AuditLogForUser(session.RequesterIp, session.UserUUID, "disconnected, terminal id:"+id+", duration:"+disconnect_time.Sub(established_time).String(), "terminal")
 	TerminalSessionsMutex.Lock()
 	delete(TerminalSessions, id)
 	TerminalSessionsMutex.Unlock()

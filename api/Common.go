@@ -25,7 +25,6 @@ var (
 
 type TerminalSession struct {
 	UUID        string
-	TenantID    string
 	UserUUID    string
 	Browser     *websocket.Conn
 	Agent       *websocket.Conn

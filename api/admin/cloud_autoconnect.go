@@ -25,12 +25,12 @@ func prepareCloudAutoConnectUserData(c *gin.Context, userData string, opts autoC
 		return userData, "", nil
 	}
 
-	tenantID, ok := currentTenantID(c)
+	userUUID, ok := currentUserUUID(c)
 	if !ok {
-		return "", "", errors.New("tenant context is required")
+		return "", "", errors.New("user context is required")
 	}
 
-	autoDiscoveryKey, err := config.GetAsForTenant[string](tenantID, config.AutoDiscoveryKeyKey, "")
+	autoDiscoveryKey, err := config.EnsureAutoDiscoveryKeyForUser(userUUID)
 	if err != nil {
 		return "", "", fmt.Errorf("failed to load auto discovery key: %w", err)
 	}
@@ -53,7 +53,7 @@ func prepareCloudAutoConnectUserData(c *gin.Context, userData string, opts autoC
 	}
 
 	scopedAutoDiscoveryKey := buildScopedAutoDiscoveryKey(autoDiscoveryKey, group)
-	installSnippet := buildCloudAutoConnectInstallSnippet(tenantID, endpoint, scopedAutoDiscoveryKey)
+	installSnippet := buildCloudAutoConnectInstallSnippet(userUUID, endpoint, scopedAutoDiscoveryKey)
 	mergedUserData, err := mergeCloudAutoConnectUserData(userData, installSnippet, opts.WrapInShellScript)
 	if err != nil {
 		return "", "", err
@@ -63,12 +63,12 @@ func prepareCloudAutoConnectUserData(c *gin.Context, userData string, opts autoC
 }
 
 func resolveCloudAutoConnectEndpoint(c *gin.Context) (string, error) {
-	tenantID, ok := currentTenantID(c)
+	userUUID, ok := currentUserUUID(c)
 	if !ok {
-		return "", errors.New("tenant context is required")
+		return "", errors.New("user context is required")
 	}
 
-	scriptDomain, err := config.GetAsForTenant[string](tenantID, config.ScriptDomainKey, "")
+	scriptDomain, err := config.GetAsForUser[string](userUUID, config.ScriptDomainKey, "")
 	if err != nil {
 		return "", fmt.Errorf("failed to load script domain: %w", err)
 	}
@@ -164,8 +164,8 @@ func buildScopedAutoDiscoveryKey(baseKey, group string) string {
 	return baseKey + "::group-b64=" + base64.RawURLEncoding.EncodeToString([]byte(group))
 }
 
-func buildCloudAutoConnectInstallSnippet(tenantID, endpoint, scopedAutoDiscoveryKey string) string {
-	installScriptURL, err := resolveAgentInstallScriptURL(tenantID, "install.sh")
+func buildCloudAutoConnectInstallSnippet(userUUID, endpoint, scopedAutoDiscoveryKey string) string {
+	installScriptURL, err := resolveAgentInstallScriptURL(userUUID, "install.sh")
 	if err != nil {
 		installScriptURL = buildAgentInstallScriptURL("", "install.sh")
 	}

@@ -24,10 +24,6 @@ type ContextMeta struct {
 	ClientToken string
 	// ClientUUID 解析出的客户端 UUID（若 token 合法）
 	ClientUUID string
-	// TenantID 当前请求所属租户
-	TenantID string
-	// TenantRole 当前用户在租户内的角色（仅 admin 会话可用）
-	TenantRole string
 	// RemoteIP 请求来源 IP（可选）
 	RemoteIP string
 	// UserAgent 请求 UA（可选）

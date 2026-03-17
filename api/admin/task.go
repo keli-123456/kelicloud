@@ -10,19 +10,19 @@ import (
 )
 
 func GetTasks(c *gin.Context) {
-	tenantID, ok := requireCurrentTenantID(c)
+	scope, ok := requireCurrentOwnerScope(c)
 	if !ok {
 		return
 	}
 
-	dbTasks, err := tasks.GetAllTasksByTenant(tenantID)
+	dbTasks, err := tasks.GetAllTasksByUser(scope.UserUUID)
 	if err != nil {
 		api.RespondError(c, 500, "Failed to retrieve tasks: "+err.Error())
 		return
 	}
 	var responseTasks []gin.H
 	for _, t := range dbTasks {
-		results, err := tasks.GetTaskResultsByTaskIdForTenant(tenantID, t.TaskId)
+		results, err := tasks.GetTaskResultsByTaskIdForUser(scope.UserUUID, t.TaskId)
 		if err != nil {
 			api.RespondError(c, 500, "Failed to retrieve task results: "+err.Error())
 			return
@@ -50,7 +50,7 @@ func GetTasks(c *gin.Context) {
 }
 
 func GetTaskById(c *gin.Context) {
-	tenantID, ok := requireCurrentTenantID(c)
+	scope, ok := requireCurrentOwnerScope(c)
 	if !ok {
 		return
 	}
@@ -60,7 +60,7 @@ func GetTaskById(c *gin.Context) {
 		api.RespondError(c, 400, "Task ID is required")
 		return
 	}
-	task, err := tasks.GetTaskByTaskIdForTenant(tenantID, taskId)
+	task, err := tasks.GetTaskByTaskIdForUser(scope.UserUUID, taskId)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			api.RespondError(c, 404, "Task not found")
@@ -73,7 +73,7 @@ func GetTaskById(c *gin.Context) {
 		api.RespondError(c, 404, "Task not found")
 		return
 	}
-	results, err := tasks.GetTaskResultsByTaskIdForTenant(tenantID, taskId)
+	results, err := tasks.GetTaskResultsByTaskIdForUser(scope.UserUUID, taskId)
 	if err != nil {
 		api.RespondError(c, 500, "Failed to retrieve task results: "+err.Error())
 		return
@@ -97,7 +97,7 @@ func GetTaskById(c *gin.Context) {
 }
 
 func GetTasksByClientId(c *gin.Context) {
-	tenantID, ok := requireCurrentTenantID(c)
+	scope, ok := requireCurrentOwnerScope(c)
 	if !ok {
 		return
 	}
@@ -107,7 +107,7 @@ func GetTasksByClientId(c *gin.Context) {
 		api.RespondError(c, 400, "Client ID is required")
 		return
 	}
-	taskList, err := tasks.GetTasksByClientIdForTenant(tenantID, clientId)
+	taskList, err := tasks.GetTasksByClientIdForUser(scope.UserUUID, clientId)
 	if err != nil {
 		api.RespondError(c, 500, "Failed to retrieve tasks: "+err.Error())
 		return
@@ -128,7 +128,7 @@ func GetTasksByClientId(c *gin.Context) {
 }
 
 func GetSpecificTaskResult(c *gin.Context) {
-	tenantID, ok := requireCurrentTenantID(c)
+	scope, ok := requireCurrentOwnerScope(c)
 	if !ok {
 		return
 	}
@@ -139,7 +139,7 @@ func GetSpecificTaskResult(c *gin.Context) {
 		api.RespondError(c, 400, "Task ID and Client ID are required")
 		return
 	}
-	result, err := tasks.GetSpecificTaskResultForTenant(tenantID, taskId, clientId)
+	result, err := tasks.GetSpecificTaskResultForUser(scope.UserUUID, taskId, clientId)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			api.RespondError(c, 404, "No result found for this task and client")
@@ -157,7 +157,7 @@ func GetSpecificTaskResult(c *gin.Context) {
 
 // Param: task_id
 func GetTaskResultsByTaskId(c *gin.Context) {
-	tenantID, ok := requireCurrentTenantID(c)
+	scope, ok := requireCurrentOwnerScope(c)
 	if !ok {
 		return
 	}
@@ -167,7 +167,7 @@ func GetTaskResultsByTaskId(c *gin.Context) {
 		api.RespondError(c, 400, "Task ID is required")
 		return
 	}
-	results, err := tasks.GetTaskResultsByTaskIdForTenant(tenantID, taskId)
+	results, err := tasks.GetTaskResultsByTaskIdForUser(scope.UserUUID, taskId)
 	if err != nil {
 		api.RespondError(c, 500, "Failed to retrieve task results: "+err.Error())
 		return
@@ -180,7 +180,7 @@ func GetTaskResultsByTaskId(c *gin.Context) {
 }
 
 func GetAllTaskResultByUUID(c *gin.Context) {
-	tenantID, ok := requireCurrentTenantID(c)
+	scope, ok := requireCurrentOwnerScope(c)
 	if !ok {
 		return
 	}
@@ -190,7 +190,7 @@ func GetAllTaskResultByUUID(c *gin.Context) {
 		api.RespondError(c, 400, "Client ID is required")
 		return
 	}
-	results, err := tasks.GetAllTasksResultByUUIDForTenant(tenantID, clientId)
+	results, err := tasks.GetAllTasksResultByUUIDForUser(scope.UserUUID, clientId)
 	if err != nil {
 		api.RespondError(c, 500, "Failed to retrieve tasks: "+err.Error())
 		return

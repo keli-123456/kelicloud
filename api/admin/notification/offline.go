@@ -16,13 +16,11 @@ func EnableOfflineNotification(c *gin.Context) {
 		api.RespondError(c, 400, "Invalid request body: "+err.Error())
 		return
 	}
-	tenantID, ok := c.Get("tenant_id")
-	currentTenantID, _ := tenantID.(string)
-	if !ok || currentTenantID == "" {
-		api.RespondError(c, 403, "Tenant context is required")
+	scope, ok := requireCurrentOwnerScope(c)
+	if !ok {
 		return
 	}
-	normalizedUUIDs, err := clientdb.NormalizeClientUUIDsForTenant(currentTenantID, uuids)
+	normalizedUUIDs, err := clientdb.NormalizeClientUUIDsForUser(scope.UserUUID, uuids)
 	if err != nil {
 		api.RespondError(c, 400, err.Error())
 		return
@@ -55,13 +53,11 @@ func DisableOfflineNotification(c *gin.Context) {
 		api.RespondError(c, 400, "Invalid request body: "+err.Error())
 		return
 	}
-	tenantID, ok := c.Get("tenant_id")
-	currentTenantID, _ := tenantID.(string)
-	if !ok || currentTenantID == "" {
-		api.RespondError(c, 403, "Tenant context is required")
+	scope, ok := requireCurrentOwnerScope(c)
+	if !ok {
 		return
 	}
-	normalizedUUIDs, err := clientdb.NormalizeClientUUIDsForTenant(currentTenantID, uuids)
+	normalizedUUIDs, err := clientdb.NormalizeClientUUIDsForUser(scope.UserUUID, uuids)
 	if err != nil {
 		api.RespondError(c, 400, err.Error())
 		return
@@ -97,10 +93,8 @@ func EditOfflineNotification(c *gin.Context) {
 		api.RespondError(c, 400, "At least one notification is required")
 		return
 	}
-	tenantID, ok := c.Get("tenant_id")
-	currentTenantID, _ := tenantID.(string)
-	if !ok || currentTenantID == "" {
-		api.RespondError(c, 403, "Tenant context is required")
+	scope, ok := requireCurrentOwnerScope(c)
+	if !ok {
 		return
 	}
 	clientUUIDs := make([]string, 0, len(notifications))
@@ -115,7 +109,7 @@ func EditOfflineNotification(c *gin.Context) {
 		}
 		clientUUIDs = append(clientUUIDs, noti.Client)
 	}
-	if _, err := clientdb.NormalizeClientUUIDsForTenant(currentTenantID, clientUUIDs); err != nil {
+	if _, err := clientdb.NormalizeClientUUIDsForUser(scope.UserUUID, clientUUIDs); err != nil {
 		api.RespondError(c, 400, err.Error())
 		return
 	}
@@ -135,17 +129,15 @@ func EditOfflineNotification(c *gin.Context) {
 
 func ListOfflineNotifications(c *gin.Context) {
 	var notifications []models.OfflineNotification
-	tenantID, ok := c.Get("tenant_id")
-	currentTenantID, _ := tenantID.(string)
-	if !ok || currentTenantID == "" {
-		api.RespondError(c, 403, "Tenant context is required")
+	scope, ok := requireCurrentOwnerScope(c)
+	if !ok {
 		return
 	}
-	err := dbcore.GetDBInstance().
+	query := dbcore.GetDBInstance().
 		Model(&models.OfflineNotification{}).
-		Joins("JOIN clients ON clients.uuid = offline_notifications.client").
-		Where("clients.tenant_id = ?", currentTenantID).
-		Find(&notifications).Error
+		Joins("JOIN clients ON clients.uuid = offline_notifications.client")
+	query = query.Where("clients.user_id = ?", scope.UserUUID)
+	err := query.Find(&notifications).Error
 	if err != nil {
 		api.RespondError(c, 500, "Failed to list offline notifications: "+err.Error())
 		return

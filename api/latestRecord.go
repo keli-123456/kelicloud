@@ -2,9 +2,7 @@ package api
 
 import (
 	"github.com/gin-gonic/gin"
-	"github.com/komari-monitor/komari/database/accounts"
-	"github.com/komari-monitor/komari/database/dbcore"
-	"github.com/komari-monitor/komari/database/models"
+	"github.com/komari-monitor/komari/database/clients"
 )
 
 func GetClientRecentRecords(c *gin.Context) {
@@ -15,30 +13,15 @@ func GetClientRecentRecords(c *gin.Context) {
 		return
 	}
 
-	// 登录状态检查
-	isLogin := false
-	session, _ := c.Cookie("session_token")
-	_, err := accounts.GetUserBySession(session)
-	if err == nil {
-		isLogin = true
+	userUUID, ok := RequireUserScopeFromSession(c)
+	if !ok {
+		return
 	}
 
-	// 仅在未登录时需要 Hidden 信息做过滤
-	hiddenMap := map[string]bool{}
-	if !isLogin {
-		var hiddenClients []models.Client
-		db := dbcore.GetDBInstance()
-		_ = db.Select("uuid").Where("hidden = ?", true).Find(&hiddenClients).Error
-		for _, cli := range hiddenClients {
-			hiddenMap[cli.UUID] = true
-		}
-
-		if hiddenMap[uuid] {
-			RespondError(c, 400, "UUID is required") //防止未登录用户获取隐藏客户端数据
-			return
-		}
+	if _, err := clients.GetClientByUUIDForUser(uuid, userUUID); err != nil {
+		RespondError(c, 404, "Client not found")
+		return
 	}
-
 	records, _ := Records.Get(uuid)
 	RespondSuccess(c, records)
 }

@@ -2,29 +2,42 @@ package tasks
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
-	"github.com/komari-monitor/komari/database"
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
 	"gorm.io/gorm"
 )
 
+func normalizeTaskOwnerScope(userUUID, tenantID string) (string, string, error) {
+	userUUID = strings.TrimSpace(userUUID)
+	if userUUID != "" {
+		return userUUID, "", nil
+	}
+	return "", strings.TrimSpace(tenantID), nil
+}
+
+func applyTaskUserScopeWithDB(db *gorm.DB, userUUID string) *gorm.DB {
+	userUUID = strings.TrimSpace(userUUID)
+	if userUUID == "" {
+		return db.Where("1 = 0")
+	}
+	return db.Where("user_id = ?", userUUID)
+}
+
 func CreateTask(taskId string, clients []string) error {
-	tenantID, err := database.GetDefaultTenantID()
+	return createTaskWithDB(dbcore.GetDBInstance(), "", "", taskId, clients)
+}
+
+func CreateTaskForUser(userUUID, taskId string, clientIDs []string) error {
+	return createTaskWithDB(dbcore.GetDBInstance(), userUUID, "", taskId, clientIDs)
+}
+
+func createTaskWithDB(db *gorm.DB, userUUID, tenantID, taskId string, clientIDs []string) error {
+	userUUID, tenantID, err := normalizeTaskOwnerScope(userUUID, tenantID)
 	if err != nil {
 		return err
-	}
-	return CreateTaskForTenant(tenantID, taskId, clients)
-}
-
-func CreateTaskForTenant(tenantID, taskId string, clientIDs []string) error {
-	return createTaskWithDB(dbcore.GetDBInstance(), tenantID, taskId, clientIDs)
-}
-
-func createTaskWithDB(db *gorm.DB, tenantID, taskId string, clientIDs []string) error {
-	if tenantID == "" {
-		return fmt.Errorf("tenant id is required")
 	}
 	if taskId == "" {
 		return fmt.Errorf("task id is required")
@@ -32,10 +45,10 @@ func createTaskWithDB(db *gorm.DB, tenantID, taskId string, clientIDs []string) 
 
 	// Persist task metadata without storing the raw command payload.
 	task := models.Task{
-		TenantID: tenantID,
-		TaskId:   taskId,
-		Clients:  models.StringArray(clientIDs),
-		Command:  "",
+		UserID:  userUUID,
+		TaskId:  taskId,
+		Clients: models.StringArray(clientIDs),
+		Command: "",
 	}
 	if err := db.Create(&task).Error; err != nil {
 		return err
@@ -43,7 +56,7 @@ func createTaskWithDB(db *gorm.DB, tenantID, taskId string, clientIDs []string) 
 	var taskResults []models.TaskResult
 	for _, client := range clientIDs {
 		taskResults = append(taskResults, models.TaskResult{
-			TenantID:   tenantID,
+			UserID:     userUUID,
 			TaskId:     taskId,
 			Client:     client,
 			Result:     "",
@@ -58,42 +71,36 @@ func createTaskWithDB(db *gorm.DB, tenantID, taskId string, clientIDs []string) 
 	return nil
 }
 
-func GetTaskByTaskId(taskId string) (*models.Task, error) {
-	tenantID, err := database.GetDefaultTenantID()
+func GetTaskByTaskIdForUser(userUUID, taskId string) (*models.Task, error) {
+	return getTaskByTaskIdForUserWithDB(dbcore.GetDBInstance(), userUUID, taskId)
+}
+
+func getTaskByTaskIdForUserWithDB(db *gorm.DB, userUUID, taskId string) (*models.Task, error) {
+	userUUID, _, err := normalizeTaskOwnerScope(userUUID, "")
 	if err != nil {
 		return nil, err
 	}
-	return GetTaskByTaskIdForTenant(tenantID, taskId)
-}
 
-func GetTaskByTaskIdForTenant(tenantID, taskId string) (*models.Task, error) {
-	return getTaskByTaskIdWithDB(dbcore.GetDBInstance(), tenantID, taskId)
-}
-
-func getTaskByTaskIdWithDB(db *gorm.DB, tenantID, taskId string) (*models.Task, error) {
 	var task models.Task
-	if err := db.Where("tenant_id = ? AND task_id = ?", tenantID, taskId).First(&task).Error; err != nil {
+	if err := applyTaskUserScopeWithDB(db, userUUID).Where("task_id = ?", taskId).First(&task).Error; err != nil {
 		return nil, err
 	}
 	return &task, nil
 }
 
-func GetTasksByClientId(clientId string) ([]models.Task, error) {
-	tenantID, err := database.GetDefaultTenantID()
+func GetTasksByClientIdForUser(userUUID, clientID string) ([]models.Task, error) {
+	return getTasksByClientIdForUserWithDB(dbcore.GetDBInstance(), userUUID, clientID)
+}
+
+func getTasksByClientIdForUserWithDB(db *gorm.DB, userUUID, clientID string) ([]models.Task, error) {
+	userUUID, _, err := normalizeTaskOwnerScope(userUUID, "")
 	if err != nil {
 		return nil, err
 	}
-	return GetTasksByClientIdForTenant(tenantID, clientId)
-}
 
-func GetTasksByClientIdForTenant(tenantID, clientID string) ([]models.Task, error) {
-	return getTasksByClientIdWithDB(dbcore.GetDBInstance(), tenantID, clientID)
-}
-
-func getTasksByClientIdWithDB(db *gorm.DB, tenantID, clientID string) ([]models.Task, error) {
 	var taskIDs []string
-	if err := db.Model(&models.TaskResult{}).
-		Where("tenant_id = ? AND client = ?", tenantID, clientID).
+	if err := applyTaskUserScopeWithDB(db.Model(&models.TaskResult{}), userUUID).
+		Where("client = ?", clientID).
 		Distinct().
 		Pluck("task_id", &taskIDs).Error; err != nil {
 		return nil, err
@@ -102,125 +109,116 @@ func getTasksByClientIdWithDB(db *gorm.DB, tenantID, clientID string) ([]models.
 		return []models.Task{}, nil
 	}
 	var tasks []models.Task
-	if err := db.Where("tenant_id = ? AND task_id IN ?", tenantID, taskIDs).Find(&tasks).Error; err != nil {
+	if err := applyTaskUserScopeWithDB(db.Model(&models.Task{}), userUUID).
+		Where("task_id IN ?", taskIDs).
+		Find(&tasks).Error; err != nil {
 		return nil, err
 	}
 	return tasks, nil
 }
 
-func GetSpecificTaskResult(taskId, clientId string) (*models.TaskResult, error) {
-	tenantID, err := database.GetDefaultTenantID()
+func GetSpecificTaskResultForUser(userUUID, taskID, clientID string) (*models.TaskResult, error) {
+	return getSpecificTaskResultForUserWithDB(dbcore.GetDBInstance(), userUUID, taskID, clientID)
+}
+
+func getSpecificTaskResultForUserWithDB(db *gorm.DB, userUUID, taskID, clientID string) (*models.TaskResult, error) {
+	userUUID, _, err := normalizeTaskOwnerScope(userUUID, "")
 	if err != nil {
 		return nil, err
 	}
-	return GetSpecificTaskResultForTenant(tenantID, taskId, clientId)
-}
 
-func GetSpecificTaskResultForTenant(tenantID, taskID, clientID string) (*models.TaskResult, error) {
-	return getSpecificTaskResultWithDB(dbcore.GetDBInstance(), tenantID, taskID, clientID)
-}
-
-func getSpecificTaskResultWithDB(db *gorm.DB, tenantID, taskID, clientID string) (*models.TaskResult, error) {
 	var result models.TaskResult
-	if err := db.Where("tenant_id = ? AND task_id = ? AND client = ?", tenantID, taskID, clientID).First(&result).Error; err != nil {
+	if err := applyTaskUserScopeWithDB(db, userUUID).
+		Where("task_id = ? AND client = ?", taskID, clientID).
+		First(&result).Error; err != nil {
 		return nil, err
 	}
 	return &result, nil
 }
 
-func GetAllTasksResultByUUID(uuid string) ([]models.TaskResult, error) {
-	tenantID, err := database.GetDefaultTenantID()
+func GetAllTasksResultByUUIDForUser(userUUID, clientID string) ([]models.TaskResult, error) {
+	return getAllTasksResultByUUIDForUserWithDB(dbcore.GetDBInstance(), userUUID, clientID)
+}
+
+func getAllTasksResultByUUIDForUserWithDB(db *gorm.DB, userUUID, clientID string) ([]models.TaskResult, error) {
+	userUUID, _, err := normalizeTaskOwnerScope(userUUID, "")
 	if err != nil {
 		return nil, err
 	}
-	return GetAllTasksResultByUUIDForTenant(tenantID, uuid)
-}
 
-func GetAllTasksResultByUUIDForTenant(tenantID, clientID string) ([]models.TaskResult, error) {
-	return getAllTasksResultByUUIDWithDB(dbcore.GetDBInstance(), tenantID, clientID)
-}
-
-func getAllTasksResultByUUIDWithDB(db *gorm.DB, tenantID, clientID string) ([]models.TaskResult, error) {
 	var results []models.TaskResult
-	if err := db.Where("tenant_id = ? AND client = ?", tenantID, clientID).Find(&results).Error; err != nil {
+	if err := applyTaskUserScopeWithDB(db, userUUID).Where("client = ?", clientID).Find(&results).Error; err != nil {
 		return nil, err
 	}
 	return results, nil
 }
 
-func GetAllTasks() ([]models.Task, error) {
-	tenantID, err := database.GetDefaultTenantID()
+func GetAllTasksByUser(userUUID string) ([]models.Task, error) {
+	return getAllTasksByUserWithDB(dbcore.GetDBInstance(), userUUID)
+}
+
+func getAllTasksByUserWithDB(db *gorm.DB, userUUID string) ([]models.Task, error) {
+	userUUID, _, err := normalizeTaskOwnerScope(userUUID, "")
 	if err != nil {
 		return nil, err
 	}
-	return GetAllTasksByTenant(tenantID)
-}
 
-func GetAllTasksByTenant(tenantID string) ([]models.Task, error) {
-	return getAllTasksWithDB(dbcore.GetDBInstance(), tenantID)
-}
-
-func getAllTasksWithDB(db *gorm.DB, tenantID string) ([]models.Task, error) {
 	var tasks []models.Task
-	if err := db.Where("tenant_id = ?", tenantID).Find(&tasks).Error; err != nil {
+	if err := applyTaskUserScopeWithDB(db, userUUID).Find(&tasks).Error; err != nil {
 		return nil, err
 	}
 	return tasks, nil
 }
 
-func GetTaskResultsByTaskId(taskId string) ([]models.TaskResult, error) {
-	tenantID, err := database.GetDefaultTenantID()
+func GetTaskResultsByTaskIdForUser(userUUID, taskID string) ([]models.TaskResult, error) {
+	return getTaskResultsByTaskIDForUserWithDB(dbcore.GetDBInstance(), userUUID, taskID)
+}
+
+func getTaskResultsByTaskIDForUserWithDB(db *gorm.DB, userUUID, taskID string) ([]models.TaskResult, error) {
+	userUUID, _, err := normalizeTaskOwnerScope(userUUID, "")
 	if err != nil {
 		return nil, err
 	}
-	return GetTaskResultsByTaskIdForTenant(tenantID, taskId)
-}
 
-func GetTaskResultsByTaskIdForTenant(tenantID, taskID string) ([]models.TaskResult, error) {
-	return getTaskResultsByTaskIDWithDB(dbcore.GetDBInstance(), tenantID, taskID)
-}
-
-func getTaskResultsByTaskIDWithDB(db *gorm.DB, tenantID, taskID string) ([]models.TaskResult, error) {
 	var results []models.TaskResult
-	if err := db.Where("tenant_id = ? AND task_id = ?", tenantID, taskID).Find(&results).Error; err != nil {
+	if err := applyTaskUserScopeWithDB(db, userUUID).Where("task_id = ?", taskID).Find(&results).Error; err != nil {
 		return nil, err
 	}
 	return results, nil
 }
 
-func DeleteTaskByTaskId(taskId string) error {
-	tenantID, err := database.GetDefaultTenantID()
+func DeleteTaskByTaskIdForUser(userUUID, taskID string) error {
+	userUUID, _, err := normalizeTaskOwnerScope(userUUID, "")
 	if err != nil {
 		return err
 	}
-	return DeleteTaskByTaskIdForTenant(tenantID, taskId)
+	return applyTaskUserScopeWithDB(dbcore.GetDBInstance(), userUUID).
+		Where("task_id = ?", taskID).
+		Delete(&models.Task{}).Error
 }
 
-func DeleteTaskByTaskIdForTenant(tenantID, taskID string) error {
-	return dbcore.GetDBInstance().Where("tenant_id = ? AND task_id = ?", tenantID, taskID).Delete(&models.Task{}).Error
+func SaveTaskResultForUser(userUUID, taskID, clientID, result string, exitCode int, timestamp models.LocalTime) error {
+	return saveTaskResultWithDB(dbcore.GetDBInstance(), userUUID, "", taskID, clientID, result, exitCode, timestamp)
 }
 
-func SaveTaskResult(taskId, clientId, result string, exitCode int, timestamp models.LocalTime) error {
-	tenantID, err := database.GetDefaultTenantID()
+func saveTaskResultWithDB(db *gorm.DB, userUUID, tenantID, taskID, clientID, result string, exitCode int, timestamp models.LocalTime) error {
+	userUUID, tenantID, err := normalizeTaskOwnerScope(userUUID, tenantID)
 	if err != nil {
 		return err
 	}
-	return SaveTaskResultForTenant(tenantID, taskId, clientId, result, exitCode, timestamp)
-}
 
-func SaveTaskResultForTenant(tenantID, taskID, clientID, result string, exitCode int, timestamp models.LocalTime) error {
-	return saveTaskResultWithDB(dbcore.GetDBInstance(), tenantID, taskID, clientID, result, exitCode, timestamp)
-}
+	updateQuery := db.Model(&models.TaskResult{})
+	if userUUID != "" {
+		updateQuery = applyTaskUserScopeWithDB(updateQuery, userUUID)
+	} else {
+		updateQuery = updateQuery.Where("COALESCE(user_id, '') = ''")
+	}
 
-func saveTaskResultWithDB(db *gorm.DB, tenantID, taskID, clientID, result string, exitCode int, timestamp models.LocalTime) error {
-	update := db.
-		Model(&models.TaskResult{}).
-		Where("tenant_id = ? AND task_id = ? AND client = ?", tenantID, taskID, clientID).
-		Updates(map[string]interface{}{
-			"result":      result,
-			"exit_code":   exitCode,
-			"finished_at": timestamp,
-		})
+	update := updateQuery.Where("task_id = ? AND client = ?", taskID, clientID).Updates(map[string]interface{}{
+		"result":      result,
+		"exit_code":   exitCode,
+		"finished_at": timestamp,
+	})
 	if update.Error != nil {
 		return update.Error
 	}

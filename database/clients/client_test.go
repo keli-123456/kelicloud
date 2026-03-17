@@ -1,6 +1,8 @@
 package clients
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -10,11 +12,19 @@ import (
 	"github.com/komari-monitor/komari/database/models"
 )
 
-func TestDeleteClientWithDBClearsOfflineNotifications(t *testing.T) {
-	db, err := gorm.Open(sqlite.Open("file::memory:?cache=shared"), &gorm.Config{})
+func openClientTestDB(t *testing.T) *gorm.DB {
+	t.Helper()
+
+	dsn := fmt.Sprintf("file:%s?mode=memory&cache=shared", strings.ReplaceAll(t.Name(), "/", "_"))
+	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
 	if err != nil {
 		t.Fatalf("failed to open sqlite database: %v", err)
 	}
+	return db
+}
+
+func TestDeleteClientWithDBClearsOfflineNotifications(t *testing.T) {
+	db := openClientTestDB(t)
 
 	if err := db.Exec("PRAGMA foreign_keys = ON").Error; err != nil {
 		t.Fatalf("failed to enable foreign keys: %v", err)
@@ -64,76 +74,109 @@ func TestDeleteClientWithDBClearsOfflineNotifications(t *testing.T) {
 	}
 }
 
-func TestTenantScopedClientQueriesAndUpdates(t *testing.T) {
-	db, err := gorm.Open(sqlite.Open("file::memory:?cache=shared"), &gorm.Config{})
-	if err != nil {
-		t.Fatalf("failed to open sqlite database: %v", err)
+func TestUserScopedClientQueriesIgnoreOwnerlessData(t *testing.T) {
+	db := openClientTestDB(t)
+
+	if err := db.AutoMigrate(&models.User{}, &models.Client{}); err != nil {
+		t.Fatalf("failed to migrate test schema: %v", err)
 	}
+
+	now := models.FromTime(time.Now())
+	user := models.User{UUID: "user-a", Username: "alice", Passwd: "hashed", CreatedAt: now, UpdatedAt: now}
+	otherUser := models.User{UUID: "user-b", Username: "bob", Passwd: "hashed", CreatedAt: now, UpdatedAt: now}
+
+	if err := db.Create(&user).Error; err != nil {
+		t.Fatalf("failed to create user: %v", err)
+	}
+	if err := db.Create(&otherUser).Error; err != nil {
+		t.Fatalf("failed to create other user: %v", err)
+	}
+
+	legacyClient := models.Client{
+		UUID:      "legacy-client",
+		Token:     "legacy-token",
+		Name:      "Legacy Client",
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	userScopedClient := models.Client{
+		UUID:      "user-client",
+		Token:     "user-token",
+		UserID:    user.UUID,
+		Name:      "User Client",
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+
+	if err := db.Create(&legacyClient).Error; err != nil {
+		t.Fatalf("failed to create legacy client: %v", err)
+	}
+	if err := db.Create(&userScopedClient).Error; err != nil {
+		t.Fatalf("failed to create user-scoped client: %v", err)
+	}
+
+	ownedClients, err := getAllClientBasicInfoByUserWithDB(db, user.UUID)
+	if err != nil {
+		t.Fatalf("failed to list user-scoped clients: %v", err)
+	}
+	if len(ownedClients) != 1 || ownedClients[0].UUID != userScopedClient.UUID {
+		t.Fatalf("expected only user-scoped client, got %+v", ownedClients)
+	}
+
+	if _, err := getClientByUUIDForUserWithDB(db, legacyClient.UUID, user.UUID); err == nil {
+		t.Fatalf("expected ownerless client to be hidden from user scope")
+	}
+	if _, err := getClientByUUIDForUserWithDB(db, legacyClient.UUID, otherUser.UUID); err == nil {
+		t.Fatalf("expected cross-user lookup to fail")
+	}
+
+	if err := saveClientForUserWithDB(db, user.UUID, map[string]interface{}{
+		"uuid": legacyClient.UUID,
+		"name": "Updated By Owner",
+	}); err == nil {
+		t.Fatalf("expected ownerless client update to fail under user scope")
+	}
+	if err := saveClientForUserWithDB(db, otherUser.UUID, map[string]interface{}{
+		"uuid": legacyClient.UUID,
+		"name": "Updated By Other User",
+	}); err == nil {
+		t.Fatalf("expected cross-user update to fail")
+	}
+
+	var normalized []string
+	if err := ClientUUIDScopeByUserWithDB(db, user.UUID).
+		Where("uuid = ?", userScopedClient.UUID).
+		Pluck("uuid", &normalized).Error; err != nil {
+		t.Fatalf("expected user scope query to return owned client, got %v", err)
+	}
+	if len(normalized) != 1 || normalized[0] != userScopedClient.UUID {
+		t.Fatalf("expected normalized user client list, got %+v", normalized)
+	}
+}
+
+func TestCreateClientWithUserWithDBPersistsOwner(t *testing.T) {
+	db := openClientTestDB(t)
 
 	if err := db.AutoMigrate(&models.Client{}); err != nil {
 		t.Fatalf("failed to migrate test schema: %v", err)
 	}
 
-	now := models.FromTime(time.Now())
-	tenantAClient := models.Client{
-		UUID:      "tenant-a-client",
-		Token:     "tenant-a-token",
-		TenantID:  "tenant-a",
-		Name:      "Tenant A Client",
-		CreatedAt: now,
-		UpdatedAt: now,
-	}
-	tenantBClient := models.Client{
-		UUID:      "tenant-b-client",
-		Token:     "tenant-b-token",
-		TenantID:  "tenant-b",
-		Name:      "Tenant B Client",
-		CreatedAt: now,
-		UpdatedAt: now,
-	}
-
-	if err := db.Create(&tenantAClient).Error; err != nil {
-		t.Fatalf("failed to create tenant A client: %v", err)
-	}
-	if err := db.Create(&tenantBClient).Error; err != nil {
-		t.Fatalf("failed to create tenant B client: %v", err)
-	}
-
-	if _, err := getClientByUUIDForTenantWithDB(db, tenantAClient.UUID, tenantAClient.TenantID); err != nil {
-		t.Fatalf("expected tenant-scoped lookup to succeed: %v", err)
-	}
-
-	if _, err := getClientByUUIDForTenantWithDB(db, tenantAClient.UUID, tenantBClient.TenantID); err == nil {
-		t.Fatalf("expected cross-tenant lookup to fail")
-	}
-
-	if err := saveClientForTenantWithDB(db, tenantBClient.TenantID, map[string]interface{}{
-		"uuid": tenantAClient.UUID,
-		"name": "Cross Tenant Update",
-	}); err == nil {
-		t.Fatalf("expected cross-tenant update to fail")
-	}
-
-	if err := saveClientForTenantWithDB(db, tenantAClient.TenantID, map[string]interface{}{
-		"uuid": tenantAClient.UUID,
-		"name": "Tenant A Updated",
-	}); err != nil {
-		t.Fatalf("expected tenant-scoped update to succeed: %v", err)
-	}
-
-	updatedClient, err := getClientByUUIDForTenantWithDB(db, tenantAClient.UUID, tenantAClient.TenantID)
+	clientUUID, token, err := createClientWithUserWithDB(db, "user-a", "User Client", "edge")
 	if err != nil {
-		t.Fatalf("failed to load updated client: %v", err)
+		t.Fatalf("failed to create user-owned client: %v", err)
 	}
-	if updatedClient.Name != "Tenant A Updated" {
-		t.Fatalf("expected updated client name, got %q", updatedClient.Name)
+	if clientUUID == "" || token == "" {
+		t.Fatalf("expected generated identifiers, got uuid=%q token=%q", clientUUID, token)
 	}
 
-	tenantAClients, err := getAllClientBasicInfoWithDB(db, tenantAClient.TenantID)
+	client, err := getClientByUUIDWithDB(db, clientUUID)
 	if err != nil {
-		t.Fatalf("failed to list tenant A clients: %v", err)
+		t.Fatalf("failed to load created client: %v", err)
 	}
-	if len(tenantAClients) != 1 || tenantAClients[0].UUID != tenantAClient.UUID {
-		t.Fatalf("expected only tenant A client, got %+v", tenantAClients)
+	if client.UserID != "user-a" {
+		t.Fatalf("expected user-owned client to keep user_id, got %q", client.UserID)
+	}
+	if client.Name != "User Client" || client.Group != "edge" {
+		t.Fatalf("unexpected created client payload: %+v", client)
 	}
 }

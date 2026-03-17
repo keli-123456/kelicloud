@@ -7,40 +7,32 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/api"
 	"github.com/komari-monitor/komari/database/clients"
+	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/database/records"
 	"github.com/komari-monitor/komari/ws"
 	"gorm.io/gorm"
 )
 
-func currentTenantID(c *gin.Context) (string, bool) {
-	tenantID, ok := c.Get("tenant_id")
+func currentUserUUID(c *gin.Context) (string, bool) {
+	userUUID, ok := c.Get("uuid")
 	if !ok {
 		return "", false
 	}
-	value, ok := tenantID.(string)
+	value, ok := userUUID.(string)
 	return value, ok && value != ""
-}
-
-func requireCurrentTenantID(c *gin.Context) (string, bool) {
-	tenantID, ok := currentTenantID(c)
-	if !ok {
-		api.RespondError(c, http.StatusForbidden, "Tenant context is required")
-		return "", false
-	}
-	return tenantID, true
 }
 
 func AddClient(c *gin.Context) {
 	var req struct {
 		Name string `json:"name"`
 	}
-	tenantID, ok := currentTenantID(c)
+	userUUID, ok := currentUserUUID(c)
 	if !ok {
-		c.JSON(http.StatusForbidden, gin.H{"status": "error", "message": "Tenant context is required"})
+		c.JSON(http.StatusForbidden, gin.H{"status": "error", "message": "User context is required"})
 		return
 	}
 	if err := c.ShouldBindJSON(&req); err != nil || req.Name == "" {
-		uuid, token, err := clients.CreateClientForTenant(tenantID)
+		uuid, token, err := clients.CreateClientForUser(userUUID)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"status": "error", "message": err.Error()})
 			return
@@ -48,22 +40,21 @@ func AddClient(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "success", "uuid": uuid, "token": token})
 		return
 	}
-	uuid, token, err := clients.CreateClientWithNameForTenant(tenantID, req.Name)
+	uuid, token, err := clients.CreateClientWithNameForUser(userUUID, req.Name)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"status": "error", "message": err.Error()})
 		return
 	}
-	user_uuid, _ := c.Get("uuid")
-	api.AuditLogForCurrentTenant(c, user_uuid.(string), "create client:"+uuid, "info")
+	api.AuditLogForCurrentUser(c, userUUID, "create client:"+uuid, "info")
 	c.JSON(http.StatusOK, gin.H{"status": "success", "uuid": uuid, "token": token, "message": ""})
 }
 
 func EditClient(c *gin.Context) {
 	var req = make(map[string]interface{})
 	uuid := c.Param("uuid")
-	tenantID, ok := currentTenantID(c)
+	userUUID, ok := currentUserUUID(c)
 	if !ok {
-		c.JSON(http.StatusForbidden, gin.H{"status": "error", "message": "Tenant context is required"})
+		c.JSON(http.StatusForbidden, gin.H{"status": "error", "message": "User context is required"})
 		return
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -75,7 +66,7 @@ func EditClient(c *gin.Context) {
 		return
 	}
 	req["uuid"] = uuid
-	err := clients.SaveClientForTenant(tenantID, req)
+	err := clients.SaveClientForUser(userUUID, req)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			c.JSON(http.StatusNotFound, gin.H{"status": "error", "message": "Client not found"})
@@ -84,19 +75,18 @@ func EditClient(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"status": "error", "message": err.Error()})
 		return
 	}
-	user_uuid, _ := c.Get("uuid")
-	api.AuditLogForCurrentTenant(c, user_uuid.(string), "edit client:"+uuid, "info")
+	api.AuditLogForCurrentUser(c, userUUID, "edit client:"+uuid, "info")
 	c.JSON(http.StatusOK, gin.H{"status": "success"})
 }
 
 func RemoveClient(c *gin.Context) {
 	uuid := c.Param("uuid")
-	tenantID, ok := currentTenantID(c)
+	userUUID, ok := currentUserUUID(c)
 	if !ok {
-		c.JSON(http.StatusForbidden, gin.H{"status": "error", "message": "Tenant context is required"})
+		c.JSON(http.StatusForbidden, gin.H{"status": "error", "message": "User context is required"})
 		return
 	}
-	err := clients.DeleteClientForTenant(tenantID, uuid)
+	err := clients.DeleteClientForUser(userUUID, uuid)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			c.JSON(http.StatusNotFound, gin.H{
@@ -111,41 +101,40 @@ func RemoveClient(c *gin.Context) {
 		})
 		return
 	}
-	user_uuid, _ := c.Get("uuid")
-	api.AuditLogForCurrentTenant(c, user_uuid.(string), "delete client:"+uuid, "warn")
+	api.AuditLogForCurrentUser(c, userUUID, "delete client:"+uuid, "warn")
 	c.JSON(200, gin.H{"status": "success"})
 	ws.DeleteConnectedClients(uuid)
 	ws.DeleteLatestReport(uuid)
 }
 
 func ClearRecord(c *gin.Context) {
-	tenantID, ok := currentTenantID(c)
+	userUUID, ok := currentUserUUID(c)
 	if !ok {
 		c.JSON(http.StatusForbidden, gin.H{
 			"status":  "error",
-			"message": "Tenant context is required",
+			"message": "User context is required",
 		})
 		return
 	}
-	if err := records.DeleteAllByTenant(tenantID); err != nil {
+	err := records.DeleteAllByUser(userUUID)
+	if err != nil {
 		c.JSON(500, gin.H{
 			"status":  "error",
 			"message": "Failed to delete Record" + err.Error(),
 		})
 		return
 	}
-	user_uuid, _ := c.Get("uuid")
-	api.AuditLogForCurrentTenant(c, user_uuid.(string), "clear records", "warn")
+	api.AuditLogForCurrentUser(c, userUUID, "clear records", "warn")
 	c.JSON(200, gin.H{"status": "success"})
 }
 
 func GetClient(c *gin.Context) {
 	uuid := c.Param("uuid")
-	tenantID, ok := currentTenantID(c)
+	userUUID, ok := currentUserUUID(c)
 	if !ok {
 		c.JSON(http.StatusForbidden, gin.H{
 			"status":  "error",
-			"message": "Tenant context is required",
+			"message": "User context is required",
 		})
 		return
 	}
@@ -157,7 +146,11 @@ func GetClient(c *gin.Context) {
 		return
 	}
 
-	result, err := clients.GetClientByUUIDForTenant(uuid, tenantID)
+	var (
+		result models.Client
+		err    error
+	)
+	result, err = clients.GetClientByUUIDForUser(uuid, userUUID)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			c.JSON(http.StatusNotFound, gin.H{
@@ -177,12 +170,12 @@ func GetClient(c *gin.Context) {
 }
 
 func ListClients(c *gin.Context) {
-	tenantID, ok := currentTenantID(c)
+	userUUID, ok := currentUserUUID(c)
 	if !ok {
-		c.JSON(http.StatusForbidden, gin.H{"status": "error", "message": "Tenant context is required"})
+		c.JSON(http.StatusForbidden, gin.H{"status": "error", "message": "User context is required"})
 		return
 	}
-	cls, err := clients.GetAllClientBasicInfoByTenant(tenantID)
+	cls, err := clients.GetAllClientBasicInfoByUser(userUUID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"status": "error", "message": err.Error()})
 		return
@@ -193,11 +186,11 @@ func ListClients(c *gin.Context) {
 
 func GetClientToken(c *gin.Context) {
 	uuid := c.Param("uuid")
-	tenantID, ok := currentTenantID(c)
+	userUUID, ok := currentUserUUID(c)
 	if !ok {
 		c.JSON(http.StatusForbidden, gin.H{
 			"status":  "error",
-			"message": "Tenant context is required",
+			"message": "User context is required",
 		})
 		return
 	}
@@ -209,7 +202,11 @@ func GetClientToken(c *gin.Context) {
 		return
 	}
 
-	token, err := clients.GetClientTokenByUUIDForTenant(uuid, tenantID)
+	var (
+		token string
+		err   error
+	)
+	token, err = clients.GetClientTokenByUUIDForUser(uuid, userUUID)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			c.JSON(http.StatusNotFound, gin.H{"status": "error", "message": "Client not found"})

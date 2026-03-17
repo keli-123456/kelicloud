@@ -14,7 +14,6 @@ import (
 	smithyhttp "github.com/aws/smithy-go/transport/http"
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/api"
-	"github.com/komari-monitor/komari/database"
 	"github.com/komari-monitor/komari/database/models"
 	awscloud "github.com/komari-monitor/komari/utils/cloudprovider/aws"
 )
@@ -58,12 +57,12 @@ type awsAccountView struct {
 }
 
 func GetAWSCredentials(c *gin.Context) {
-	tenantID, ok := requireCurrentTenantID(c)
+	scope, ok := requireCurrentOwnerScope(c)
 	if !ok {
 		return
 	}
 
-	_, addition, err := loadAWSAddition(tenantID, true)
+	_, addition, err := loadAWSAddition(scope, true)
 	if err != nil {
 		api.RespondError(c, http.StatusBadRequest, err.Error())
 		return
@@ -73,7 +72,7 @@ func GetAWSCredentials(c *gin.Context) {
 }
 
 func SaveAWSCredentials(c *gin.Context) {
-	tenantID, ok := requireCurrentTenantID(c)
+	scope, ok := requireCurrentOwnerScope(c)
 	if !ok {
 		return
 	}
@@ -93,7 +92,7 @@ func SaveAWSCredentials(c *gin.Context) {
 		return
 	}
 
-	_, addition, err := loadAWSAddition(tenantID, true)
+	_, addition, err := loadAWSAddition(scope, true)
 	if err != nil {
 		api.RespondError(c, http.StatusBadRequest, err.Error())
 		return
@@ -115,7 +114,7 @@ func SaveAWSCredentials(c *gin.Context) {
 		addition.SetActiveRegion(payload.ActiveRegion)
 	}
 
-	if err := saveAWSAddition(tenantID, addition); err != nil {
+	if err := saveAWSAddition(scope, addition); err != nil {
 		api.RespondError(c, http.StatusInternalServerError, "Failed to save AWS credentials: "+err.Error())
 		return
 	}
@@ -125,7 +124,7 @@ func SaveAWSCredentials(c *gin.Context) {
 }
 
 func SetAWSActiveCredential(c *gin.Context) {
-	tenantID, ok := requireCurrentTenantID(c)
+	scope, ok := requireCurrentOwnerScope(c)
 	if !ok {
 		return
 	}
@@ -138,7 +137,7 @@ func SetAWSActiveCredential(c *gin.Context) {
 		return
 	}
 
-	_, addition, err := loadAWSAddition(tenantID, false)
+	_, addition, err := loadAWSAddition(scope, false)
 	if err != nil {
 		api.RespondError(c, http.StatusBadRequest, err.Error())
 		return
@@ -149,7 +148,7 @@ func SetAWSActiveCredential(c *gin.Context) {
 		return
 	}
 
-	if err := saveAWSAddition(tenantID, addition); err != nil {
+	if err := saveAWSAddition(scope, addition); err != nil {
 		api.RespondError(c, http.StatusInternalServerError, "Failed to update active credential: "+err.Error())
 		return
 	}
@@ -159,7 +158,7 @@ func SetAWSActiveCredential(c *gin.Context) {
 }
 
 func SetAWSActiveRegion(c *gin.Context) {
-	tenantID, ok := requireCurrentTenantID(c)
+	scope, ok := requireCurrentOwnerScope(c)
 	if !ok {
 		return
 	}
@@ -172,14 +171,14 @@ func SetAWSActiveRegion(c *gin.Context) {
 		return
 	}
 
-	_, addition, err := loadAWSAddition(tenantID, false)
+	_, addition, err := loadAWSAddition(scope, false)
 	if err != nil {
 		api.RespondError(c, http.StatusBadRequest, err.Error())
 		return
 	}
 
 	addition.SetActiveRegion(payload.Region)
-	if err := saveAWSAddition(tenantID, addition); err != nil {
+	if err := saveAWSAddition(scope, addition); err != nil {
 		api.RespondError(c, http.StatusInternalServerError, "Failed to update active region: "+err.Error())
 		return
 	}
@@ -189,7 +188,7 @@ func SetAWSActiveRegion(c *gin.Context) {
 }
 
 func CheckAWSCredentials(c *gin.Context) {
-	tenantID, ok := requireCurrentTenantID(c)
+	scope, ok := requireCurrentOwnerScope(c)
 	if !ok {
 		return
 	}
@@ -204,7 +203,7 @@ func CheckAWSCredentials(c *gin.Context) {
 		}
 	}
 
-	_, addition, err := loadAWSAddition(tenantID, false)
+	_, addition, err := loadAWSAddition(scope, false)
 	if err != nil {
 		api.RespondError(c, http.StatusBadRequest, err.Error())
 		return
@@ -263,7 +262,7 @@ func CheckAWSCredentials(c *gin.Context) {
 
 	wg.Wait()
 
-	if err := saveAWSAddition(tenantID, addition); err != nil {
+	if err := saveAWSAddition(scope, addition); err != nil {
 		api.RespondError(c, http.StatusInternalServerError, "Failed to save credential health: "+err.Error())
 		return
 	}
@@ -273,7 +272,7 @@ func CheckAWSCredentials(c *gin.Context) {
 }
 
 func DeleteAWSCredential(c *gin.Context) {
-	tenantID, ok := requireCurrentTenantID(c)
+	scope, ok := requireCurrentOwnerScope(c)
 	if !ok {
 		return
 	}
@@ -284,7 +283,7 @@ func DeleteAWSCredential(c *gin.Context) {
 		return
 	}
 
-	_, addition, err := loadAWSAddition(tenantID, false)
+	_, addition, err := loadAWSAddition(scope, false)
 	if err != nil {
 		api.RespondError(c, http.StatusBadRequest, err.Error())
 		return
@@ -295,7 +294,7 @@ func DeleteAWSCredential(c *gin.Context) {
 		return
 	}
 
-	if err := saveAWSAddition(tenantID, addition); err != nil {
+	if err := saveAWSAddition(scope, addition); err != nil {
 		api.RespondError(c, http.StatusInternalServerError, "Failed to delete credential: "+err.Error())
 		return
 	}
@@ -305,7 +304,7 @@ func DeleteAWSCredential(c *gin.Context) {
 }
 
 func GetAWSCredentialSecret(c *gin.Context) {
-	tenantID, ok := requireCurrentTenantID(c)
+	scope, ok := requireCurrentOwnerScope(c)
 	if !ok {
 		return
 	}
@@ -316,7 +315,7 @@ func GetAWSCredentialSecret(c *gin.Context) {
 		return
 	}
 
-	_, addition, err := loadAWSAddition(tenantID, false)
+	_, addition, err := loadAWSAddition(scope, false)
 	if err != nil {
 		api.RespondError(c, http.StatusBadRequest, err.Error())
 		return
@@ -332,12 +331,12 @@ func GetAWSCredentialSecret(c *gin.Context) {
 }
 
 func GetAWSAccount(c *gin.Context) {
-	tenantID, ok := requireCurrentTenantID(c)
+	scope, ok := requireCurrentOwnerScope(c)
 	if !ok {
 		return
 	}
 
-	addition, credential, region, ctx, cancel, err := getAWSActiveCredential(c, tenantID)
+	addition, credential, region, ctx, cancel, err := getAWSActiveCredential(c, scope)
 	if err != nil {
 		respondAWSError(c, err)
 		return
@@ -354,7 +353,7 @@ func GetAWSAccount(c *gin.Context) {
 
 	if identity != nil {
 		credential.SetCheckResult(time.Now(), identity, quota, quotaErr, nil)
-		_ = saveAWSAddition(tenantID, addition)
+		_ = saveAWSAddition(scope, addition)
 	}
 
 	api.RespondSuccess(c, awsAccountView{
@@ -368,12 +367,12 @@ func GetAWSAccount(c *gin.Context) {
 }
 
 func GetAWSCatalog(c *gin.Context) {
-	tenantID, ok := requireCurrentTenantID(c)
+	scope, ok := requireCurrentOwnerScope(c)
 	if !ok {
 		return
 	}
 
-	_, credential, region, ctx, cancel, err := getAWSActiveCredential(c, tenantID)
+	_, credential, region, ctx, cancel, err := getAWSActiveCredential(c, scope)
 	if err != nil {
 		respondAWSError(c, err)
 		return
@@ -451,12 +450,12 @@ func GetAWSCatalog(c *gin.Context) {
 }
 
 func GetAWSInstanceDetail(c *gin.Context) {
-	tenantID, ok := requireCurrentTenantID(c)
+	scope, ok := requireCurrentOwnerScope(c)
 	if !ok {
 		return
 	}
 
-	_, credential, region, ctx, cancel, err := getAWSActiveCredential(c, tenantID)
+	_, credential, region, ctx, cancel, err := getAWSActiveCredential(c, scope)
 	if err != nil {
 		respondAWSError(c, err)
 		return
@@ -479,12 +478,12 @@ func GetAWSInstanceDetail(c *gin.Context) {
 }
 
 func GetAWSLightsailCatalog(c *gin.Context) {
-	tenantID, ok := requireCurrentTenantID(c)
+	scope, ok := requireCurrentOwnerScope(c)
 	if !ok {
 		return
 	}
 
-	_, credential, region, ctx, cancel, err := getAWSActiveCredential(c, tenantID)
+	_, credential, region, ctx, cancel, err := getAWSActiveCredential(c, scope)
 	if err != nil {
 		respondAWSError(c, err)
 		return
@@ -544,12 +543,12 @@ func GetAWSLightsailCatalog(c *gin.Context) {
 }
 
 func ListAWSLightsailInstances(c *gin.Context) {
-	tenantID, ok := requireCurrentTenantID(c)
+	scope, ok := requireCurrentOwnerScope(c)
 	if !ok {
 		return
 	}
 
-	_, credential, region, ctx, cancel, err := getAWSActiveCredential(c, tenantID)
+	_, credential, region, ctx, cancel, err := getAWSActiveCredential(c, scope)
 	if err != nil {
 		respondAWSError(c, err)
 		return
@@ -569,12 +568,12 @@ func ListAWSLightsailInstances(c *gin.Context) {
 }
 
 func GetAWSLightsailInstanceDetail(c *gin.Context) {
-	tenantID, ok := requireCurrentTenantID(c)
+	scope, ok := requireCurrentOwnerScope(c)
 	if !ok {
 		return
 	}
 
-	_, credential, region, ctx, cancel, err := getAWSActiveCredential(c, tenantID)
+	_, credential, region, ctx, cancel, err := getAWSActiveCredential(c, scope)
 	if err != nil {
 		respondAWSError(c, err)
 		return
@@ -597,12 +596,12 @@ func GetAWSLightsailInstanceDetail(c *gin.Context) {
 }
 
 func ListAWSInstances(c *gin.Context) {
-	tenantID, ok := requireCurrentTenantID(c)
+	scope, ok := requireCurrentOwnerScope(c)
 	if !ok {
 		return
 	}
 
-	_, credential, region, ctx, cancel, err := getAWSActiveCredential(c, tenantID)
+	_, credential, region, ctx, cancel, err := getAWSActiveCredential(c, scope)
 	if err != nil {
 		respondAWSError(c, err)
 		return
@@ -622,12 +621,12 @@ func ListAWSInstances(c *gin.Context) {
 }
 
 func CreateAWSInstance(c *gin.Context) {
-	tenantID, ok := requireCurrentTenantID(c)
+	scope, ok := requireCurrentOwnerScope(c)
 	if !ok {
 		return
 	}
 
-	_, credential, region, ctx, cancel, err := getAWSActiveCredential(c, tenantID)
+	_, credential, region, ctx, cancel, err := getAWSActiveCredential(c, scope)
 	if err != nil {
 		respondAWSError(c, err)
 		return
@@ -686,12 +685,12 @@ func CreateAWSInstance(c *gin.Context) {
 }
 
 func CreateAWSLightsailInstance(c *gin.Context) {
-	tenantID, ok := requireCurrentTenantID(c)
+	scope, ok := requireCurrentOwnerScope(c)
 	if !ok {
 		return
 	}
 
-	_, credential, region, ctx, cancel, err := getAWSActiveCredential(c, tenantID)
+	_, credential, region, ctx, cancel, err := getAWSActiveCredential(c, scope)
 	if err != nil {
 		respondAWSError(c, err)
 		return
@@ -749,12 +748,12 @@ func CreateAWSLightsailInstance(c *gin.Context) {
 }
 
 func DeleteAWSInstance(c *gin.Context) {
-	tenantID, ok := requireCurrentTenantID(c)
+	scope, ok := requireCurrentOwnerScope(c)
 	if !ok {
 		return
 	}
 
-	_, credential, region, ctx, cancel, err := getAWSActiveCredential(c, tenantID)
+	_, credential, region, ctx, cancel, err := getAWSActiveCredential(c, scope)
 	if err != nil {
 		respondAWSError(c, err)
 		return
@@ -777,12 +776,12 @@ func DeleteAWSInstance(c *gin.Context) {
 }
 
 func DeleteAWSLightsailInstance(c *gin.Context) {
-	tenantID, ok := requireCurrentTenantID(c)
+	scope, ok := requireCurrentOwnerScope(c)
 	if !ok {
 		return
 	}
 
-	_, credential, region, ctx, cancel, err := getAWSActiveCredential(c, tenantID)
+	_, credential, region, ctx, cancel, err := getAWSActiveCredential(c, scope)
 	if err != nil {
 		respondAWSError(c, err)
 		return
@@ -805,12 +804,12 @@ func DeleteAWSLightsailInstance(c *gin.Context) {
 }
 
 func PostAWSInstanceAction(c *gin.Context) {
-	tenantID, ok := requireCurrentTenantID(c)
+	scope, ok := requireCurrentOwnerScope(c)
 	if !ok {
 		return
 	}
 
-	_, credential, region, ctx, cancel, err := getAWSActiveCredential(c, tenantID)
+	_, credential, region, ctx, cancel, err := getAWSActiveCredential(c, scope)
 	if err != nil {
 		respondAWSError(c, err)
 		return
@@ -915,12 +914,12 @@ func PostAWSInstanceAction(c *gin.Context) {
 }
 
 func PostAWSLightsailInstanceAction(c *gin.Context) {
-	tenantID, ok := requireCurrentTenantID(c)
+	scope, ok := requireCurrentOwnerScope(c)
 	if !ok {
 		return
 	}
 
-	_, credential, region, ctx, cancel, err := getAWSActiveCredential(c, tenantID)
+	_, credential, region, ctx, cancel, err := getAWSActiveCredential(c, scope)
 	if err != nil {
 		respondAWSError(c, err)
 		return
@@ -1001,8 +1000,8 @@ func PostAWSLightsailInstanceAction(c *gin.Context) {
 	api.RespondSuccess(c, response)
 }
 
-func getAWSActiveCredential(c *gin.Context, tenantID string) (*awscloud.Addition, *awscloud.CredentialRecord, string, context.Context, context.CancelFunc, error) {
-	_, addition, err := loadAWSAddition(tenantID, false)
+func getAWSActiveCredential(c *gin.Context, scope ownerScope) (*awscloud.Addition, *awscloud.CredentialRecord, string, context.Context, context.CancelFunc, error) {
+	_, addition, err := loadAWSAddition(scope, false)
 	if err != nil {
 		return nil, nil, "", nil, nil, err
 	}
@@ -1052,8 +1051,8 @@ func errorString(err error) string {
 	return err.Error()
 }
 
-func loadAWSAddition(tenantID string, allowMissing bool) (*models.CloudProvider, *awscloud.Addition, error) {
-	config, err := database.GetCloudProviderConfigByTenantAndName(tenantID, awsProviderName)
+func loadAWSAddition(scope ownerScope, allowMissing bool) (*models.CloudProvider, *awscloud.Addition, error) {
+	config, err := getCloudProviderConfigForScope(scope, awsProviderName)
 	if err != nil {
 		if allowMissing {
 			addition := &awscloud.Addition{}
@@ -1076,7 +1075,7 @@ func loadAWSAddition(tenantID string, allowMissing bool) (*models.CloudProvider,
 	return config, addition, nil
 }
 
-func saveAWSAddition(tenantID string, addition *awscloud.Addition) error {
+func saveAWSAddition(scope ownerScope, addition *awscloud.Addition) error {
 	if addition == nil {
 		addition = &awscloud.Addition{}
 	}
@@ -1087,9 +1086,5 @@ func saveAWSAddition(tenantID string, addition *awscloud.Addition) error {
 		return err
 	}
 
-	return database.SaveCloudProviderConfigForTenant(&models.CloudProvider{
-		TenantID: tenantID,
-		Name:     awsProviderName,
-		Addition: string(payload),
-	})
+	return saveCloudProviderConfigForScope(scope, awsProviderName, string(payload))
 }

@@ -4,11 +4,9 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"testing"
 
 	"github.com/gin-gonic/gin"
-	"github.com/komari-monitor/komari/cmd/flags"
 	"github.com/komari-monitor/komari/database/accounts"
 	"github.com/stretchr/testify/assert"
 )
@@ -16,8 +14,7 @@ import (
 func TestGetMe(t *testing.T) {
 	// 设置测试模式
 	gin.SetMode(gin.TestMode)
-	flags.DatabaseType = "sqlite"
-	flags.DatabaseFile = filepath.Join(t.TempDir(), "komari-test.db")
+	configureAPITestDB()
 
 	// 创建测试用户
 	user, err := accounts.CreateAccount("testuser", "password")
@@ -88,12 +85,6 @@ func TestGetMe(t *testing.T) {
 
 			assert.Equal(t, tt.expectedName, response["username"])
 			assert.Equal(t, tt.expectedLogin, response["logged_in"])
-			_, hasTenants := response["tenants"]
-			assert.True(t, hasTenants)
-			if tt.expectedLogin {
-				_, hasCurrentTenant := response["current_tenant"]
-				assert.True(t, hasCurrentTenant)
-			}
 		})
 	}
 

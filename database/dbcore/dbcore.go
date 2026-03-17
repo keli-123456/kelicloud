@@ -358,6 +358,14 @@ func MergeDatabase(db *gorm.DB) {
 			db.Migrator().DropColumn(&models.Config{}, "email_use_ssl")
 		}
 	}
+	if legacyConfigTableExists {
+		if db.Migrator().HasColumn(&models.Config{}, "theme") {
+			db.Migrator().DropColumn(&models.Config{}, "theme")
+		}
+		if db.Migrator().HasColumn(&models.Config{}, "private_site") {
+			db.Migrator().DropColumn(&models.Config{}, "private_site")
+		}
+	}
 }
 
 func prepareMySQLSchemaCompatibility(db *gorm.DB) {
@@ -368,6 +376,38 @@ func prepareMySQLSchemaCompatibility(db *gorm.DB) {
 	migrator := db.Migrator()
 	if !migrator.HasTable(&models.OfflineNotification{}) {
 		return
+	}
+
+	// Collapse any legacy duplicate rows so the primary key can be restored.
+	if err := db.Exec(
+		`CREATE TEMPORARY TABLE offline_notifications_dedup AS
+		SELECT client, MAX(enable) AS enable, MAX(grace_period) AS grace_period, MAX(last_notified) AS last_notified
+		FROM offline_notifications
+		GROUP BY client`,
+	).Error; err != nil {
+		log.Printf("Failed to build MySQL offline notification dedup table: %v", err)
+	} else {
+		if err := db.Exec("TRUNCATE TABLE `offline_notifications`").Error; err != nil {
+			log.Printf("Failed to truncate MySQL offline_notifications before dedup restore: %v", err)
+		} else if err := db.Exec(
+			`INSERT INTO offline_notifications (client, enable, grace_period, last_notified)
+			SELECT client, enable, grace_period, last_notified FROM offline_notifications_dedup`,
+		).Error; err != nil {
+			log.Printf("Failed to restore deduplicated MySQL offline notifications: %v", err)
+		}
+		if err := db.Exec("DROP TEMPORARY TABLE IF EXISTS offline_notifications_dedup").Error; err != nil {
+			log.Printf("Failed to drop MySQL offline notification dedup table: %v", err)
+		}
+	}
+
+	if migrator.HasTable(&models.Client{}) {
+		if err := db.Exec(
+			`DELETE offline_notifications FROM offline_notifications
+			LEFT JOIN clients ON clients.uuid = offline_notifications.client
+			WHERE clients.uuid IS NULL`,
+		).Error; err != nil {
+			log.Printf("Failed to remove orphaned MySQL offline notifications: %v", err)
+		}
 	}
 
 	for _, indexName := range []string{"uni_offline_notifications_client", "idx_offline_notifications_client"} {
@@ -500,17 +540,18 @@ func GetDBInstance() *gorm.DB {
 		}
 		config.SetDb(instance)
 		MergeDatabase(instance)
+		err = instance.AutoMigrate(
+			&models.User{},
+			&models.Client{},
+		)
+		if err != nil {
+			log.Fatalf("Failed to create user/client tables: %v", err)
+		}
 		prepareMySQLSchemaCompatibility(instance)
 		// 自动迁移模型
 		err = instance.AutoMigrate(
-			&models.User{},
-			&models.Tenant{},
-			&models.TenantMember{},
-			&models.TenantInvite{},
-			&models.Client{},
 			&models.Record{},
 			&models.GPURecord{},
-			// &models.Config{},
 			&models.Log{},
 			&models.Clipboard{},
 			&models.LoadNotification{},
@@ -521,7 +562,6 @@ func GetDBInstance() *gorm.DB {
 			&models.MessageSenderProvider{},
 			&models.CloudProvider{},
 			&models.CloudInstanceShare{},
-			&models.ThemeConfiguration{},
 		)
 		if err != nil {
 			log.Fatalf("Failed to create tables: %v", err)

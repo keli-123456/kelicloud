@@ -13,7 +13,6 @@ import (
 	"github.com/komari-monitor/komari/config"
 	"github.com/komari-monitor/komari/database"
 	"github.com/komari-monitor/komari/database/clients"
-	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/database/tasks"
 	"github.com/komari-monitor/komari/utils"
@@ -167,15 +166,15 @@ func getPingStatsForNode(uuid string, pingTasks []models.PingTask) map[string]pi
 	return result
 }
 
-func tenantIDFromRPCMeta(meta *rpc.ContextMeta) string {
-	if meta != nil && strings.TrimSpace(meta.TenantID) != "" {
-		return strings.TrimSpace(meta.TenantID)
+func requireRPCUserUUID(meta *rpc.ContextMeta) (string, *rpc.JsonRpcError) {
+	if meta == nil {
+		return "", rpc.MakeError(rpc.PermissionDenied, "Login required", nil)
 	}
-	tenantID, err := database.GetDefaultTenantID()
-	if err != nil {
-		return ""
+	userUUID := strings.TrimSpace(meta.UserUUID)
+	if userUUID == "" {
+		return "", rpc.MakeError(rpc.PermissionDenied, "Login required", nil)
 	}
-	return tenantID
+	return userUUID, nil
 }
 
 func init() {
@@ -235,13 +234,16 @@ func getNodes(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcEr
 	}
 	req.BindParams(&params)
 	meta := rpc.MetaFromContext(ctx)
-	tenantID := tenantIDFromRPCMeta(meta)
-	cinfo, err := clients.GetAllClientBasicInfoByTenant(tenantID)
+	userUUID, rpcErr := requireRPCUserUUID(meta)
+	if rpcErr != nil {
+		return nil, rpcErr
+	}
+	cinfo, err := clients.GetAllClientBasicInfoByUser(userUUID)
 	if err != nil {
 		return nil, rpc.MakeError(rpc.InternalError, "Failed to get client info", cinfo)
 	}
 
-	SendIpAddrToGuest, _ := config.GetAsForTenant[bool](tenantID, config.SendIpAddrToGuestKey, false)
+	SendIpAddrToGuest, _ := config.GetAsForUser[bool](userUUID, config.SendIpAddrToGuestKey, false)
 	if meta.Permission != "admin" {
 		// 过滤 Hidden 节点并隐藏敏感字段
 		filtered := make([]models.Client, 0, len(cinfo))
@@ -285,10 +287,7 @@ func getNodes(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcEr
 }
 
 func getPublicInfo(ctx context.Context, _ *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
-	meta := rpc.MetaFromContext(ctx)
-	tenantID := tenantIDFromRPCMeta(meta)
-
-	info, err := database.GetPublicInfo(tenantID)
+	info, err := database.GetPublicInfo()
 	if err != nil {
 		return nil, rpc.MakeError(rpc.InternalError, "Failed to get public info", err.Error())
 	}
@@ -303,7 +302,10 @@ func getNodesLatestStatus(ctx context.Context, req *rpc.JsonRpcRequest) (any, *r
 	req.BindParams(&params)
 
 	meta := rpc.MetaFromContext(ctx)
-	tenantID := tenantIDFromRPCMeta(meta)
+	userUUID, rpcErr := requireRPCUserUUID(meta)
+	if rpcErr != nil {
+		return nil, rpcErr
+	}
 	latest := ws.GetLatestReport() // map[string]*common.Report (copy)
 	onlineUUIDs := ws.GetAllOnlineUUIDs()
 	onlineSet := make(map[string]bool, len(onlineUUIDs))
@@ -311,7 +313,7 @@ func getNodesLatestStatus(ctx context.Context, req *rpc.JsonRpcRequest) (any, *r
 		onlineSet[uuid] = true
 	}
 
-	cinfo, err := clients.GetAllClientBasicInfoByTenant(tenantID)
+	cinfo, err := clients.GetAllClientBasicInfoByUser(userUUID)
 	if err != nil {
 		return nil, rpc.MakeError(rpc.InternalError, "Failed to get client info", err.Error())
 	}
@@ -369,8 +371,8 @@ func getNodesLatestStatus(ctx context.Context, req *rpc.JsonRpcRequest) (any, *r
 
 	respMap := make(map[string]recordLike, len(latest))
 
-	// 预取所有 ping 任务
-	pingTasks, _ := tasks.GetAllPingTasksByTenant(tenantID)
+	// 预取当前 owner scope 下的 ping 任务
+	pingTasks, _ := tasks.GetAllPingTasksByUser(userUUID)
 
 	appendOne := func(uuid string, rep *common.Report) {
 		if rep == nil {
@@ -489,25 +491,12 @@ func getNodeRecentStatus(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rp
 		return nil, rpc.MakeError(rpc.InvalidParams, "UUID is required", params)
 	}
 	meta := rpc.MetaFromContext(ctx)
-	// 登录状态检查
-	isLogin := false
-	if meta.Permission == "admin" {
-		isLogin = true
+	userUUID, rpcErr := requireRPCUserUUID(meta)
+	if rpcErr != nil {
+		return nil, rpcErr
 	}
-
-	// 仅在未登录时需要 Hidden 信息做过滤
-	hiddenMap := map[string]bool{}
-	if !isLogin {
-		var hiddenClients []models.Client
-		db := dbcore.GetDBInstance()
-		_ = db.Select("uuid").Where("hidden = ?", true).Find(&hiddenClients).Error
-		for _, cli := range hiddenClients {
-			hiddenMap[cli.UUID] = true
-		}
-
-		if hiddenMap[params.UUID] {
-			return nil, rpc.MakeError(rpc.InvalidParams, "UUID is required", params) //防止未登录用户获取隐藏客户端数据
-		}
+	if _, err := clients.GetClientByUUIDForUser(params.UUID, userUUID); err != nil {
+		return nil, rpc.MakeError(rpc.InvalidParams, "Node not found", params.UUID)
 	}
 
 	raw, _ := api.Records.Get(params.UUID)

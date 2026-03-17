@@ -7,7 +7,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/api"
-	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
 	records "github.com/komari-monitor/komari/database/records"
 	"github.com/komari-monitor/komari/database/tasks"
@@ -17,26 +16,9 @@ func GetRecordsByUUID(c *gin.Context) {
 	uuid := c.Query("uuid")
 	loadType := c.Query("load_type")
 
-	tenantID, isLogin, err := api.ResolveTenantScopeFromSession(c)
-	if err != nil {
-		api.RespondError(c, 500, "Failed to resolve tenant scope: "+err.Error())
+	userUUID, ok := api.RequireUserScopeFromSession(c)
+	if !ok {
 		return
-	}
-
-	// 仅在未登录时需要 Hidden 信息做过滤
-	hiddenMap := map[string]bool{}
-	if !isLogin {
-		var hiddenClients []models.Client
-		db := dbcore.GetDBInstance()
-		_ = db.Select("uuid").Where("hidden = ? AND tenant_id = ?", true, tenantID).Find(&hiddenClients).Error
-		for _, cli := range hiddenClients {
-			hiddenMap[cli.UUID] = true
-		}
-
-		if hiddenMap[uuid] {
-			api.RespondError(c, 400, "UUID is required") //防止未登录用户获取隐藏客户端数据
-			return
-		}
 	}
 
 	hours := c.Query("hours")
@@ -66,7 +48,9 @@ func GetRecordsByUUID(c *gin.Context) {
 		return
 	}
 
-	clientRecords, err := records.GetRecordsByClientAndTimeForTenant(tenantID, uuid, time.Now().Add(-time.Duration(hoursInt)*time.Hour), time.Now())
+	startTime := time.Now().Add(-time.Duration(hoursInt) * time.Hour)
+	endTime := time.Now()
+	clientRecords, err := records.GetRecordsByClientAndTimeForUser(userUUID, uuid, startTime, endTime)
 	if err != nil {
 		api.RespondError(c, 500, "Failed to fetch records: "+err.Error())
 		return
@@ -90,7 +74,7 @@ func GetRecordsByUUID(c *gin.Context) {
 
 	// 自动检测是否有GPU数据并附加到响应中
 	if loadType == "" || loadType == "all" || loadType == "gpu" {
-		gpuRecords, err := records.GetGPURecordsByClientAndTimeForTenant(tenantID, uuid, time.Now().Add(-time.Duration(hoursInt)*time.Hour), time.Now())
+		gpuRecords, err := records.GetGPURecordsByClientAndTimeForUser(userUUID, uuid, startTime, endTime)
 		if err == nil && len(gpuRecords) > 0 {
 			// 按设备索引分组数据，构建简化的设备结构
 			gpuDevices := make(map[string]interface{})
@@ -196,9 +180,8 @@ func GetPingRecords(c *gin.Context) {
 		return
 	}
 
-	tenantID, isLogin, err := api.ResolveTenantScopeFromSession(c)
-	if err != nil {
-		api.RespondError(c, 500, "Failed to resolve tenant scope: "+err.Error())
+	userUUID, ok := api.RequireUserScopeFromSession(c)
+	if !ok {
 		return
 	}
 
@@ -221,26 +204,9 @@ func GetPingRecords(c *gin.Context) {
 		Tasks     []gin.H           `json:"tasks,omitempty"`
 	}
 	var records []models.PingRecord
-	hiddenMap := map[string]bool{}
 	response := &Resp{
 		Count:   0,
 		Records: []RecordsResp{},
-	}
-
-	// 仅在未登录时需要 Hidden 信息做过滤
-	if !isLogin {
-		var hiddenClients []models.Client
-		db := dbcore.GetDBInstance()
-		_ = db.Select("uuid").Where("hidden = ? AND tenant_id = ?", true, tenantID).Find(&hiddenClients).Error
-		for _, cli := range hiddenClients {
-			hiddenMap[cli.UUID] = true
-		}
-		if uuid != "" {
-			if hiddenMap[uuid] {
-				api.RespondSuccess(c, response) // 对于尝试获取隐藏uuid一键哈气
-				return
-			}
-		}
 	}
 
 	hours := c.Query("hours")
@@ -260,15 +226,15 @@ func GetPingRecords(c *gin.Context) {
 	// 解析 task_id，支持同时传入 uuid 和 task_id
 	taskId := -1
 	if taskIdStr != "" {
-		taskId, err = strconv.Atoi(taskIdStr)
+		parsedTaskID, err := strconv.Atoi(taskIdStr)
 		if err != nil {
 			api.RespondError(c, 400, "Invalid task_id parameter")
 			return
 		}
+		taskId = parsedTaskID
 	}
 
-	// 查询记录，现在支持 uuid + task_id 组合查询
-	records, err = tasks.GetPingRecordsByTenant(tenantID, uuid, taskId, startTime, endTime)
+	records, err = tasks.GetPingRecordsByUser(userUUID, uuid, taskId, startTime, endTime)
 	if err != nil {
 		api.RespondError(c, 500, "Failed to fetch ping records: "+err.Error())
 		return
@@ -283,11 +249,6 @@ func GetPingRecords(c *gin.Context) {
 	})
 
 	for _, r := range records {
-		if r.Client != "" && !isLogin {
-			if hiddenMap[r.Client] {
-				continue // 跳过隐藏的节点
-			}
-		}
 		toTime := r.Time.ToTime()
 		rec := RecordsResp{
 			Time:  toTime.Format(time.RFC3339),
@@ -320,11 +281,6 @@ func GetPingRecords(c *gin.Context) {
 	if len(clientStats) > 0 {
 		response.BasicInfo = make([]ClientBasicInfo, 0, len(clientStats))
 		for client, stats := range clientStats {
-			if client != "" && !isLogin {
-				if hiddenMap[client] {
-					continue // 跳过隐藏的节点
-				}
-			}
 			loss := float64(0)
 			if stats.total > 0 {
 				loss = float64(stats.loss) / float64(stats.total) * 100
@@ -349,8 +305,7 @@ func GetPingRecords(c *gin.Context) {
 	// 2. uuid != "" && taskId != -1 - 返回该客户端在指定任务的信息
 	// 3. taskId != -1 && uuid == "" - 返回该任务的所有客户端统计（通过 BasicInfo）
 	if uuid != "" || taskId != -1 {
-		// 获取所有 pingTasks
-		pingTasks, err := tasks.GetAllPingTasksByTenant(tenantID)
+		pingTasks, err := tasks.GetAllPingTasksByUser(userUUID)
 		if err != nil {
 			api.RespondError(c, 500, "Failed to fetch ping tasks: "+err.Error())
 			return

@@ -12,7 +12,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/config"
-	"github.com/komari-monitor/komari/database"
 	"github.com/komari-monitor/komari/database/accounts"
 	"github.com/komari-monitor/komari/database/clients"
 	"github.com/komari-monitor/komari/utils/rpc"
@@ -25,13 +24,8 @@ import (
 // params: 方法参数
 func OnInternalRequest(ctx context.Context, group string, method string, params interface{}) *rpc.JsonRpcResponse {
 	meta := rpc.MetaFromContext(ctx)
-	tenantID := tenantIDFromRPCMeta(meta)
-
-	// 检查私有站点
-	PrivateSite, _ := config.GetAsForTenant[bool](tenantID, config.PrivateSiteKey, false)
-
-	if PrivateSite && group == "guest" {
-		return rpc.ErrorResponse(nil, rpc.PermissionDenied, "Private site enabled, please login first", nil)
+	if group == "guest" {
+		return rpc.ErrorResponse(nil, rpc.PermissionDenied, "Login required", nil)
 	}
 
 	// 解析方法命名空间
@@ -74,6 +68,11 @@ func OnRpcRequest(c *gin.Context) {
 
 	// GET -> WebSocket
 	if c.Request.Method == http.MethodGet {
+		permissionGroup := detectPermissionGroup(c)
+		if permissionGroup == "guest" {
+			c.JSON(http.StatusUnauthorized, rpc.ErrorResponse(nil, rpc.PermissionDenied, "Login required", nil))
+			return
+		}
 		_conn, err := ws.UpgradeRequest(c, func(r *http.Request) bool {
 			if AllowCors {
 				return true
@@ -85,7 +84,6 @@ func OnRpcRequest(c *gin.Context) {
 			c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "Failed to upgrade to WebSocket." + err.Error()})
 			return
 		}
-		permissionGroup := detectPermissionGroup(c)
 		meta := buildContextMeta(c, permissionGroup)
 		defer conn.Close()
 		for {
@@ -116,6 +114,11 @@ func OnRpcRequest(c *gin.Context) {
 		c.JSON(http.StatusMethodNotAllowed, gin.H{"error": "method not allowed"})
 		return
 	}
+	permissionGroup := detectPermissionGroup(c)
+	if permissionGroup == "guest" {
+		c.JSON(http.StatusUnauthorized, rpc.ErrorResponse(nil, rpc.PermissionDenied, "Login required", nil))
+		return
+	}
 	body, err := io.ReadAll(c.Request.Body)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, rpc.ErrorResponse(nil, rpc.ParseError, "read body error", err.Error()))
@@ -126,7 +129,6 @@ func OnRpcRequest(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, jerr.Response())
 		return
 	}
-	permissionGroup := detectPermissionGroup(c)
 	meta := buildContextMeta(c, permissionGroup)
 	// 批量
 	responses := make([]*rpc.JsonRpcResponse, 0, len(requests))
@@ -205,7 +207,6 @@ func buildContextMeta(c *gin.Context, permissionGroup string) *rpc.ContextMeta {
 		if client, err := clients.GetClientByToken(token); err == nil {
 			meta.ClientToken = token
 			meta.ClientUUID = client.UUID
-			meta.TenantID = client.TenantID
 		}
 	}
 	// 提取用户 (session cookie)
@@ -214,36 +215,10 @@ func buildContextMeta(c *gin.Context, permissionGroup string) *rpc.ContextMeta {
 			if user, userErr := accounts.GetUserByUUID(sessionRecord.UUID); userErr == nil {
 				meta.User = &user
 				meta.UserUUID = user.UUID
-				if currentTenant, _, tenantErr := database.ResolveAccessibleTenant(user.UUID, sessionRecord.CurrentTenantID); tenantErr == nil && currentTenant != nil {
-					meta.TenantID = currentTenant.ID
-					meta.TenantRole = currentTenant.Role
-					if currentTenant.ID != sessionRecord.CurrentTenantID {
-						_ = accounts.SetSessionCurrentTenant(session_token, currentTenant.ID)
-					}
-				}
 			}
 		} else if user, err := accounts.GetUserBySession(session_token); err == nil {
 			meta.User = &user
 			meta.UserUUID = user.UUID
-		}
-	}
-	if meta.TenantID == "" {
-		for _, candidate := range []string{
-			strings.TrimSpace(c.GetHeader("X-Komari-Tenant")),
-			strings.TrimSpace(c.Query("tenant")),
-		} {
-			if candidate == "" {
-				continue
-			}
-			if tenant, err := database.GetTenantByIdentifier(candidate); err == nil {
-				meta.TenantID = tenant.ID
-				break
-			}
-		}
-	}
-	if meta.TenantID == "" {
-		if tenantID, err := database.GetDefaultTenantID(); err == nil {
-			meta.TenantID = tenantID
 		}
 	}
 	meta.RemoteIP = c.ClientIP()

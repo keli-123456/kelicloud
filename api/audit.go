@@ -7,22 +7,23 @@ import (
 	"github.com/komari-monitor/komari/database/auditlog"
 )
 
-func AuditLogForTenant(tenantID, ip, userUUID, message, msgType string) {
-	auditlog.LogForTenant(strings.TrimSpace(tenantID), ip, userUUID, message, msgType)
+func AuditLogForUser(ip, userUUID, message, msgType string) {
+	trimmedUserUUID := strings.TrimSpace(userUUID)
+	auditlog.LogForUser(trimmedUserUUID, ip, trimmedUserUUID, message, msgType)
 }
 
-func AuditLogForCurrentTenant(c *gin.Context, userUUID, message, msgType string) {
+func AuditLogForCurrentUser(c *gin.Context, userUUID, message, msgType string) {
 	if c == nil {
-		AuditLogForTenant("", "", userUUID, message, msgType)
+		AuditLogForUser("", userUUID, message, msgType)
 		return
 	}
 
-	tenantID := ""
-	if value, ok := c.Get("tenant_id"); ok {
-		if text, ok := value.(string); ok {
-			tenantID = text
+	currentUserUUID := strings.TrimSpace(userUUID)
+	if value, ok := c.Get("uuid"); ok {
+		if text, ok := value.(string); ok && strings.TrimSpace(text) != "" {
+			currentUserUUID = strings.TrimSpace(text)
 		}
 	}
 
-	AuditLogForTenant(tenantID, c.ClientIP(), userUUID, message, msgType)
+	auditlog.LogForUser(currentUserUUID, c.ClientIP(), strings.TrimSpace(userUUID), message, msgType)
 }

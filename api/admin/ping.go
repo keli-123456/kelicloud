@@ -24,13 +24,13 @@ func AddPingTask(c *gin.Context) {
 		return
 	}
 
-	tenantID, ok := currentTenantID(c)
+	scope, ok := requireCurrentOwnerScope(c)
 	if !ok {
-		api.RespondError(c, http.StatusForbidden, "Tenant context is required")
 		return
 	}
 
-	if taskID, err := tasks.AddPingTaskForTenant(tenantID, req.Clients, req.Name, req.Target, req.TaskType, req.Interval); err != nil {
+	taskID, err := tasks.AddPingTaskForUser(scope.UserUUID, req.Clients, req.Name, req.Target, req.TaskType, req.Interval)
+	if err != nil {
 		api.RespondError(c, http.StatusInternalServerError, err.Error())
 	} else {
 		api.RespondSuccess(c, gin.H{"task_id": taskID})
@@ -47,13 +47,13 @@ func DeletePingTask(c *gin.Context) {
 		return
 	}
 
-	tenantID, ok := currentTenantID(c)
+	scope, ok := requireCurrentOwnerScope(c)
 	if !ok {
-		api.RespondError(c, http.StatusForbidden, "Tenant context is required")
 		return
 	}
 
-	if err := tasks.DeletePingTaskForTenant(tenantID, req.ID); err != nil {
+	err := tasks.DeletePingTaskForUser(scope.UserUUID, req.ID)
+	if err != nil {
 		api.RespondError(c, http.StatusInternalServerError, err.Error())
 	} else {
 		api.RespondSuccess(c, nil)
@@ -71,13 +71,13 @@ func EditPingTask(c *gin.Context) {
 		return
 	}
 
-	tenantID, ok := currentTenantID(c)
+	scope, ok := requireCurrentOwnerScope(c)
 	if !ok {
-		api.RespondError(c, http.StatusForbidden, "Tenant context is required")
 		return
 	}
 
-	if err := tasks.EditPingTaskForTenant(tenantID, req.Tasks); err != nil {
+	err := tasks.EditPingTaskForUser(scope.UserUUID, req.Tasks)
+	if err != nil {
 		api.RespondError(c, http.StatusInternalServerError, err.Error())
 	} else {
 		// for _, task := range req.Tasks {
@@ -88,17 +88,16 @@ func EditPingTask(c *gin.Context) {
 }
 
 func GetAllPingTasks(c *gin.Context) {
-	tenantID, ok := currentTenantID(c)
+	scope, ok := requireCurrentOwnerScope(c)
 	if !ok {
-		api.RespondError(c, http.StatusForbidden, "Tenant context is required")
 		return
 	}
 
-	tasks, err := tasks.GetAllPingTasksByTenant(tenantID)
+	pingTasks, err := tasks.GetAllPingTasksByUser(scope.UserUUID)
 	if err != nil {
 		api.RespondError(c, http.StatusInternalServerError, err.Error())
 		return
 	}
 
-	api.RespondSuccess(c, tasks)
+	api.RespondSuccess(c, pingTasks)
 }

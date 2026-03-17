@@ -1,9 +1,9 @@
 package tasks
 
 import (
+	"strings"
 	"time"
 
-	"github.com/komari-monitor/komari/database"
 	clientdb "github.com/komari-monitor/komari/database/clients"
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
@@ -11,22 +11,35 @@ import (
 	"gorm.io/gorm"
 )
 
-func AddPingTask(clients []string, name string, target, task_type string, interval int) (uint, error) {
-	tenantID, err := database.GetDefaultTenantID()
+func normalizePingTaskOwnerScope(userUUID, tenantID string) (string, string, error) {
+	userUUID = strings.TrimSpace(userUUID)
+	if userUUID != "" {
+		return userUUID, "", nil
+	}
+	return "", strings.TrimSpace(tenantID), nil
+}
+
+func pingTaskClientScopeByUserWithDB(db *gorm.DB, userUUID, clientUUID string) *gorm.DB {
+	scope := clientdb.ClientUUIDScopeByUserWithDB(db, userUUID)
+	if strings.TrimSpace(clientUUID) != "" {
+		scope = scope.Where("uuid = ?", strings.TrimSpace(clientUUID))
+	}
+	return scope
+}
+
+func AddPingTaskForUser(userUUID string, clientUUIDs []string, name string, target, taskType string, interval int) (uint, error) {
+	userUUID, _, err := normalizePingTaskOwnerScope(userUUID, "")
 	if err != nil {
 		return 0, err
 	}
-	return AddPingTaskForTenant(tenantID, clients, name, target, task_type, interval)
-}
 
-func AddPingTaskForTenant(tenantID string, clientUUIDs []string, name string, target, taskType string, interval int) (uint, error) {
-	normalizedClients, err := clientdb.NormalizeClientUUIDsForTenant(tenantID, clientUUIDs)
+	normalizedClients, err := clientdb.NormalizeClientUUIDsForUser(userUUID, clientUUIDs)
 	if err != nil {
 		return 0, err
 	}
 	db := dbcore.GetDBInstance()
 	task := models.PingTask{
-		TenantID: tenantID,
+		UserID:   userUUID,
 		Clients:  normalizedClients,
 		Name:     name,
 		Type:     taskType,
@@ -50,9 +63,18 @@ func DeletePingTask(id []uint) error {
 	return result.Error
 }
 
-func DeletePingTaskForTenant(tenantID string, id []uint) error {
+func DeletePingTaskForUser(userUUID string, id []uint) error {
+	userUUID, _, err := normalizePingTaskOwnerScope(userUUID, "")
+	if err != nil {
+		return err
+	}
+
 	db := dbcore.GetDBInstance()
-	result := db.Where("tenant_id = ? AND id IN ?", tenantID, id).Delete(&models.PingTask{})
+	result := db.Where(
+		"user_id = ? AND id IN ?",
+		userUUID,
+		id,
+	).Delete(&models.PingTask{})
 	if result.RowsAffected == 0 {
 		return gorm.ErrRecordNotFound
 	}
@@ -72,16 +94,23 @@ func EditPingTask(tasks []*models.PingTask) error {
 	return nil
 }
 
-func EditPingTaskForTenant(tenantID string, pingTasks []*models.PingTask) error {
+func EditPingTaskForUser(userUUID string, pingTasks []*models.PingTask) error {
+	userUUID, _, err := normalizePingTaskOwnerScope(userUUID, "")
+	if err != nil {
+		return err
+	}
+
 	db := dbcore.GetDBInstance()
 	for _, task := range pingTasks {
-		normalizedClients, err := clientdb.NormalizeClientUUIDsForTenant(tenantID, task.Clients)
+		normalizedClients, err := clientdb.NormalizeClientUUIDsForUser(userUUID, task.Clients)
 		if err != nil {
 			return err
 		}
-		task.TenantID = tenantID
+		task.UserID = userUUID
 		task.Clients = normalizedClients
-		result := db.Model(&models.PingTask{}).Where("id = ? AND tenant_id = ?", task.Id, tenantID).Updates(task)
+		result := db.Model(&models.PingTask{}).
+			Where("id = ? AND user_id = ?", task.Id, userUUID).
+			Updates(task)
 		if result.Error != nil {
 			return result.Error
 		}
@@ -94,7 +123,14 @@ func EditPingTaskForTenant(tenantID string, pingTasks []*models.PingTask) error 
 }
 
 func GetAllPingTasks() ([]models.PingTask, error) {
-	db := dbcore.GetDBInstance()
+	return getAllPingTasksWithDB(dbcore.GetDBInstance())
+}
+
+func GetAllPingTasksByUser(userUUID string) ([]models.PingTask, error) {
+	return getAllPingTasksByUserWithDB(dbcore.GetDBInstance(), userUUID)
+}
+
+func getAllPingTasksWithDB(db *gorm.DB) ([]models.PingTask, error) {
 	var tasks []models.PingTask
 	if err := db.Find(&tasks).Error; err != nil {
 		return nil, err
@@ -102,13 +138,48 @@ func GetAllPingTasks() ([]models.PingTask, error) {
 	return tasks, nil
 }
 
-func GetAllPingTasksByTenant(tenantID string) ([]models.PingTask, error) {
-	db := dbcore.GetDBInstance()
+func getAllPingTasksByUserWithDB(db *gorm.DB, userUUID string) ([]models.PingTask, error) {
+	userUUID, _, err := normalizePingTaskOwnerScope(userUUID, "")
+	if err != nil {
+		return nil, err
+	}
+
 	var tasks []models.PingTask
-	if err := db.Where("tenant_id = ?", tenantID).Find(&tasks).Error; err != nil {
+	if err := db.Where("user_id = ?", userUUID).Find(&tasks).Error; err != nil {
 		return nil, err
 	}
 	return tasks, nil
+}
+
+func getLegacyPingTasksByClientScopeWithDB(db *gorm.DB, clientScope *gorm.DB) ([]models.PingTask, error) {
+	var clientUUIDs []string
+	if err := clientScope.Pluck("uuid", &clientUUIDs).Error; err != nil {
+		return nil, err
+	}
+	if len(clientUUIDs) == 0 {
+		return []models.PingTask{}, nil
+	}
+
+	allowed := make(map[string]struct{}, len(clientUUIDs))
+	for _, uuid := range clientUUIDs {
+		allowed[uuid] = struct{}{}
+	}
+
+	var tasks []models.PingTask
+	if err := db.Where("COALESCE(user_id, '') = ''").Find(&tasks).Error; err != nil {
+		return nil, err
+	}
+
+	filtered := make([]models.PingTask, 0, len(tasks))
+	for _, task := range tasks {
+		for _, clientUUID := range task.Clients {
+			if _, ok := allowed[clientUUID]; ok {
+				filtered = append(filtered, task)
+				break
+			}
+		}
+	}
+	return filtered, nil
 }
 
 func GetPingTasksByClient(uuid string) []models.PingTask {
@@ -149,9 +220,9 @@ func DeleteAllPingRecords() error {
 	return result.Error
 }
 
-func DeletePingRecordsByTenant(tenantID string) error {
+func DeletePingRecordsByUser(userUUID string) error {
 	db := dbcore.GetDBInstance()
-	clientScope := db.Model(&models.Client{}).Select("uuid").Where("tenant_id = ?", tenantID)
+	clientScope := clientdb.ClientUUIDScopeByUserWithDB(db, userUUID)
 	result := db.Where("client IN (?)", clientScope).Delete(&models.PingRecord{})
 	if result.RowsAffected == 0 {
 		return gorm.ErrRecordNotFound
@@ -169,7 +240,14 @@ func ReloadPingSchedule() error {
 }
 
 func GetPingRecords(uuid string, taskId int, start, end time.Time) ([]models.PingRecord, error) {
-	db := dbcore.GetDBInstance()
+	return getPingRecordsWithDB(dbcore.GetDBInstance(), uuid, taskId, start, end)
+}
+
+func GetPingRecordsByUser(userUUID, uuid string, taskId int, start, end time.Time) ([]models.PingRecord, error) {
+	return getPingRecordsByUserWithDB(dbcore.GetDBInstance(), userUUID, uuid, taskId, start, end)
+}
+
+func getPingRecordsWithDB(db *gorm.DB, uuid string, taskId int, start, end time.Time) ([]models.PingRecord, error) {
 	var records []models.PingRecord
 	dbQuery := db.Model(&models.PingRecord{})
 	if uuid != "" {
@@ -184,13 +262,9 @@ func GetPingRecords(uuid string, taskId int, start, end time.Time) ([]models.Pin
 	return records, nil
 }
 
-func GetPingRecordsByTenant(tenantID, uuid string, taskId int, start, end time.Time) ([]models.PingRecord, error) {
-	db := dbcore.GetDBInstance()
+func getPingRecordsByUserWithDB(db *gorm.DB, userUUID, uuid string, taskId int, start, end time.Time) ([]models.PingRecord, error) {
 	var records []models.PingRecord
-	clientScope := db.Model(&models.Client{}).Select("uuid").Where("tenant_id = ?", tenantID)
-	if uuid != "" {
-		clientScope = clientScope.Where("uuid = ?", uuid)
-	}
+	clientScope := pingTaskClientScopeByUserWithDB(db, userUUID, uuid)
 
 	dbQuery := db.Model(&models.PingRecord{}).Where("client IN (?)", clientScope)
 	if taskId >= 0 {

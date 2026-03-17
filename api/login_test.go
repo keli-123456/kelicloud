@@ -15,6 +15,7 @@ import (
 func TestLogin(t *testing.T) {
 	// 设置测试模式
 	gin.SetMode(gin.TestMode)
+	configureAPITestDB()
 	accounts.CreateAccount("testuser", "correctpassword")
 	tests := []struct {
 		name           string
@@ -43,8 +44,8 @@ func TestLogin(t *testing.T) {
 			},
 			expectedStatus: http.StatusBadRequest,
 			expectedBody: map[string]interface{}{
-				"status": "error",
-				"error":  "Invalid request body",
+				"status":  "error",
+				"message": "Invalid request body: Username and password are required",
 			},
 		},
 		{
@@ -55,8 +56,8 @@ func TestLogin(t *testing.T) {
 			},
 			expectedStatus: http.StatusUnauthorized,
 			expectedBody: map[string]interface{}{
-				"status": "error",
-				"error":  "Invalid credentials",
+				"status":  "error",
+				"message": "Invalid credentials",
 			},
 		},
 	}
@@ -88,8 +89,12 @@ func TestLogin(t *testing.T) {
 
 			// 断言响应体
 			if tt.expectedStatus == http.StatusOK {
-				// 对于成功的情况，我们只检查响应结构，不检查具体的 session token
-				assert.Contains(t, response, "set-cookie")
+				assert.Equal(t, "success", response["status"])
+				data, ok := response["data"].(map[string]interface{})
+				assert.True(t, ok)
+				setCookie, ok := data["set-cookie"].(map[string]interface{})
+				assert.True(t, ok)
+				assert.NotEmpty(t, setCookie["session_token"])
 			} else {
 				assert.Equal(t, tt.expectedBody, response)
 			}
