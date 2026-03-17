@@ -221,6 +221,18 @@ CREATE TABLE offline_notifications (
 
 INSERT INTO offline_notifications (client, enable, grace_period, last_notified)
 VALUES ('legacy-client-1', 1, 300, NOW(3));
+
+CREATE TABLE logs (
+  uuid VARCHAR(36) NOT NULL,
+  ip VARCHAR(45) DEFAULT '',
+  message TEXT NOT NULL,
+  msg_type VARCHAR(20) NOT NULL,
+  time DATETIME(3) NOT NULL,
+  PRIMARY KEY (uuid)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+INSERT INTO logs (uuid, ip, message, msg_type, time)
+VALUES ('legacy-log-user', '127.0.0.1', 'legacy log row', 'info', NOW(3));
 SQL
 }
 
@@ -266,6 +278,14 @@ verify_legacy_database() {
 
   assert_eq "$(mysql_query "USE komari_legacy_verify; SELECT COUNT(*) FROM information_schema.table_constraints WHERE table_schema = DATABASE() AND table_name = 'offline_notifications' AND constraint_type = 'PRIMARY KEY';")" "1" "offline_notifications should regain a primary key"
   assert_eq "$(mysql_query "USE komari_legacy_verify; SELECT COUNT(*) FROM offline_notifications;")" "0" "orphaned offline_notifications rows should be cleaned during upgrade"
+  local log_columns
+  log_columns="$(mysql_query "USE komari_legacy_verify; SELECT GROUP_CONCAT(column_name ORDER BY ordinal_position SEPARATOR ',') FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'logs';")"
+  if [[ "${log_columns}" != *"id"* || "${log_columns}" != *"user_id"* ]]; then
+    printf 'assertion failed: legacy logs table should include id and user_id columns (got %q)\n' "${log_columns}" >&2
+    exit 1
+  fi
+  assert_eq "$(mysql_query "USE komari_legacy_verify; SELECT GROUP_CONCAT(column_name ORDER BY ordinal_position SEPARATOR ',') FROM information_schema.key_column_usage WHERE table_schema = DATABASE() AND table_name = 'logs' AND constraint_name = 'PRIMARY';")" "id" "legacy logs table should restore id as the primary key"
+  assert_eq "$(mysql_query "USE komari_legacy_verify; SELECT COUNT(*) FROM logs WHERE uuid = 'legacy-log-user' AND message = 'legacy log row';")" "1" "legacy logs rows should survive the primary key repair"
   assert_eq "$(mysql_query "USE komari_legacy_verify; SELECT COUNT(*) FROM users;")" "1" "legacy-db upgrade should still bootstrap one admin user"
 }
 

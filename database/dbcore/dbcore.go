@@ -373,6 +373,11 @@ func prepareMySQLSchemaCompatibility(db *gorm.DB) {
 		return
 	}
 
+	prepareMySQLOfflineNotificationCompatibility(db)
+	prepareMySQLLogSchemaCompatibility(db)
+}
+
+func prepareMySQLOfflineNotificationCompatibility(db *gorm.DB) {
 	migrator := db.Migrator()
 	if !migrator.HasTable(&models.OfflineNotification{}) {
 		return
@@ -430,6 +435,59 @@ func prepareMySQLSchemaCompatibility(db *gorm.DB) {
 		if err := db.Exec("ALTER TABLE `offline_notifications` ADD PRIMARY KEY (`client`)").Error; err != nil {
 			log.Printf("Failed to add MySQL offline notification primary key: %v", err)
 		}
+	}
+}
+
+func prepareMySQLLogSchemaCompatibility(db *gorm.DB) {
+	migrator := db.Migrator()
+	if !migrator.HasTable(&models.Log{}) {
+		return
+	}
+
+	var primaryKeyColumns string
+	if err := db.Raw(
+		`SELECT COALESCE(GROUP_CONCAT(kcu.column_name ORDER BY kcu.ordinal_position SEPARATOR ','), '')
+		FROM information_schema.table_constraints tc
+		JOIN information_schema.key_column_usage kcu
+		  ON tc.constraint_name = kcu.constraint_name
+		 AND tc.table_schema = kcu.table_schema
+		 AND tc.table_name = kcu.table_name
+		WHERE tc.table_schema = DATABASE() AND tc.table_name = ? AND tc.constraint_type = 'PRIMARY KEY'`,
+		"logs",
+	).Scan(&primaryKeyColumns).Error; err != nil {
+		log.Printf("Failed to inspect MySQL log primary key: %v", err)
+		return
+	}
+
+	primaryKeyColumns = strings.TrimSpace(primaryKeyColumns)
+	if primaryKeyColumns == "id" {
+		return
+	}
+
+	if primaryKeyColumns != "" {
+		if err := db.Exec("ALTER TABLE `logs` DROP PRIMARY KEY").Error; err != nil {
+			log.Printf("Failed to drop legacy MySQL log primary key (%s): %v", primaryKeyColumns, err)
+			return
+		}
+	}
+
+	if !migrator.HasColumn(&models.Log{}, "id") {
+		if err := db.Exec("ALTER TABLE `logs` ADD COLUMN `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY FIRST").Error; err != nil {
+			log.Printf("Failed to add MySQL log id column: %v", err)
+		}
+		return
+	}
+
+	if err := db.Exec("ALTER TABLE `logs` MODIFY COLUMN `id` BIGINT UNSIGNED NOT NULL").Error; err != nil {
+		log.Printf("Failed to normalize MySQL log id column before primary key restore: %v", err)
+		return
+	}
+	if err := db.Exec("ALTER TABLE `logs` ADD PRIMARY KEY (`id`)").Error; err != nil {
+		log.Printf("Failed to add MySQL log primary key on id: %v", err)
+		return
+	}
+	if err := db.Exec("ALTER TABLE `logs` MODIFY COLUMN `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT").Error; err != nil {
+		log.Printf("Failed to restore MySQL log id auto increment: %v", err)
 	}
 }
 
