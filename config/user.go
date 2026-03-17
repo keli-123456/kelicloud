@@ -264,7 +264,10 @@ func FindUserUUIDByConfigValue(key string, value any) (string, error) {
 	}
 
 	var matches []UserConfigItem
-	if err := db.Where("key = ? AND value = ?", key, string(bytes)).Limit(2).Find(&matches).Error; err != nil {
+	if err := db.Where(clause.And(
+		clause.Eq{Column: clause.Column{Name: "key"}, Value: key},
+		clause.Eq{Column: clause.Column{Name: "value"}, Value: string(bytes)},
+	)).Limit(2).Find(&matches).Error; err != nil {
 		return "", err
 	}
 	if len(matches) == 0 {
