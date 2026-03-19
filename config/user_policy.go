@@ -15,17 +15,18 @@ const (
 )
 
 const (
-	UserFeatureClients       = "clients"
-	UserFeatureRecords       = "records"
-	UserFeatureTasks         = "tasks"
-	UserFeaturePing          = "ping"
-	UserFeatureNotifications = "notifications"
-	UserFeatureCloud         = "cloud"
-	UserFeatureClipboard     = "clipboard"
-	UserFeatureLogs          = "logs"
+	UserFeatureClients        = "clients"
+	UserFeatureRecords        = "records"
+	UserFeatureTasks          = "tasks"
+	UserFeaturePing           = "ping"
+	UserFeatureNotifications  = "notifications"
+	UserFeatureCloud          = "cloud"
+	UserFeatureClipboard      = "clipboard"
+	UserFeatureLogs           = "logs"
+	UserFeatureCNConnectivity = "cn_connectivity"
 )
 
-var userFeatureSet = map[string]struct{}{
+var userFeatureDefaultAllowSet = map[string]struct{}{
 	UserFeatureClients:       {},
 	UserFeatureRecords:       {},
 	UserFeatureTasks:         {},
@@ -34,6 +35,22 @@ var userFeatureSet = map[string]struct{}{
 	UserFeatureCloud:         {},
 	UserFeatureClipboard:     {},
 	UserFeatureLogs:          {},
+}
+
+var userFeatureExplicitGrantSet = map[string]struct{}{
+	UserFeatureCNConnectivity: {},
+}
+
+var userFeatureSet = map[string]struct{}{
+	UserFeatureClients:        {},
+	UserFeatureRecords:        {},
+	UserFeatureTasks:          {},
+	UserFeaturePing:           {},
+	UserFeatureNotifications:  {},
+	UserFeatureCloud:          {},
+	UserFeatureClipboard:      {},
+	UserFeatureLogs:           {},
+	UserFeatureCNConnectivity: {},
 }
 
 type UserPolicy struct {
@@ -52,6 +69,11 @@ func UserAvailableFeatures() []string {
 
 func IsSupportedUserFeature(feature string) bool {
 	_, ok := userFeatureSet[strings.ToLower(strings.TrimSpace(feature))]
+	return ok
+}
+
+func IsExplicitGrantUserFeature(feature string) bool {
+	_, ok := userFeatureExplicitGrantSet[strings.ToLower(strings.TrimSpace(feature))]
 	return ok
 }
 
@@ -163,6 +185,9 @@ func IsUserFeatureAllowed(userUUID, feature string) (bool, error) {
 		return false, err
 	}
 	if len(policy.AllowedFeatures) == 0 {
+		if IsExplicitGrantUserFeature(value) {
+			return false, nil
+		}
 		return true, nil
 	}
 	for _, allowed := range policy.AllowedFeatures {

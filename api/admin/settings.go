@@ -44,8 +44,25 @@ var systemSettingKeys = map[string]struct{}{
 	config.PingRecordPreserveTimeKey:     {},
 }
 
+var readableSystemSettingKeys = map[string]struct{}{
+	config.CNConnectivityEnabledKey:  {},
+	config.CNConnectivityTargetKey:   {},
+	config.CNConnectivityIntervalKey: {},
+}
+
+var delegatedSystemSettingFeatures = map[string]string{
+	config.CNConnectivityEnabledKey:  config.UserFeatureCNConnectivity,
+	config.CNConnectivityTargetKey:   config.UserFeatureCNConnectivity,
+	config.CNConnectivityIntervalKey: config.UserFeatureCNConnectivity,
+}
+
 func isSystemSettingKey(key string) bool {
 	_, ok := systemSettingKeys[key]
+	return ok
+}
+
+func isReadableSystemSettingKey(key string) bool {
+	_, ok := readableSystemSettingKeys[key]
 	return ok
 }
 
@@ -57,6 +74,27 @@ func filterSystemSettings(cfg map[string]any) map[string]any {
 		}
 	}
 	return result
+}
+
+func canEditSystemSettingKey(c *gin.Context, key string) (bool, error) {
+	allowed, err := isPlatformAdmin(c)
+	if err != nil {
+		return false, err
+	}
+	if allowed {
+		return true, nil
+	}
+
+	feature, ok := delegatedSystemSettingFeatures[key]
+	if !ok {
+		return false, nil
+	}
+
+	userUUID, ok := currentUserUUID(c)
+	if !ok {
+		return false, nil
+	}
+	return config.IsUserFeatureAllowed(userUUID, feature)
 }
 
 func splitEditableSettings(cfg map[string]any) (map[string]any, map[string]any, []string) {
@@ -183,7 +221,9 @@ func GetSettings(c *gin.Context) {
 	}
 	if !allowed {
 		for key := range systemSettingKeys {
-			delete(cst, key)
+			if !isReadableSystemSettingKey(key) {
+				delete(cst, key)
+			}
 		}
 	}
 	api.RespondSuccess(c, cst)
@@ -212,22 +252,26 @@ func EditSettings(c *gin.Context) {
 	updatedSystemKeys := make([]string, 0)
 	ignoredSystemKeys := make([]string, 0)
 	if len(systemValues) > 0 {
-		allowed, err := isPlatformAdmin(c)
-		if err != nil {
-			api.RespondError(c, 500, "Failed to resolve platform admin permissions: "+err.Error())
-			return
+		editableSystemValues := make(map[string]any)
+		for key, value := range systemValues {
+			allowed, err := canEditSystemSettingKey(c, key)
+			if err != nil {
+				api.RespondError(c, 500, "Failed to resolve system setting permissions: "+err.Error())
+				return
+			}
+			if !allowed {
+				ignoredSystemKeys = append(ignoredSystemKeys, key)
+				continue
+			}
+			editableSystemValues[key] = value
 		}
-		if allowed {
-			if err := config.SetMany(systemValues); err != nil {
+		if len(editableSystemValues) > 0 {
+			if err := config.SetMany(editableSystemValues); err != nil {
 				api.RespondError(c, 500, "Failed to update system settings: "+err.Error())
 				return
 			}
-			for key := range systemValues {
+			for key := range editableSystemValues {
 				updatedSystemKeys = append(updatedSystemKeys, key)
-			}
-		} else {
-			for key := range systemValues {
-				ignoredSystemKeys = append(ignoredSystemKeys, key)
 			}
 		}
 	}

@@ -144,7 +144,21 @@ func TestUserPolicyDefaultsAndPersistence(t *testing.T) {
 		t.Fatalf("expected unlimited quota by default, got %d", policy.ServerQuota)
 	}
 	if len(policy.AllowedFeatures) != 0 {
-		t.Fatalf("expected default features to be unrestricted, got %+v", policy.AllowedFeatures)
+		t.Fatalf("expected default features to remain implicit, got %+v", policy.AllowedFeatures)
+	}
+	allowed, err := IsUserFeatureAllowed("user-a", UserFeatureClients)
+	if err != nil {
+		t.Fatalf("failed to check default client feature: %v", err)
+	}
+	if !allowed {
+		t.Fatal("expected standard features to remain allowed by default")
+	}
+	allowed, err = IsUserFeatureAllowed("user-a", UserFeatureCNConnectivity)
+	if err != nil {
+		t.Fatalf("failed to check delegated cn connectivity feature: %v", err)
+	}
+	if allowed {
+		t.Fatal("expected delegated cn connectivity feature to be disabled by default")
 	}
 
 	quota := 3
@@ -164,7 +178,7 @@ func TestUserPolicyDefaultsAndPersistence(t *testing.T) {
 		t.Fatalf("unexpected normalized features: %+v", policy.AllowedFeatures)
 	}
 
-	allowed, err := IsUserFeatureAllowed("user-a", UserFeatureCloud)
+	allowed, err = IsUserFeatureAllowed("user-a", UserFeatureCloud)
 	if err != nil {
 		t.Fatalf("failed to check allowed feature: %v", err)
 	}
