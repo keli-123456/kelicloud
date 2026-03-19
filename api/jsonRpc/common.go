@@ -12,6 +12,7 @@ import (
 	"github.com/komari-monitor/komari/common"
 	"github.com/komari-monitor/komari/config"
 	"github.com/komari-monitor/komari/database"
+	"github.com/komari-monitor/komari/database/accounts"
 	"github.com/komari-monitor/komari/database/clients"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/database/tasks"
@@ -177,6 +178,36 @@ func requireRPCUserUUID(meta *rpc.ContextMeta) (string, *rpc.JsonRpcError) {
 	return userUUID, nil
 }
 
+func isRPCPlatformAdmin(meta *rpc.ContextMeta) bool {
+	if meta == nil || meta.User == nil {
+		return false
+	}
+	return accounts.IsUserRoleAtLeast(meta.User.Role, accounts.RoleAdmin)
+}
+
+func getScopedRPCClientBasicInfo(meta *rpc.ContextMeta, userUUID string) ([]models.Client, error) {
+	if isRPCPlatformAdmin(meta) {
+		return clients.GetAllClientBasicInfo()
+	}
+	return clients.GetAllClientBasicInfoByUser(userUUID)
+}
+
+func ensureRPCClientAccess(meta *rpc.ContextMeta, userUUID, clientUUID string) error {
+	if isRPCPlatformAdmin(meta) {
+		_, err := clients.GetClientByUUID(clientUUID)
+		return err
+	}
+	_, err := clients.GetClientByUUIDForUser(clientUUID, userUUID)
+	return err
+}
+
+func getScopedRPCPingTasks(meta *rpc.ContextMeta, userUUID string) ([]models.PingTask, error) {
+	if isRPCPlatformAdmin(meta) {
+		return tasks.GetAllPingTasks()
+	}
+	return tasks.GetAllPingTasksByUser(userUUID)
+}
+
 func init() {
 	RegisterWithGroupAndMeta("getNodes", "common",
 		func(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
@@ -238,7 +269,7 @@ func getNodes(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcEr
 	if rpcErr != nil {
 		return nil, rpcErr
 	}
-	cinfo, err := clients.GetAllClientBasicInfoByUser(userUUID)
+	cinfo, err := getScopedRPCClientBasicInfo(meta, userUUID)
 	if err != nil {
 		return nil, rpc.MakeError(rpc.InternalError, "Failed to get client info", cinfo)
 	}
@@ -313,7 +344,7 @@ func getNodesLatestStatus(ctx context.Context, req *rpc.JsonRpcRequest) (any, *r
 		onlineSet[uuid] = true
 	}
 
-	cinfo, err := clients.GetAllClientBasicInfoByUser(userUUID)
+	cinfo, err := getScopedRPCClientBasicInfo(meta, userUUID)
 	if err != nil {
 		return nil, rpc.MakeError(rpc.InternalError, "Failed to get client info", err.Error())
 	}
@@ -372,7 +403,7 @@ func getNodesLatestStatus(ctx context.Context, req *rpc.JsonRpcRequest) (any, *r
 	respMap := make(map[string]recordLike, len(latest))
 
 	// 预取当前 owner scope 下的 ping 任务
-	pingTasks, _ := tasks.GetAllPingTasksByUser(userUUID)
+	pingTasks, _ := getScopedRPCPingTasks(meta, userUUID)
 
 	appendOne := func(uuid string, rep *common.Report) {
 		if rep == nil {
@@ -495,7 +526,7 @@ func getNodeRecentStatus(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rp
 	if rpcErr != nil {
 		return nil, rpcErr
 	}
-	if _, err := clients.GetClientByUUIDForUser(params.UUID, userUUID); err != nil {
+	if err := ensureRPCClientAccess(meta, userUUID, params.UUID); err != nil {
 		return nil, rpc.MakeError(rpc.InvalidParams, "Node not found", params.UUID)
 	}
 
