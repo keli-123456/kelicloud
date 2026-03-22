@@ -649,6 +649,15 @@ func GetDBInstance() *gorm.DB {
 		if err != nil {
 			log.Printf("Failed to create Task and TaskResult table, it may already exist: %v", err)
 		}
+		err = instance.AutoMigrate(
+			&models.FailoverTask{},
+			&models.FailoverPlan{},
+			&models.FailoverExecution{},
+			&models.FailoverExecutionStep{},
+		)
+		if err != nil {
+			log.Printf("Failed to create failover tables, it may already exist: %v", err)
+		}
 
 	})
 

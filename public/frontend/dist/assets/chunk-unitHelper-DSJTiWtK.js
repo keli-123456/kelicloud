@@ -1,0 +1,1 @@
+function r(i){const n=["B","KB","MB","GB","TB","PB"];let t=i,e=0;for(;t>=1024&&e<n.length-1;)t/=1024,e++;return e===0?`${Math.round(t)} ${n[e]}`:e>=2&&i>=1024**3?`${t.toFixed(2)} ${n[e]}`:t>99.99?`${t.toFixed(1)} ${n[e]}`:`${t.toFixed(2)} ${n[e]}`}export{r as f};

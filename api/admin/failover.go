@@ -1,0 +1,1030 @@
+package admin
+
+import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/gin-gonic/gin"
+	"github.com/komari-monitor/komari/api"
+	"github.com/komari-monitor/komari/common"
+	clientdb "github.com/komari-monitor/komari/database/clients"
+	clipboarddb "github.com/komari-monitor/komari/database/clipboard"
+	failoverdb "github.com/komari-monitor/komari/database/failover"
+	"github.com/komari-monitor/komari/database/models"
+	failoversvc "github.com/komari-monitor/komari/utils/failover"
+	"github.com/komari-monitor/komari/ws"
+	"gorm.io/gorm"
+)
+
+type failoverPlanRequest struct {
+	Name                string          `json:"name"`
+	Priority            int             `json:"priority"`
+	Enabled             *bool           `json:"enabled"`
+	Provider            string          `json:"provider" binding:"required"`
+	ProviderEntryID     string          `json:"provider_entry_id" binding:"required"`
+	ActionType          string          `json:"action_type" binding:"required"`
+	Payload             json.RawMessage `json:"payload"`
+	AutoConnectGroup    string          `json:"auto_connect_group"`
+	ScriptClipboardID   *int            `json:"script_clipboard_id"`
+	ScriptTimeoutSec    int             `json:"script_timeout_sec"`
+	WaitAgentTimeoutSec int             `json:"wait_agent_timeout_sec"`
+}
+
+type failoverTaskRequest struct {
+	Name               string                `json:"name" binding:"required"`
+	Enabled            *bool                 `json:"enabled"`
+	WatchClientUUID    string                `json:"watch_client_uuid" binding:"required"`
+	FailureThreshold   int                   `json:"failure_threshold"`
+	StaleAfterSeconds  int                   `json:"stale_after_seconds"`
+	CooldownSeconds    int                   `json:"cooldown_seconds"`
+	DNSProvider        string                `json:"dns_provider" binding:"required"`
+	DNSEntryID         string                `json:"dns_entry_id" binding:"required"`
+	DNSPayload         json.RawMessage       `json:"dns_payload"`
+	DeleteStrategy     string                `json:"delete_strategy"`
+	DeleteDelaySeconds int                   `json:"delete_delay_seconds"`
+	Plans              []failoverPlanRequest `json:"plans" binding:"required"`
+}
+
+type failoverToggleRequest struct {
+	Enabled bool `json:"enabled"`
+}
+
+type failoverPlanView struct {
+	ID                  uint             `json:"id"`
+	TaskID              uint             `json:"task_id"`
+	Name                string           `json:"name"`
+	Priority            int              `json:"priority"`
+	Enabled             bool             `json:"enabled"`
+	Provider            string           `json:"provider"`
+	ProviderEntryID     string           `json:"provider_entry_id"`
+	ActionType          string           `json:"action_type"`
+	Payload             json.RawMessage  `json:"payload"`
+	AutoConnectGroup    string           `json:"auto_connect_group"`
+	ScriptClipboardID   *int             `json:"script_clipboard_id,omitempty"`
+	ScriptTimeoutSec    int              `json:"script_timeout_sec"`
+	WaitAgentTimeoutSec int              `json:"wait_agent_timeout_sec"`
+	CreatedAt           models.LocalTime `json:"created_at"`
+	UpdatedAt           models.LocalTime `json:"updated_at"`
+}
+
+type failoverTaskView struct {
+	ID                 uint                          `json:"id"`
+	Name               string                        `json:"name"`
+	Enabled            bool                          `json:"enabled"`
+	WatchClientUUID    string                        `json:"watch_client_uuid"`
+	TriggerSource      string                        `json:"trigger_source"`
+	FailureThreshold   int                           `json:"failure_threshold"`
+	StaleAfterSeconds  int                           `json:"stale_after_seconds"`
+	CooldownSeconds    int                           `json:"cooldown_seconds"`
+	DNSProvider        string                        `json:"dns_provider"`
+	DNSEntryID         string                        `json:"dns_entry_id"`
+	DNSPayload         json.RawMessage               `json:"dns_payload"`
+	DeleteStrategy     string                        `json:"delete_strategy"`
+	DeleteDelaySeconds int                           `json:"delete_delay_seconds"`
+	LastExecutionID    *uint                         `json:"last_execution_id,omitempty"`
+	LastStatus         string                        `json:"last_status"`
+	LastMessage        string                        `json:"last_message"`
+	LastTriggeredAt    *models.LocalTime             `json:"last_triggered_at"`
+	LastSucceededAt    *models.LocalTime             `json:"last_succeeded_at"`
+	LastFailedAt       *models.LocalTime             `json:"last_failed_at"`
+	Probe              failoverProbeView             `json:"probe"`
+	CooldownRemaining  int64                         `json:"cooldown_remaining_seconds"`
+	NextEligibleAt     *models.LocalTime             `json:"next_eligible_at"`
+	LatestExecution    *failoverExecutionSummaryView `json:"latest_execution,omitempty"`
+	HasActiveExecution bool                          `json:"has_active_execution"`
+	Plans              []failoverPlanView            `json:"plans"`
+	CreatedAt          models.LocalTime              `json:"created_at"`
+	UpdatedAt          models.LocalTime              `json:"updated_at"`
+}
+
+type failoverProbeView struct {
+	Status              string            `json:"status"`
+	Target              string            `json:"target,omitempty"`
+	Latency             int64             `json:"latency,omitempty"`
+	Message             string            `json:"message,omitempty"`
+	CheckedAt           *models.LocalTime `json:"checked_at"`
+	ReportUpdatedAt     *models.LocalTime `json:"report_updated_at"`
+	ConsecutiveFailures int               `json:"consecutive_failures"`
+	Stale               bool              `json:"stale"`
+}
+
+type failoverExecutionSummaryView struct {
+	ID                    uint              `json:"id"`
+	Status                string            `json:"status"`
+	TriggerReason         string            `json:"trigger_reason"`
+	SelectedPlanID        *uint             `json:"selected_plan_id,omitempty"`
+	ScriptNameSnapshot    string            `json:"script_name_snapshot"`
+	ScriptStatus          string            `json:"script_status"`
+	ScriptExitCode        *int              `json:"script_exit_code,omitempty"`
+	ScriptOutputTruncated bool              `json:"script_output_truncated"`
+	DNSStatus             string            `json:"dns_status"`
+	CleanupStatus         string            `json:"cleanup_status"`
+	ErrorMessage          string            `json:"error_message"`
+	StartedAt             models.LocalTime  `json:"started_at"`
+	FinishedAt            *models.LocalTime `json:"finished_at"`
+}
+
+type failoverExecutionStepView struct {
+	ID          uint              `json:"id"`
+	ExecutionID uint              `json:"execution_id"`
+	Sort        int               `json:"sort"`
+	StepKey     string            `json:"step_key"`
+	StepLabel   string            `json:"step_label"`
+	Status      string            `json:"status"`
+	Message     string            `json:"message"`
+	Detail      json.RawMessage   `json:"detail"`
+	StartedAt   *models.LocalTime `json:"started_at"`
+	FinishedAt  *models.LocalTime `json:"finished_at"`
+	CreatedAt   models.LocalTime  `json:"created_at"`
+	UpdatedAt   models.LocalTime  `json:"updated_at"`
+}
+
+type failoverExecutionView struct {
+	ID                    uint                        `json:"id"`
+	TaskID                uint                        `json:"task_id"`
+	Status                string                      `json:"status"`
+	TriggerReason         string                      `json:"trigger_reason"`
+	WatchClientUUID       string                      `json:"watch_client_uuid"`
+	TriggerSnapshot       json.RawMessage             `json:"trigger_snapshot"`
+	SelectedPlanID        *uint                       `json:"selected_plan_id,omitempty"`
+	AttemptedPlans        json.RawMessage             `json:"attempted_plans"`
+	OldClientUUID         string                      `json:"old_client_uuid"`
+	OldInstanceRef        json.RawMessage             `json:"old_instance_ref"`
+	OldAddresses          json.RawMessage             `json:"old_addresses"`
+	NewClientUUID         string                      `json:"new_client_uuid"`
+	NewInstanceRef        json.RawMessage             `json:"new_instance_ref"`
+	NewAddresses          json.RawMessage             `json:"new_addresses"`
+	ScriptClipboardID     *int                        `json:"script_clipboard_id,omitempty"`
+	ScriptNameSnapshot    string                      `json:"script_name_snapshot"`
+	ScriptTaskID          string                      `json:"script_task_id"`
+	ScriptStatus          string                      `json:"script_status"`
+	ScriptExitCode        *int                        `json:"script_exit_code,omitempty"`
+	ScriptFinishedAt      *models.LocalTime           `json:"script_finished_at"`
+	ScriptOutput          string                      `json:"script_output"`
+	ScriptOutputTruncated bool                        `json:"script_output_truncated"`
+	DNSProvider           string                      `json:"dns_provider"`
+	DNSStatus             string                      `json:"dns_status"`
+	DNSResult             json.RawMessage             `json:"dns_result"`
+	CleanupStatus         string                      `json:"cleanup_status"`
+	CleanupResult         json.RawMessage             `json:"cleanup_result"`
+	ErrorMessage          string                      `json:"error_message"`
+	StartedAt             models.LocalTime            `json:"started_at"`
+	FinishedAt            *models.LocalTime           `json:"finished_at"`
+	Steps                 []failoverExecutionStepView `json:"steps,omitempty"`
+	CreatedAt             models.LocalTime            `json:"created_at"`
+	UpdatedAt             models.LocalTime            `json:"updated_at"`
+}
+
+func parseFailoverTaskID(c *gin.Context, param string) (uint, bool) {
+	rawValue := strings.TrimSpace(c.Param(param))
+	if rawValue == "" {
+		api.RespondError(c, http.StatusBadRequest, "Task ID is required")
+		return 0, false
+	}
+
+	parsed, err := strconv.ParseUint(rawValue, 10, 64)
+	if err != nil {
+		api.RespondError(c, http.StatusBadRequest, "Invalid task ID")
+		return 0, false
+	}
+	return uint(parsed), true
+}
+
+func parseFailoverExecutionID(c *gin.Context) (uint, bool) {
+	rawValue := strings.TrimSpace(c.Param("id"))
+	if rawValue == "" {
+		api.RespondError(c, http.StatusBadRequest, "Execution ID is required")
+		return 0, false
+	}
+
+	parsed, err := strconv.ParseUint(rawValue, 10, 64)
+	if err != nil {
+		api.RespondError(c, http.StatusBadRequest, "Invalid execution ID")
+		return 0, false
+	}
+	return uint(parsed), true
+}
+
+func normalizeJSONPayload(raw json.RawMessage, emptyValue string) (string, error) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 {
+		return emptyValue, nil
+	}
+
+	var compact bytes.Buffer
+	if err := json.Compact(&compact, trimmed); err != nil {
+		return "", err
+	}
+	return compact.String(), nil
+}
+
+func rawJSONOrNull(raw string) json.RawMessage {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return json.RawMessage("null")
+	}
+	if json.Valid([]byte(trimmed)) {
+		return json.RawMessage(trimmed)
+	}
+	encoded, err := json.Marshal(trimmed)
+	if err != nil {
+		return json.RawMessage("null")
+	}
+	return json.RawMessage(encoded)
+}
+
+func buildFailoverPlanView(plan models.FailoverPlan) failoverPlanView {
+	return failoverPlanView{
+		ID:                  plan.ID,
+		TaskID:              plan.TaskID,
+		Name:                plan.Name,
+		Priority:            plan.Priority,
+		Enabled:             plan.Enabled,
+		Provider:            plan.Provider,
+		ProviderEntryID:     plan.ProviderEntryID,
+		ActionType:          plan.ActionType,
+		Payload:             rawJSONOrNull(plan.Payload),
+		AutoConnectGroup:    plan.AutoConnectGroup,
+		ScriptClipboardID:   plan.ScriptClipboardID,
+		ScriptTimeoutSec:    plan.ScriptTimeoutSec,
+		WaitAgentTimeoutSec: plan.WaitAgentTimeoutSec,
+		CreatedAt:           plan.CreatedAt,
+		UpdatedAt:           plan.UpdatedAt,
+	}
+}
+
+func buildFailoverExecutionSummaryView(execution *models.FailoverExecution) *failoverExecutionSummaryView {
+	if execution == nil {
+		return nil
+	}
+	return &failoverExecutionSummaryView{
+		ID:                    execution.ID,
+		Status:                execution.Status,
+		TriggerReason:         execution.TriggerReason,
+		SelectedPlanID:        execution.SelectedPlanID,
+		ScriptNameSnapshot:    execution.ScriptNameSnapshot,
+		ScriptStatus:          execution.ScriptStatus,
+		ScriptExitCode:        execution.ScriptExitCode,
+		ScriptOutputTruncated: execution.ScriptOutputTruncated,
+		DNSStatus:             execution.DNSStatus,
+		CleanupStatus:         execution.CleanupStatus,
+		ErrorMessage:          execution.ErrorMessage,
+		StartedAt:             execution.StartedAt,
+		FinishedAt:            execution.FinishedAt,
+	}
+}
+
+func buildFailoverProbeView(task *models.FailoverTask, report *common.Report, now time.Time) failoverProbeView {
+	view := failoverProbeView{
+		Status: "unavailable",
+		Stale:  true,
+	}
+	if task == nil || report == nil || report.CNConnectivity == nil {
+		return view
+	}
+
+	view.Status = strings.TrimSpace(report.CNConnectivity.Status)
+	view.Target = strings.TrimSpace(report.CNConnectivity.Target)
+	view.Latency = report.CNConnectivity.Latency
+	view.Message = strings.TrimSpace(report.CNConnectivity.Message)
+	view.ConsecutiveFailures = report.CNConnectivity.ConsecutiveFailures
+
+	if !report.CNConnectivity.CheckedAt.IsZero() {
+		checkedAt := models.FromTime(report.CNConnectivity.CheckedAt)
+		view.CheckedAt = &checkedAt
+	}
+	if !report.UpdatedAt.IsZero() {
+		reportUpdatedAt := models.FromTime(report.UpdatedAt)
+		view.ReportUpdatedAt = &reportUpdatedAt
+	}
+
+	reportTime := report.UpdatedAt
+	if report.CNConnectivity.CheckedAt.After(reportTime) {
+		reportTime = report.CNConnectivity.CheckedAt
+	}
+	view.Stale = reportTime.IsZero() || now.Sub(reportTime) > time.Duration(task.StaleAfterSeconds)*time.Second
+	if view.Status == "" {
+		view.Status = "unknown"
+	}
+	return view
+}
+
+func isFailoverExecutionActive(status string) bool {
+	switch strings.TrimSpace(status) {
+	case models.FailoverExecutionStatusQueued,
+		models.FailoverExecutionStatusDetecting,
+		models.FailoverExecutionStatusProvisioning,
+		models.FailoverExecutionStatusRebindingIP,
+		models.FailoverExecutionStatusWaitingAgent,
+		models.FailoverExecutionStatusRunningScript,
+		models.FailoverExecutionStatusSwitchingDNS,
+		models.FailoverExecutionStatusCleaningOld:
+		return true
+	default:
+		return false
+	}
+}
+
+func buildFailoverTaskView(task *models.FailoverTask, latestExecution *models.FailoverExecution, probe failoverProbeView, now time.Time) failoverTaskView {
+	plans := make([]failoverPlanView, 0, len(task.Plans))
+	for _, plan := range task.Plans {
+		plans = append(plans, buildFailoverPlanView(plan))
+	}
+
+	var cooldownRemaining int64
+	var nextEligibleAt *models.LocalTime
+	if task.CooldownSeconds > 0 && task.LastTriggeredAt != nil {
+		next := task.LastTriggeredAt.ToTime().Add(time.Duration(task.CooldownSeconds) * time.Second)
+		if next.After(now) {
+			cooldownRemaining = int64(next.Sub(now).Seconds())
+			if cooldownRemaining < 0 {
+				cooldownRemaining = 0
+			}
+			value := models.FromTime(next)
+			nextEligibleAt = &value
+		}
+	}
+
+	return failoverTaskView{
+		ID:                 task.ID,
+		Name:               task.Name,
+		Enabled:            task.Enabled,
+		WatchClientUUID:    task.WatchClientUUID,
+		TriggerSource:      task.TriggerSource,
+		FailureThreshold:   task.FailureThreshold,
+		StaleAfterSeconds:  task.StaleAfterSeconds,
+		CooldownSeconds:    task.CooldownSeconds,
+		DNSProvider:        task.DNSProvider,
+		DNSEntryID:         task.DNSEntryID,
+		DNSPayload:         rawJSONOrNull(task.DNSPayload),
+		DeleteStrategy:     task.DeleteStrategy,
+		DeleteDelaySeconds: task.DeleteDelaySeconds,
+		LastExecutionID:    task.LastExecutionID,
+		LastStatus:         task.LastStatus,
+		LastMessage:        task.LastMessage,
+		LastTriggeredAt:    task.LastTriggeredAt,
+		LastSucceededAt:    task.LastSucceededAt,
+		LastFailedAt:       task.LastFailedAt,
+		Probe:              probe,
+		CooldownRemaining:  cooldownRemaining,
+		NextEligibleAt:     nextEligibleAt,
+		LatestExecution:    buildFailoverExecutionSummaryView(latestExecution),
+		HasActiveExecution: latestExecution != nil && isFailoverExecutionActive(latestExecution.Status),
+		Plans:              plans,
+		CreatedAt:          task.CreatedAt,
+		UpdatedAt:          task.UpdatedAt,
+	}
+}
+
+func buildFailoverExecutionView(execution *models.FailoverExecution, includeSteps bool) failoverExecutionView {
+	view := failoverExecutionView{
+		ID:                    execution.ID,
+		TaskID:                execution.TaskID,
+		Status:                execution.Status,
+		TriggerReason:         execution.TriggerReason,
+		WatchClientUUID:       execution.WatchClientUUID,
+		TriggerSnapshot:       rawJSONOrNull(execution.TriggerSnapshot),
+		SelectedPlanID:        execution.SelectedPlanID,
+		AttemptedPlans:        rawJSONOrNull(execution.AttemptedPlans),
+		OldClientUUID:         execution.OldClientUUID,
+		OldInstanceRef:        rawJSONOrNull(execution.OldInstanceRef),
+		OldAddresses:          rawJSONOrNull(execution.OldAddresses),
+		NewClientUUID:         execution.NewClientUUID,
+		NewInstanceRef:        rawJSONOrNull(execution.NewInstanceRef),
+		NewAddresses:          rawJSONOrNull(execution.NewAddresses),
+		ScriptClipboardID:     execution.ScriptClipboardID,
+		ScriptNameSnapshot:    execution.ScriptNameSnapshot,
+		ScriptTaskID:          execution.ScriptTaskID,
+		ScriptStatus:          execution.ScriptStatus,
+		ScriptExitCode:        execution.ScriptExitCode,
+		ScriptFinishedAt:      execution.ScriptFinishedAt,
+		ScriptOutput:          execution.ScriptOutput,
+		ScriptOutputTruncated: execution.ScriptOutputTruncated,
+		DNSProvider:           execution.DNSProvider,
+		DNSStatus:             execution.DNSStatus,
+		DNSResult:             rawJSONOrNull(execution.DNSResult),
+		CleanupStatus:         execution.CleanupStatus,
+		CleanupResult:         rawJSONOrNull(execution.CleanupResult),
+		ErrorMessage:          execution.ErrorMessage,
+		StartedAt:             execution.StartedAt,
+		FinishedAt:            execution.FinishedAt,
+		CreatedAt:             execution.CreatedAt,
+		UpdatedAt:             execution.UpdatedAt,
+	}
+
+	if includeSteps {
+		view.Steps = make([]failoverExecutionStepView, 0, len(execution.Steps))
+		for _, step := range execution.Steps {
+			view.Steps = append(view.Steps, failoverExecutionStepView{
+				ID:          step.ID,
+				ExecutionID: step.ExecutionID,
+				Sort:        step.Sort,
+				StepKey:     step.StepKey,
+				StepLabel:   step.StepLabel,
+				Status:      step.Status,
+				Message:     step.Message,
+				Detail:      rawJSONOrNull(step.Detail),
+				StartedAt:   step.StartedAt,
+				FinishedAt:  step.FinishedAt,
+				CreatedAt:   step.CreatedAt,
+				UpdatedAt:   step.UpdatedAt,
+			})
+		}
+	}
+
+	return view
+}
+
+func validateCloudProviderEntryForScope(scope ownerScope, providerName, entryID string) error {
+	providerName = strings.ToLower(strings.TrimSpace(providerName))
+	entryID = strings.TrimSpace(entryID)
+	if entryID == "" {
+		return fmt.Errorf("provider entry id is required")
+	}
+
+	switch providerName {
+	case awsProviderName:
+		_, addition, err := loadAWSAddition(scope, false)
+		if err != nil {
+			return err
+		}
+		if entryID == "active" && addition.ActiveCredential() != nil {
+			return nil
+		}
+		if addition.FindCredential(entryID) != nil {
+			return nil
+		}
+	case digitalOceanProviderName:
+		_, addition, err := loadDigitalOceanAddition(scope, false)
+		if err != nil {
+			return err
+		}
+		if entryID == "active" && addition.ActiveToken() != nil {
+			return nil
+		}
+		if addition.FindToken(entryID) != nil {
+			return nil
+		}
+	case linodeProviderName:
+		_, addition, err := loadLinodeAddition(scope, false)
+		if err != nil {
+			return err
+		}
+		if entryID == "active" && addition.ActiveToken() != nil {
+			return nil
+		}
+		if addition.FindToken(entryID) != nil {
+			return nil
+		}
+	case models.FailoverDNSProviderCloudflare, models.FailoverDNSProviderAliyun:
+		if _, err := findDNSProviderEntryForScope(scope, providerName, entryID); err == nil {
+			return nil
+		} else {
+			return err
+		}
+	default:
+		return fmt.Errorf("unsupported provider: %s", providerName)
+	}
+
+	return fmt.Errorf("provider %s entry %s was not found", providerName, entryID)
+}
+
+func findDNSProviderEntryForScope(scope ownerScope, providerName, entryID string) (*cloudProviderEntry, error) {
+	config, err := getCloudProviderConfigForScope(scope, providerName)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, fmt.Errorf("provider %s is not configured", providerName)
+		}
+		return nil, err
+	}
+
+	trimmed := strings.TrimSpace(config.Addition)
+	if trimmed == "" || trimmed == "{}" || trimmed == "null" {
+		return nil, fmt.Errorf("provider %s is not configured", providerName)
+	}
+
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(trimmed), &object); err == nil {
+		if rawEntries, ok := object["entries"]; ok {
+			var entries []cloudProviderEntry
+			if err := json.Unmarshal(rawEntries, &entries); err != nil {
+				return nil, fmt.Errorf("invalid DNS provider configuration: %w", err)
+			}
+			for _, entry := range entries {
+				normalized := normalizeCloudProviderEntry(entry)
+				if normalized.ID == entryID {
+					return &normalized, nil
+				}
+			}
+			return nil, fmt.Errorf("provider %s entry %s was not found", providerName, entryID)
+		}
+
+		if entryID == "default" {
+			values := map[string]interface{}{}
+			if err := json.Unmarshal([]byte(trimmed), &values); err != nil {
+				return nil, fmt.Errorf("invalid DNS provider configuration: %w", err)
+			}
+			entry := normalizeCloudProviderEntry(cloudProviderEntry{
+				ID:     "default",
+				Name:   defaultCloudProviderEntryName,
+				Values: values,
+			})
+			return &entry, nil
+		}
+	}
+
+	return nil, fmt.Errorf("provider %s entry %s was not found", providerName, entryID)
+}
+
+func validateFailoverTaskRequest(scope ownerScope, req *failoverTaskRequest) (*models.FailoverTask, []models.FailoverPlan, error) {
+	if req == nil {
+		return nil, nil, fmt.Errorf("request is required")
+	}
+
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
+		return nil, nil, fmt.Errorf("name is required")
+	}
+
+	watchClientUUID := strings.TrimSpace(req.WatchClientUUID)
+	if watchClientUUID == "" {
+		return nil, nil, fmt.Errorf("watch_client_uuid is required")
+	}
+	if _, err := clientdb.GetClientByUUIDForUser(watchClientUUID, scope.UserUUID); err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, nil, fmt.Errorf("watch client not found")
+		}
+		return nil, nil, err
+	}
+
+	dnsProvider := strings.ToLower(strings.TrimSpace(req.DNSProvider))
+	switch dnsProvider {
+	case models.FailoverDNSProviderCloudflare, models.FailoverDNSProviderAliyun:
+	default:
+		return nil, nil, fmt.Errorf("unsupported DNS provider: %s", req.DNSProvider)
+	}
+
+	dnsEntryID := strings.TrimSpace(req.DNSEntryID)
+	if dnsEntryID == "" {
+		return nil, nil, fmt.Errorf("dns_entry_id is required")
+	}
+	if err := validateCloudProviderEntryForScope(scope, dnsProvider, dnsEntryID); err != nil {
+		return nil, nil, err
+	}
+
+	dnsPayload, err := normalizeJSONPayload(req.DNSPayload, "{}")
+	if err != nil {
+		return nil, nil, fmt.Errorf("invalid dns_payload: %w", err)
+	}
+
+	deleteStrategy := strings.ToLower(strings.TrimSpace(req.DeleteStrategy))
+	if deleteStrategy == "" {
+		deleteStrategy = models.FailoverDeleteStrategyKeep
+	}
+	switch deleteStrategy {
+	case models.FailoverDeleteStrategyKeep,
+		models.FailoverDeleteStrategyDeleteAfterSuccess,
+		models.FailoverDeleteStrategyDeleteAfterSuccessDelay:
+	default:
+		return nil, nil, fmt.Errorf("unsupported delete strategy: %s", req.DeleteStrategy)
+	}
+	if req.DeleteDelaySeconds < 0 {
+		return nil, nil, fmt.Errorf("delete_delay_seconds must be greater than or equal to 0")
+	}
+
+	if len(req.Plans) == 0 {
+		return nil, nil, fmt.Errorf("at least one plan is required")
+	}
+
+	plans := make([]models.FailoverPlan, 0, len(req.Plans))
+	for index, planReq := range req.Plans {
+		provider := strings.ToLower(strings.TrimSpace(planReq.Provider))
+		switch provider {
+		case "aws", "digitalocean", "linode":
+		default:
+			return nil, nil, fmt.Errorf("unsupported plan provider: %s", planReq.Provider)
+		}
+
+		providerEntryID := strings.TrimSpace(planReq.ProviderEntryID)
+		if providerEntryID == "" {
+			return nil, nil, fmt.Errorf("plan %d provider_entry_id is required", index+1)
+		}
+		if err := validateCloudProviderEntryForScope(scope, provider, providerEntryID); err != nil {
+			return nil, nil, err
+		}
+
+		actionType := strings.ToLower(strings.TrimSpace(planReq.ActionType))
+		switch actionType {
+		case models.FailoverActionProvisionInstance, models.FailoverActionRebindPublicIP:
+		default:
+			return nil, nil, fmt.Errorf("unsupported plan action_type: %s", planReq.ActionType)
+		}
+		if actionType == models.FailoverActionRebindPublicIP && provider != "aws" {
+			return nil, nil, fmt.Errorf("rebind_public_ip is currently only supported for aws")
+		}
+
+		payload, err := normalizeJSONPayload(planReq.Payload, "{}")
+		if err != nil {
+			return nil, nil, fmt.Errorf("invalid payload for plan %d: %w", index+1, err)
+		}
+
+		if planReq.ScriptClipboardID != nil {
+			if _, err := clipboarddb.GetClipboardByIDForUser(*planReq.ScriptClipboardID, scope.UserUUID); err != nil {
+				if errors.Is(err, gorm.ErrRecordNotFound) {
+					return nil, nil, fmt.Errorf("script clipboard %d was not found", *planReq.ScriptClipboardID)
+				}
+				return nil, nil, err
+			}
+		}
+
+		enabled := true
+		if planReq.Enabled != nil {
+			enabled = *planReq.Enabled
+		}
+
+		planName := strings.TrimSpace(planReq.Name)
+		if planName == "" {
+			planName = fmt.Sprintf("Plan %d", index+1)
+		}
+
+		priority := planReq.Priority
+		if priority <= 0 {
+			priority = index + 1
+		}
+
+		scriptTimeout := planReq.ScriptTimeoutSec
+		if scriptTimeout <= 0 {
+			scriptTimeout = 600
+		}
+
+		waitAgentTimeout := planReq.WaitAgentTimeoutSec
+		if waitAgentTimeout <= 0 {
+			waitAgentTimeout = 600
+		}
+
+		plans = append(plans, models.FailoverPlan{
+			Name:                planName,
+			Priority:            priority,
+			Enabled:             enabled,
+			Provider:            provider,
+			ProviderEntryID:     providerEntryID,
+			ActionType:          actionType,
+			Payload:             payload,
+			AutoConnectGroup:    strings.TrimSpace(planReq.AutoConnectGroup),
+			ScriptClipboardID:   planReq.ScriptClipboardID,
+			ScriptTimeoutSec:    scriptTimeout,
+			WaitAgentTimeoutSec: waitAgentTimeout,
+		})
+	}
+
+	sort.SliceStable(plans, func(i, j int) bool {
+		if plans[i].Priority == plans[j].Priority {
+			return i < j
+		}
+		return plans[i].Priority < plans[j].Priority
+	})
+
+	enabled := true
+	if req.Enabled != nil {
+		enabled = *req.Enabled
+	}
+
+	failureThreshold := req.FailureThreshold
+	if failureThreshold <= 0 {
+		failureThreshold = 2
+	}
+
+	staleAfterSeconds := req.StaleAfterSeconds
+	if staleAfterSeconds <= 0 {
+		staleAfterSeconds = 300
+	}
+
+	cooldownSeconds := req.CooldownSeconds
+	if cooldownSeconds < 0 {
+		return nil, nil, fmt.Errorf("cooldown_seconds must be greater than or equal to 0")
+	}
+
+	return &models.FailoverTask{
+		Name:               name,
+		Enabled:            enabled,
+		WatchClientUUID:    watchClientUUID,
+		TriggerSource:      models.FailoverTriggerSourceCNConnectivity,
+		FailureThreshold:   failureThreshold,
+		StaleAfterSeconds:  staleAfterSeconds,
+		CooldownSeconds:    cooldownSeconds,
+		DNSProvider:        dnsProvider,
+		DNSEntryID:         dnsEntryID,
+		DNSPayload:         dnsPayload,
+		DeleteStrategy:     deleteStrategy,
+		DeleteDelaySeconds: req.DeleteDelaySeconds,
+	}, plans, nil
+}
+
+func loadLatestExecutionLookup(taskList []models.FailoverTask) (map[uint]*models.FailoverExecution, error) {
+	executionIDs := make([]uint, 0, len(taskList))
+	for _, task := range taskList {
+		if task.LastExecutionID != nil && *task.LastExecutionID > 0 {
+			executionIDs = append(executionIDs, *task.LastExecutionID)
+		}
+	}
+
+	executionByID, err := failoverdb.ListExecutionsByIDs(executionIDs)
+	if err != nil {
+		return nil, err
+	}
+
+	result := make(map[uint]*models.FailoverExecution, len(taskList))
+	for _, task := range taskList {
+		if task.LastExecutionID == nil || *task.LastExecutionID == 0 {
+			continue
+		}
+		if execution := executionByID[*task.LastExecutionID]; execution != nil {
+			result[task.ID] = execution
+		}
+	}
+	return result, nil
+}
+
+func GetFailoverTasks(c *gin.Context) {
+	scope, ok := requireCurrentOwnerScope(c)
+	if !ok {
+		return
+	}
+
+	taskList, err := failoverdb.ListTasksByUser(scope.UserUUID)
+	if err != nil {
+		api.RespondError(c, http.StatusInternalServerError, "Failed to list failover tasks: "+err.Error())
+		return
+	}
+
+	now := time.Now()
+	reports := ws.GetLatestReport()
+	executionLookup, err := loadLatestExecutionLookup(taskList)
+	if err != nil {
+		api.RespondError(c, http.StatusInternalServerError, "Failed to load failover execution summary: "+err.Error())
+		return
+	}
+
+	response := make([]failoverTaskView, 0, len(taskList))
+	for _, task := range taskList {
+		taskCopy := task
+		response = append(response, buildFailoverTaskView(
+			&taskCopy,
+			executionLookup[taskCopy.ID],
+			buildFailoverProbeView(&taskCopy, reports[taskCopy.WatchClientUUID], now),
+			now,
+		))
+	}
+	api.RespondSuccess(c, response)
+}
+
+func CreateFailoverTask(c *gin.Context) {
+	scope, ok := requireCurrentOwnerScope(c)
+	if !ok {
+		return
+	}
+
+	var req failoverTaskRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		api.RespondError(c, http.StatusBadRequest, "Invalid request body: "+err.Error())
+		return
+	}
+
+	task, plans, err := validateFailoverTaskRequest(scope, &req)
+	if err != nil {
+		api.RespondError(c, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	created, err := failoverdb.CreateTaskForUser(scope.UserUUID, task, plans)
+	if err != nil {
+		api.RespondError(c, http.StatusInternalServerError, "Failed to create failover task: "+err.Error())
+		return
+	}
+
+	api.RespondSuccess(c, buildFailoverTaskView(created, nil, failoverProbeView{Status: "unavailable", Stale: true}, time.Now()))
+}
+
+func GetFailoverTask(c *gin.Context) {
+	scope, ok := requireCurrentOwnerScope(c)
+	if !ok {
+		return
+	}
+
+	taskID, ok := parseFailoverTaskID(c, "id")
+	if !ok {
+		return
+	}
+
+	task, err := failoverdb.GetTaskByIDForUser(scope.UserUUID, taskID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			api.RespondError(c, http.StatusNotFound, "Failover task not found")
+			return
+		}
+		api.RespondError(c, http.StatusInternalServerError, "Failed to load failover task: "+err.Error())
+		return
+	}
+
+	var latestExecution *models.FailoverExecution
+	if task.LastExecutionID != nil && *task.LastExecutionID > 0 {
+		lookup, lookupErr := failoverdb.ListExecutionsByIDs([]uint{*task.LastExecutionID})
+		if lookupErr != nil {
+			api.RespondError(c, http.StatusInternalServerError, "Failed to load latest execution summary: "+lookupErr.Error())
+			return
+		}
+		latestExecution = lookup[*task.LastExecutionID]
+	}
+
+	now := time.Now()
+	reports := ws.GetLatestReport()
+	api.RespondSuccess(c, buildFailoverTaskView(task, latestExecution, buildFailoverProbeView(task, reports[task.WatchClientUUID], now), now))
+}
+
+func UpdateFailoverTask(c *gin.Context) {
+	scope, ok := requireCurrentOwnerScope(c)
+	if !ok {
+		return
+	}
+
+	taskID, ok := parseFailoverTaskID(c, "id")
+	if !ok {
+		return
+	}
+
+	var req failoverTaskRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		api.RespondError(c, http.StatusBadRequest, "Invalid request body: "+err.Error())
+		return
+	}
+
+	task, plans, err := validateFailoverTaskRequest(scope, &req)
+	if err != nil {
+		api.RespondError(c, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	updated, err := failoverdb.UpdateTaskForUser(scope.UserUUID, taskID, task, plans)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			api.RespondError(c, http.StatusNotFound, "Failover task not found")
+			return
+		}
+		api.RespondError(c, http.StatusInternalServerError, "Failed to update failover task: "+err.Error())
+		return
+	}
+
+	api.RespondSuccess(c, buildFailoverTaskView(updated, nil, failoverProbeView{Status: "unavailable", Stale: true}, time.Now()))
+}
+
+func ToggleFailoverTask(c *gin.Context) {
+	scope, ok := requireCurrentOwnerScope(c)
+	if !ok {
+		return
+	}
+
+	taskID, ok := parseFailoverTaskID(c, "id")
+	if !ok {
+		return
+	}
+
+	var req failoverToggleRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		api.RespondError(c, http.StatusBadRequest, "Invalid request body: "+err.Error())
+		return
+	}
+
+	task, err := failoverdb.ToggleTaskForUser(scope.UserUUID, taskID, req.Enabled)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			api.RespondError(c, http.StatusNotFound, "Failover task not found")
+			return
+		}
+		api.RespondError(c, http.StatusInternalServerError, "Failed to toggle failover task: "+err.Error())
+		return
+	}
+
+	api.RespondSuccess(c, buildFailoverTaskView(task, nil, failoverProbeView{Status: "unavailable", Stale: true}, time.Now()))
+}
+
+func DeleteFailoverTask(c *gin.Context) {
+	scope, ok := requireCurrentOwnerScope(c)
+	if !ok {
+		return
+	}
+
+	taskID, ok := parseFailoverTaskID(c, "id")
+	if !ok {
+		return
+	}
+
+	if err := failoverdb.DeleteTaskForUser(scope.UserUUID, taskID); err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			api.RespondError(c, http.StatusNotFound, "Failover task not found")
+			return
+		}
+		api.RespondError(c, http.StatusInternalServerError, "Failed to delete failover task: "+err.Error())
+		return
+	}
+
+	api.RespondSuccess(c, nil)
+}
+
+func RunFailoverTask(c *gin.Context) {
+	scope, ok := requireCurrentOwnerScope(c)
+	if !ok {
+		return
+	}
+
+	taskID, ok := parseFailoverTaskID(c, "id")
+	if !ok {
+		return
+	}
+
+	if _, err := failoverdb.GetTaskByIDForUser(scope.UserUUID, taskID); err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			api.RespondError(c, http.StatusNotFound, "Failover task not found")
+			return
+		}
+		api.RespondError(c, http.StatusInternalServerError, "Failed to load failover task: "+err.Error())
+		return
+	}
+
+	execution, err := failoversvc.RunTaskNowForUser(scope.UserUUID, taskID)
+	if err != nil {
+		api.RespondError(c, http.StatusBadRequest, "Failed to start failover task: "+err.Error())
+		return
+	}
+
+	api.RespondSuccess(c, buildFailoverExecutionView(execution, false))
+}
+
+func GetFailoverExecutions(c *gin.Context) {
+	scope, ok := requireCurrentOwnerScope(c)
+	if !ok {
+		return
+	}
+
+	taskID, ok := parseFailoverTaskID(c, "id")
+	if !ok {
+		return
+	}
+
+	limit := 20
+	if rawLimit := strings.TrimSpace(c.Query("limit")); rawLimit != "" {
+		parsed, err := strconv.Atoi(rawLimit)
+		if err != nil || parsed <= 0 {
+			api.RespondError(c, http.StatusBadRequest, "Invalid limit")
+			return
+		}
+		limit = parsed
+	}
+
+	executions, err := failoverdb.ListExecutionsByTaskForUser(scope.UserUUID, taskID, limit)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			api.RespondError(c, http.StatusNotFound, "Failover task not found")
+			return
+		}
+		api.RespondError(c, http.StatusInternalServerError, "Failed to list failover executions: "+err.Error())
+		return
+	}
+
+	response := make([]failoverExecutionView, 0, len(executions))
+	for _, execution := range executions {
+		executionCopy := execution
+		response = append(response, buildFailoverExecutionView(&executionCopy, false))
+	}
+	api.RespondSuccess(c, response)
+}
+
+func GetFailoverExecution(c *gin.Context) {
+	scope, ok := requireCurrentOwnerScope(c)
+	if !ok {
+		return
+	}
+
+	executionID, ok := parseFailoverExecutionID(c)
+	if !ok {
+		return
+	}
+
+	execution, err := failoverdb.GetExecutionByIDForUser(scope.UserUUID, executionID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			api.RespondError(c, http.StatusNotFound, "Failover execution not found")
+			return
+		}
+		api.RespondError(c, http.StatusInternalServerError, "Failed to load failover execution: "+err.Error())
+		return
+	}
+
+	api.RespondSuccess(c, buildFailoverExecutionView(execution, true))
+}

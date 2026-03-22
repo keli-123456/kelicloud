@@ -39,6 +39,7 @@ import (
 	"github.com/komari-monitor/komari/utils"
 	"github.com/komari-monitor/komari/utils/cloudflared"
 	_ "github.com/komari-monitor/komari/utils/cloudprovider"
+	"github.com/komari-monitor/komari/utils/failover"
 	"github.com/komari-monitor/komari/utils/geoip"
 	logutil "github.com/komari-monitor/komari/utils/log"
 	"github.com/komari-monitor/komari/utils/messageSender"
@@ -405,6 +406,23 @@ func RunServer() {
 
 		}
 
+		failoverGroup := adminAuthrized.Group(
+			"/failover",
+			admin.RequireUserFeatureMiddleware(config.UserFeatureCloud),
+			admin.RequireUserFeatureMiddleware(config.UserFeatureCNConnectivity),
+		)
+		{
+			failoverGroup.GET("/tasks", admin.GetFailoverTasks)
+			failoverGroup.POST("/tasks", admin.CreateFailoverTask)
+			failoverGroup.GET("/tasks/:id", admin.GetFailoverTask)
+			failoverGroup.POST("/tasks/:id", admin.UpdateFailoverTask)
+			failoverGroup.POST("/tasks/:id/toggle", admin.ToggleFailoverTask)
+			failoverGroup.POST("/tasks/:id/remove", admin.DeleteFailoverTask)
+			failoverGroup.POST("/tasks/:id/run", admin.RunFailoverTask)
+			failoverGroup.GET("/tasks/:id/executions", admin.GetFailoverExecutions)
+			failoverGroup.GET("/executions/:id", admin.GetFailoverExecution)
+		}
+
 	}
 
 	public.Static(r.Group("/"), func(handlers ...gin.HandlerFunc) {
@@ -460,6 +478,7 @@ func InitDatabase() {
 // #region 定时任务
 func DoScheduledWork() {
 	tasks.ReloadPingSchedule()
+	failover.ReloadSchedule()
 	d_notification.ReloadLoadNotificationSchedule()
 	ticker := time.NewTicker(time.Minute * 30)
 	minute := time.NewTicker(60 * time.Second)
@@ -483,6 +502,7 @@ func DoScheduledWork() {
 			}
 			// 每分钟检查一次流量提醒
 			go notifier.CheckTraffic()
+			failover.RunScheduledWork()
 		}
 	}
 

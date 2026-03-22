@@ -1,0 +1,510 @@
+package failover
+
+import (
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/komari-monitor/komari/database/dbcore"
+	"github.com/komari-monitor/komari/database/models"
+	"gorm.io/gorm"
+)
+
+const (
+	defaultFailureThreshold    = 2
+	defaultStaleAfterSeconds   = 300
+	defaultCooldownSeconds     = 1800
+	defaultScriptTimeoutSec    = 600
+	defaultWaitAgentTimeoutSec = 600
+)
+
+func normalizeFailoverUserID(userUUID string) (string, error) {
+	userUUID = strings.TrimSpace(userUUID)
+	if userUUID == "" {
+		return "", fmt.Errorf("user id is required")
+	}
+	return userUUID, nil
+}
+
+func taskScopeWithDB(db *gorm.DB, userUUID string) *gorm.DB {
+	userUUID = strings.TrimSpace(userUUID)
+	if userUUID == "" {
+		return db.Where("1 = 0")
+	}
+	return db.Where("user_id = ?", userUUID)
+}
+
+func taskStatusForEnabled(enabled bool, current string) string {
+	if !enabled {
+		return models.FailoverTaskStatusDisabled
+	}
+	current = strings.TrimSpace(current)
+	if current == "" || current == models.FailoverTaskStatusDisabled {
+		return models.FailoverTaskStatusUnknown
+	}
+	return current
+}
+
+func applyTaskDefaults(task *models.FailoverTask) {
+	task.Name = strings.TrimSpace(task.Name)
+	task.WatchClientUUID = strings.TrimSpace(task.WatchClientUUID)
+	task.TriggerSource = strings.TrimSpace(task.TriggerSource)
+	task.DNSProvider = strings.TrimSpace(task.DNSProvider)
+	task.DNSEntryID = strings.TrimSpace(task.DNSEntryID)
+	task.DeleteStrategy = strings.TrimSpace(task.DeleteStrategy)
+
+	if task.TriggerSource == "" {
+		task.TriggerSource = models.FailoverTriggerSourceCNConnectivity
+	}
+	if task.FailureThreshold <= 0 {
+		task.FailureThreshold = defaultFailureThreshold
+	}
+	if task.StaleAfterSeconds <= 0 {
+		task.StaleAfterSeconds = defaultStaleAfterSeconds
+	}
+	if task.CooldownSeconds < 0 {
+		task.CooldownSeconds = defaultCooldownSeconds
+	}
+	if strings.TrimSpace(task.DNSPayload) == "" {
+		task.DNSPayload = "{}"
+	}
+	if task.DeleteStrategy == "" {
+		task.DeleteStrategy = models.FailoverDeleteStrategyKeep
+	}
+	task.LastStatus = taskStatusForEnabled(task.Enabled, task.LastStatus)
+}
+
+func applyPlanDefaults(plan *models.FailoverPlan) {
+	plan.Name = strings.TrimSpace(plan.Name)
+	plan.Provider = strings.TrimSpace(plan.Provider)
+	plan.ProviderEntryID = strings.TrimSpace(plan.ProviderEntryID)
+	plan.ActionType = strings.TrimSpace(plan.ActionType)
+	plan.AutoConnectGroup = strings.TrimSpace(plan.AutoConnectGroup)
+
+	if plan.Priority <= 0 {
+		plan.Priority = 1
+	}
+	if strings.TrimSpace(plan.Payload) == "" {
+		plan.Payload = "{}"
+	}
+	if plan.ScriptTimeoutSec <= 0 {
+		plan.ScriptTimeoutSec = defaultScriptTimeoutSec
+	}
+	if plan.WaitAgentTimeoutSec <= 0 {
+		plan.WaitAgentTimeoutSec = defaultWaitAgentTimeoutSec
+	}
+}
+
+func preloadFailoverTask(db *gorm.DB) *gorm.DB {
+	return db.Preload("Plans", func(tx *gorm.DB) *gorm.DB {
+		return tx.Order("priority ASC").Order("id ASC")
+	})
+}
+
+func getTaskByIDForUserWithDB(db *gorm.DB, userUUID string, taskID uint) (*models.FailoverTask, error) {
+	userUUID, err := normalizeFailoverUserID(userUUID)
+	if err != nil {
+		return nil, err
+	}
+
+	var task models.FailoverTask
+	if err := preloadFailoverTask(taskScopeWithDB(db, userUUID)).
+		Where("id = ?", taskID).
+		First(&task).Error; err != nil {
+		return nil, err
+	}
+	return &task, nil
+}
+
+func GetTaskByIDForUser(userUUID string, taskID uint) (*models.FailoverTask, error) {
+	return getTaskByIDForUserWithDB(dbcore.GetDBInstance(), userUUID, taskID)
+}
+
+func listTasksByUserWithDB(db *gorm.DB, userUUID string) ([]models.FailoverTask, error) {
+	userUUID, err := normalizeFailoverUserID(userUUID)
+	if err != nil {
+		return nil, err
+	}
+
+	var taskList []models.FailoverTask
+	if err := preloadFailoverTask(taskScopeWithDB(db, userUUID)).
+		Order("updated_at DESC").
+		Order("id DESC").
+		Find(&taskList).Error; err != nil {
+		return nil, err
+	}
+	return taskList, nil
+}
+
+func ListTasksByUser(userUUID string) ([]models.FailoverTask, error) {
+	return listTasksByUserWithDB(dbcore.GetDBInstance(), userUUID)
+}
+
+func CreateTaskForUser(userUUID string, task *models.FailoverTask, plans []models.FailoverPlan) (*models.FailoverTask, error) {
+	userUUID, err := normalizeFailoverUserID(userUUID)
+	if err != nil {
+		return nil, err
+	}
+	if task == nil {
+		return nil, fmt.Errorf("task is required")
+	}
+
+	db := dbcore.GetDBInstance()
+	var created *models.FailoverTask
+	err = db.Transaction(func(tx *gorm.DB) error {
+		task.UserID = userUUID
+		applyTaskDefaults(task)
+		if err := tx.Create(task).Error; err != nil {
+			return err
+		}
+
+		if len(plans) > 0 {
+			normalizedPlans := make([]models.FailoverPlan, 0, len(plans))
+			for _, plan := range plans {
+				plan.TaskID = task.ID
+				applyPlanDefaults(&plan)
+				normalizedPlans = append(normalizedPlans, plan)
+			}
+			if err := tx.Create(&normalizedPlans).Error; err != nil {
+				return err
+			}
+		}
+
+		loaded, err := getTaskByIDForUserWithDB(tx, userUUID, task.ID)
+		if err != nil {
+			return err
+		}
+		created = loaded
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return created, nil
+}
+
+func UpdateTaskForUser(userUUID string, taskID uint, task *models.FailoverTask, plans []models.FailoverPlan) (*models.FailoverTask, error) {
+	userUUID, err := normalizeFailoverUserID(userUUID)
+	if err != nil {
+		return nil, err
+	}
+	if task == nil {
+		return nil, fmt.Errorf("task is required")
+	}
+
+	db := dbcore.GetDBInstance()
+	var updated *models.FailoverTask
+	err = db.Transaction(func(tx *gorm.DB) error {
+		existing, err := getTaskByIDForUserWithDB(tx, userUUID, taskID)
+		if err != nil {
+			return err
+		}
+
+		applyTaskDefaults(task)
+		updates := map[string]interface{}{
+			"name":                 task.Name,
+			"enabled":              task.Enabled,
+			"watch_client_uuid":    task.WatchClientUUID,
+			"trigger_source":       task.TriggerSource,
+			"failure_threshold":    task.FailureThreshold,
+			"stale_after_seconds":  task.StaleAfterSeconds,
+			"cooldown_seconds":     task.CooldownSeconds,
+			"dns_provider":         task.DNSProvider,
+			"dns_entry_id":         task.DNSEntryID,
+			"dns_payload":          task.DNSPayload,
+			"delete_strategy":      task.DeleteStrategy,
+			"delete_delay_seconds": task.DeleteDelaySeconds,
+			"last_status":          taskStatusForEnabled(task.Enabled, existing.LastStatus),
+		}
+		if err := taskScopeWithDB(tx.Model(&models.FailoverTask{}), userUUID).
+			Where("id = ?", taskID).
+			Updates(updates).Error; err != nil {
+			return err
+		}
+
+		if err := tx.Where("task_id = ?", taskID).Delete(&models.FailoverPlan{}).Error; err != nil {
+			return err
+		}
+		if len(plans) > 0 {
+			normalizedPlans := make([]models.FailoverPlan, 0, len(plans))
+			for _, plan := range plans {
+				plan.TaskID = taskID
+				applyPlanDefaults(&plan)
+				normalizedPlans = append(normalizedPlans, plan)
+			}
+			if err := tx.Create(&normalizedPlans).Error; err != nil {
+				return err
+			}
+		}
+
+		loaded, err := getTaskByIDForUserWithDB(tx, userUUID, taskID)
+		if err != nil {
+			return err
+		}
+		updated = loaded
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return updated, nil
+}
+
+func ToggleTaskForUser(userUUID string, taskID uint, enabled bool) (*models.FailoverTask, error) {
+	userUUID, err := normalizeFailoverUserID(userUUID)
+	if err != nil {
+		return nil, err
+	}
+
+	db := dbcore.GetDBInstance()
+	var updated *models.FailoverTask
+	err = db.Transaction(func(tx *gorm.DB) error {
+		existing, err := getTaskByIDForUserWithDB(tx, userUUID, taskID)
+		if err != nil {
+			return err
+		}
+
+		if err := taskScopeWithDB(tx.Model(&models.FailoverTask{}), userUUID).
+			Where("id = ?", taskID).
+			Updates(map[string]interface{}{
+				"enabled":     enabled,
+				"last_status": taskStatusForEnabled(enabled, existing.LastStatus),
+			}).Error; err != nil {
+			return err
+		}
+
+		loaded, err := getTaskByIDForUserWithDB(tx, userUUID, taskID)
+		if err != nil {
+			return err
+		}
+		updated = loaded
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return updated, nil
+}
+
+func DeleteTaskForUser(userUUID string, taskID uint) error {
+	userUUID, err := normalizeFailoverUserID(userUUID)
+	if err != nil {
+		return err
+	}
+
+	db := dbcore.GetDBInstance()
+	result := taskScopeWithDB(db, userUUID).Where("id = ?", taskID).Delete(&models.FailoverTask{})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return gorm.ErrRecordNotFound
+	}
+	return nil
+}
+
+func ListExecutionsByTaskForUser(userUUID string, taskID uint, limit int) ([]models.FailoverExecution, error) {
+	userUUID, err := normalizeFailoverUserID(userUUID)
+	if err != nil {
+		return nil, err
+	}
+	if limit <= 0 {
+		limit = 20
+	}
+	if limit > 100 {
+		limit = 100
+	}
+
+	db := dbcore.GetDBInstance()
+	if _, err := getTaskByIDForUserWithDB(db, userUUID, taskID); err != nil {
+		return nil, err
+	}
+
+	var executions []models.FailoverExecution
+	if err := db.Where("task_id = ?", taskID).
+		Order("started_at DESC").
+		Order("id DESC").
+		Limit(limit).
+		Find(&executions).Error; err != nil {
+		return nil, err
+	}
+	return executions, nil
+}
+
+func GetExecutionByIDForUser(userUUID string, executionID uint) (*models.FailoverExecution, error) {
+	userUUID, err := normalizeFailoverUserID(userUUID)
+	if err != nil {
+		return nil, err
+	}
+
+	db := dbcore.GetDBInstance()
+	var execution models.FailoverExecution
+	if err := db.Model(&models.FailoverExecution{}).
+		Joins("JOIN failover_tasks ON failover_tasks.id = failover_executions.task_id").
+		Where("failover_tasks.user_id = ? AND failover_executions.id = ?", userUUID, executionID).
+		Preload("Steps", func(tx *gorm.DB) *gorm.DB {
+			return tx.Order("sort ASC").Order("id ASC")
+		}).
+		First(&execution).Error; err != nil {
+		return nil, err
+	}
+	return &execution, nil
+}
+
+func ListExecutionsByIDs(executionIDs []uint) (map[uint]*models.FailoverExecution, error) {
+	normalized := make([]uint, 0, len(executionIDs))
+	seen := make(map[uint]struct{}, len(executionIDs))
+	for _, executionID := range executionIDs {
+		if executionID == 0 {
+			continue
+		}
+		if _, exists := seen[executionID]; exists {
+			continue
+		}
+		seen[executionID] = struct{}{}
+		normalized = append(normalized, executionID)
+	}
+
+	result := make(map[uint]*models.FailoverExecution, len(normalized))
+	if len(normalized) == 0 {
+		return result, nil
+	}
+
+	var executions []models.FailoverExecution
+	db := dbcore.GetDBInstance()
+	if err := db.Where("id IN ?", normalized).Find(&executions).Error; err != nil {
+		return nil, err
+	}
+	for i := range executions {
+		execution := &executions[i]
+		result[execution.ID] = execution
+	}
+	return result, nil
+}
+
+var activeExecutionStatuses = []string{
+	models.FailoverExecutionStatusQueued,
+	models.FailoverExecutionStatusDetecting,
+	models.FailoverExecutionStatusProvisioning,
+	models.FailoverExecutionStatusRebindingIP,
+	models.FailoverExecutionStatusWaitingAgent,
+	models.FailoverExecutionStatusRunningScript,
+	models.FailoverExecutionStatusSwitchingDNS,
+	models.FailoverExecutionStatusCleaningOld,
+}
+
+func ListEnabledTasks() ([]models.FailoverTask, error) {
+	db := dbcore.GetDBInstance()
+	var taskList []models.FailoverTask
+	if err := preloadFailoverTask(db).
+		Where("enabled = ?", true).
+		Order("id ASC").
+		Find(&taskList).Error; err != nil {
+		return nil, err
+	}
+	return taskList, nil
+}
+
+func HasActiveExecution(taskID uint) (bool, error) {
+	db := dbcore.GetDBInstance()
+	var total int64
+	if err := db.Model(&models.FailoverExecution{}).
+		Where("task_id = ? AND status IN ?", taskID, activeExecutionStatuses).
+		Count(&total).Error; err != nil {
+		return false, err
+	}
+	return total > 0, nil
+}
+
+func CreateExecution(execution *models.FailoverExecution) (*models.FailoverExecution, error) {
+	if execution == nil {
+		return nil, fmt.Errorf("execution is required")
+	}
+
+	if execution.Status == "" {
+		execution.Status = models.FailoverExecutionStatusQueued
+	}
+	if execution.ScriptStatus == "" {
+		execution.ScriptStatus = models.FailoverScriptStatusPending
+	}
+	if execution.DNSStatus == "" {
+		execution.DNSStatus = models.FailoverDNSStatusPending
+	}
+	if execution.CleanupStatus == "" {
+		execution.CleanupStatus = models.FailoverCleanupStatusPending
+	}
+	if execution.StartedAt.ToTime().IsZero() {
+		execution.StartedAt = models.FromTime(time.Now())
+	}
+
+	db := dbcore.GetDBInstance()
+	if err := db.Create(execution).Error; err != nil {
+		return nil, err
+	}
+	return execution, nil
+}
+
+func UpdateExecutionFields(executionID uint, fields map[string]interface{}) error {
+	if len(fields) == 0 {
+		return nil
+	}
+	db := dbcore.GetDBInstance()
+	result := db.Model(&models.FailoverExecution{}).
+		Where("id = ?", executionID).
+		Updates(fields)
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return gorm.ErrRecordNotFound
+	}
+	return nil
+}
+
+func UpdateTaskFields(taskID uint, fields map[string]interface{}) error {
+	if len(fields) == 0 {
+		return nil
+	}
+	db := dbcore.GetDBInstance()
+	result := db.Model(&models.FailoverTask{}).
+		Where("id = ?", taskID).
+		Updates(fields)
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return gorm.ErrRecordNotFound
+	}
+	return nil
+}
+
+func CreateExecutionStep(step *models.FailoverExecutionStep) (*models.FailoverExecutionStep, error) {
+	if step == nil {
+		return nil, fmt.Errorf("step is required")
+	}
+	if step.Status == "" {
+		step.Status = models.FailoverStepStatusPending
+	}
+	db := dbcore.GetDBInstance()
+	if err := db.Create(step).Error; err != nil {
+		return nil, err
+	}
+	return step, nil
+}
+
+func UpdateExecutionStepFields(stepID uint, fields map[string]interface{}) error {
+	if len(fields) == 0 {
+		return nil
+	}
+	db := dbcore.GetDBInstance()
+	result := db.Model(&models.FailoverExecutionStep{}).
+		Where("id = ?", stepID).
+		Updates(fields)
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return gorm.ErrRecordNotFound
+	}
+	return nil
+}

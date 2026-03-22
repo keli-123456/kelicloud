@@ -1,0 +1,482 @@
+package failover
+
+import (
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/url"
+	"strings"
+
+	"github.com/komari-monitor/komari/config"
+	"github.com/komari-monitor/komari/database"
+	awscloud "github.com/komari-monitor/komari/utils/cloudprovider/aws"
+	"github.com/komari-monitor/komari/utils/cloudprovider/digitalocean"
+	"github.com/komari-monitor/komari/utils/cloudprovider/linode"
+)
+
+const (
+	activeProviderEntryID            = "active"
+	defaultDNSProviderEntryID        = "default"
+	defaultAgentInstallScriptBaseURL = "https://raw.githubusercontent.com/keli-123456/kelicloud-agent/refs/heads/main"
+	cloudflareProviderName           = "cloudflare"
+	aliyunProviderName               = "aliyun"
+)
+
+type genericProviderEntry struct {
+	ID     string                 `json:"id"`
+	Name   string                 `json:"name"`
+	Values map[string]interface{} `json:"values"`
+}
+
+type cloudflareConfig struct {
+	APIToken string `json:"api_token"`
+	ZoneID   string `json:"zone_id"`
+	ZoneName string `json:"zone_name"`
+	Proxied  bool   `json:"proxied"`
+}
+
+type aliyunDNSConfig struct {
+	AccessKeyID     string `json:"access_key_id"`
+	AccessKeySecret string `json:"access_key_secret"`
+	RegionID        string `json:"region_id"`
+	DomainName      string `json:"domain_name"`
+}
+
+func loadProviderAddition(userUUID, providerName string) (string, error) {
+	providerConfig, err := database.GetCloudProviderConfigByUserAndName(userUUID, providerName)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(providerConfig.Addition), nil
+}
+
+func loadAWSCredential(userUUID, entryID string) (*awscloud.Addition, *awscloud.CredentialRecord, error) {
+	raw, err := loadProviderAddition(userUUID, "aws")
+	if err != nil {
+		return nil, nil, fmt.Errorf("AWS provider is not configured")
+	}
+
+	addition := &awscloud.Addition{}
+	if raw == "" {
+		raw = "{}"
+	}
+	if err := json.Unmarshal([]byte(raw), addition); err != nil {
+		return nil, nil, fmt.Errorf("AWS configuration is invalid: %w", err)
+	}
+	addition.Normalize()
+
+	if strings.TrimSpace(entryID) == "" || strings.TrimSpace(entryID) == activeProviderEntryID {
+		credential := addition.ActiveCredential()
+		if credential == nil {
+			return nil, nil, errors.New("AWS credential is not configured")
+		}
+		return addition, credential, nil
+	}
+
+	credential := addition.FindCredential(entryID)
+	if credential == nil {
+		return nil, nil, fmt.Errorf("AWS credential not found: %s", entryID)
+	}
+	return addition, credential, nil
+}
+
+func loadDigitalOceanToken(userUUID, entryID string) (*digitalocean.Addition, *digitalocean.TokenRecord, error) {
+	raw, err := loadProviderAddition(userUUID, "digitalocean")
+	if err != nil {
+		return nil, nil, fmt.Errorf("DigitalOcean provider is not configured")
+	}
+
+	addition := &digitalocean.Addition{}
+	if raw == "" {
+		raw = "{}"
+	}
+	if err := json.Unmarshal([]byte(raw), addition); err != nil {
+		return nil, nil, fmt.Errorf("DigitalOcean configuration is invalid: %w", err)
+	}
+	addition.Normalize()
+
+	if strings.TrimSpace(entryID) == "" || strings.TrimSpace(entryID) == activeProviderEntryID {
+		token := addition.ActiveToken()
+		if token == nil {
+			return nil, nil, errors.New("DigitalOcean token is not configured")
+		}
+		return addition, token, nil
+	}
+
+	token := addition.FindToken(entryID)
+	if token == nil {
+		return nil, nil, fmt.Errorf("DigitalOcean token not found: %s", entryID)
+	}
+	return addition, token, nil
+}
+
+func loadLinodeToken(userUUID, entryID string) (*linode.Addition, *linode.TokenRecord, error) {
+	raw, err := loadProviderAddition(userUUID, "linode")
+	if err != nil {
+		return nil, nil, fmt.Errorf("Linode provider is not configured")
+	}
+
+	addition := &linode.Addition{}
+	if raw == "" {
+		raw = "{}"
+	}
+	if err := json.Unmarshal([]byte(raw), addition); err != nil {
+		return nil, nil, fmt.Errorf("Linode configuration is invalid: %w", err)
+	}
+	addition.Normalize()
+
+	if strings.TrimSpace(entryID) == "" || strings.TrimSpace(entryID) == activeProviderEntryID {
+		token := addition.ActiveToken()
+		if token == nil {
+			return nil, nil, errors.New("Linode token is not configured")
+		}
+		return addition, token, nil
+	}
+
+	token := addition.FindToken(entryID)
+	if token == nil {
+		return nil, nil, fmt.Errorf("Linode token not found: %s", entryID)
+	}
+	return addition, token, nil
+}
+
+func loadGenericProviderEntry(userUUID, providerName, entryID string) (*genericProviderEntry, error) {
+	raw, err := loadProviderAddition(userUUID, providerName)
+	if err != nil {
+		return nil, fmt.Errorf("%s provider is not configured", providerName)
+	}
+	raw = strings.TrimSpace(raw)
+	if raw == "" || raw == "{}" || raw == "null" {
+		return nil, fmt.Errorf("%s provider is not configured", providerName)
+	}
+
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(raw), &object); err == nil {
+		if rawEntries, ok := object["entries"]; ok {
+			var entries []genericProviderEntry
+			if err := json.Unmarshal(rawEntries, &entries); err != nil {
+				return nil, fmt.Errorf("%s provider configuration is invalid: %w", providerName, err)
+			}
+			for _, entry := range entries {
+				normalized := normalizeGenericProviderEntry(entry)
+				if normalized.ID == entryID {
+					return &normalized, nil
+				}
+			}
+			return nil, fmt.Errorf("%s provider entry not found: %s", providerName, entryID)
+		}
+	}
+
+	if strings.TrimSpace(entryID) != "" && strings.TrimSpace(entryID) != defaultDNSProviderEntryID {
+		return nil, fmt.Errorf("%s provider entry not found: %s", providerName, entryID)
+	}
+
+	var values map[string]interface{}
+	if err := json.Unmarshal([]byte(raw), &values); err != nil {
+		return nil, fmt.Errorf("%s provider configuration is invalid: %w", providerName, err)
+	}
+	entry := normalizeGenericProviderEntry(genericProviderEntry{
+		ID:     defaultDNSProviderEntryID,
+		Name:   "Default",
+		Values: values,
+	})
+	return &entry, nil
+}
+
+func normalizeGenericProviderEntry(entry genericProviderEntry) genericProviderEntry {
+	entry.ID = strings.TrimSpace(entry.ID)
+	entry.Name = strings.TrimSpace(entry.Name)
+	if entry.ID == "" {
+		entry.ID = defaultDNSProviderEntryID
+	}
+	if entry.Name == "" {
+		entry.Name = "Default"
+	}
+	if entry.Values == nil {
+		entry.Values = map[string]interface{}{}
+	}
+	return entry
+}
+
+func decodeGenericEntryConfig[T any](entry *genericProviderEntry) (*T, error) {
+	if entry == nil {
+		return nil, errors.New("provider entry is required")
+	}
+	payload, err := json.Marshal(entry.Values)
+	if err != nil {
+		return nil, err
+	}
+	var value T
+	if err := json.Unmarshal(payload, &value); err != nil {
+		return nil, err
+	}
+	return &value, nil
+}
+
+type autoConnectOptions struct {
+	UserUUID          string
+	UserData          string
+	Provider          string
+	CredentialName    string
+	Group             string
+	WrapInShellScript bool
+}
+
+func buildAutoConnectUserData(opts autoConnectOptions) (string, string, error) {
+	userData := strings.TrimSpace(opts.UserData)
+	origin, err := resolveAutoConnectOriginForUser(opts.UserUUID)
+	if err != nil {
+		return "", "", err
+	}
+
+	autoDiscoveryKey, err := config.EnsureAutoDiscoveryKeyForUser(opts.UserUUID)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to load auto discovery key: %w", err)
+	}
+	autoDiscoveryKey = strings.TrimSpace(autoDiscoveryKey)
+	if len(autoDiscoveryKey) < 12 {
+		return "", "", errors.New("auto connect requires a configured Auto Discovery Key")
+	}
+
+	group := normalizeAutoConnectGroup(opts.Group)
+	if group == "" {
+		group = normalizeAutoConnectGroup(defaultAutoConnectGroup(opts.Provider, opts.CredentialName))
+	}
+	if group == "" {
+		return "", "", errors.New("auto connect group cannot be empty")
+	}
+
+	installScriptURL, err := resolveAgentInstallScriptURLForUser(opts.UserUUID, "install.sh")
+	if err != nil {
+		return "", "", err
+	}
+
+	scopedKey := buildScopedAutoDiscoveryKey(autoDiscoveryKey, group)
+	snippet := buildInstallSnippet(installScriptURL, origin, scopedKey)
+	merged, err := mergeAutoConnectUserData(userData, snippet, opts.WrapInShellScript)
+	if err != nil {
+		return "", "", err
+	}
+	return merged, group, nil
+}
+
+func resolveAutoConnectOriginForUser(userUUID string) (string, error) {
+	scriptDomain, err := config.GetAsForUser[string](userUUID, config.ScriptDomainKey, "")
+	if err != nil {
+		return "", fmt.Errorf("failed to load script domain: %w", err)
+	}
+	scriptDomain = strings.TrimSpace(scriptDomain)
+	if scriptDomain == "" {
+		return "", errors.New("script_domain is required for automatic failover auto-connect")
+	}
+	if strings.Contains(scriptDomain, "://") {
+		return strings.TrimRight(scriptDomain, "/"), nil
+	}
+	return "https://" + strings.TrimRight(scriptDomain, "/"), nil
+}
+
+func resolveAgentInstallScriptURLForUser(userUUID, scriptFile string) (string, error) {
+	baseScriptsURL, err := config.GetAsForUser[string](userUUID, config.BaseScriptsURLKey, "")
+	if err != nil {
+		return "", fmt.Errorf("failed to load base scripts url: %w", err)
+	}
+	return buildAgentInstallScriptURL(baseScriptsURL, scriptFile), nil
+}
+
+func buildAgentInstallScriptURL(baseScriptsURL, scriptFile string) string {
+	base := normalizeAgentInstallScriptBaseURL(baseScriptsURL)
+	scriptFile = strings.TrimLeft(strings.TrimSpace(scriptFile), "/")
+	if scriptFile == "" {
+		scriptFile = "install.sh"
+	}
+	return strings.TrimRight(base, "/") + "/" + scriptFile
+}
+
+func normalizeAgentInstallScriptBaseURL(raw string) string {
+	base := strings.TrimSpace(raw)
+	if base == "" {
+		return defaultAgentInstallScriptBaseURL
+	}
+
+	if !strings.Contains(base, "://") && strings.HasPrefix(base, "github.com/") {
+		base = "https://" + base
+	}
+
+	parsed, err := url.Parse(base)
+	if err == nil && parsed.Host != "" {
+		switch strings.ToLower(parsed.Host) {
+		case "github.com", "www.github.com":
+			if normalized := normalizeGitHubRepositoryURLToRawBase(parsed); normalized != "" {
+				return normalized
+			}
+		case "raw.githubusercontent.com":
+			if normalized := normalizeRawGitHubURLToBase(parsed); normalized != "" {
+				return normalized
+			}
+		}
+	}
+
+	if strings.HasSuffix(base, "/install.sh") || strings.HasSuffix(base, "/install.ps1") {
+		if idx := strings.LastIndex(base, "/"); idx > 0 {
+			base = base[:idx]
+		}
+	}
+
+	if !strings.Contains(base, "://") {
+		base = "https://" + base
+	}
+	return strings.TrimRight(base, "/")
+}
+
+func normalizeGitHubRepositoryURLToRawBase(parsed *url.URL) string {
+	parts := splitURLPath(parsed.Path)
+	if len(parts) < 2 {
+		return ""
+	}
+
+	owner := parts[0]
+	repo := parts[1]
+	branch := "main"
+	subpath := ""
+	if len(parts) >= 4 && (parts[2] == "tree" || parts[2] == "blob") {
+		branch = parts[3]
+		if len(parts) > 4 {
+			subpath = strings.Join(parts[4:], "/")
+		}
+	}
+
+	if strings.HasSuffix(subpath, "install.sh") || strings.HasSuffix(subpath, "install.ps1") {
+		if idx := strings.LastIndex(subpath, "/"); idx >= 0 {
+			subpath = subpath[:idx]
+		} else {
+			subpath = ""
+		}
+	}
+
+	base := fmt.Sprintf("https://raw.githubusercontent.com/%s/%s/refs/heads/%s", owner, repo, branch)
+	if subpath != "" {
+		base += "/" + strings.Trim(subpath, "/")
+	}
+	return base
+}
+
+func normalizeRawGitHubURLToBase(parsed *url.URL) string {
+	parts := splitURLPath(parsed.Path)
+	if len(parts) < 3 {
+		return ""
+	}
+	baseParts := parts
+	if strings.HasSuffix(baseParts[len(baseParts)-1], "install.sh") || strings.HasSuffix(baseParts[len(baseParts)-1], "install.ps1") {
+		baseParts = baseParts[:len(baseParts)-1]
+	}
+	return "https://raw.githubusercontent.com/" + strings.Join(baseParts, "/")
+}
+
+func splitURLPath(path string) []string {
+	trimmed := strings.Trim(path, "/")
+	if trimmed == "" {
+		return nil
+	}
+	return strings.Split(trimmed, "/")
+}
+
+func normalizeAutoConnectGroup(group string) string {
+	group = strings.Join(strings.Fields(strings.TrimSpace(group)), " ")
+	if len(group) > 100 {
+		group = group[:100]
+	}
+	return strings.TrimSpace(group)
+}
+
+func defaultAutoConnectGroup(provider, credentialName string) string {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	if provider == "" {
+		provider = "cloud"
+	}
+	credentialName = normalizeAutoConnectGroup(credentialName)
+	if credentialName == "" {
+		credentialName = "default"
+	}
+	return provider + "/" + credentialName
+}
+
+func buildScopedAutoDiscoveryKey(baseKey, group string) string {
+	baseKey = strings.TrimSpace(baseKey)
+	group = normalizeAutoConnectGroup(group)
+	if group == "" {
+		return baseKey
+	}
+	return baseKey + "::group-b64=" + base64.RawURLEncoding.EncodeToString([]byte(group))
+}
+
+func buildInstallSnippet(installScriptURL, endpoint, scopedAutoDiscoveryKey string) string {
+	var builder strings.Builder
+	builder.WriteString("# Komari auto-connect\n")
+	builder.WriteString("KOMARI_INSTALL_URL=")
+	builder.WriteString(shellSingleQuote(strings.TrimSpace(installScriptURL)))
+	builder.WriteString("\n")
+	builder.WriteString("KOMARI_ENDPOINT=")
+	builder.WriteString(shellSingleQuote(strings.TrimSpace(endpoint)))
+	builder.WriteString("\n")
+	builder.WriteString("KOMARI_AUTO_DISCOVERY=")
+	builder.WriteString(shellSingleQuote(strings.TrimSpace(scopedAutoDiscoveryKey)))
+	builder.WriteString("\n")
+	builder.WriteString("KOMARI_INSTALL_SCRIPT=\"$(mktemp)\"\n")
+	builder.WriteString("trap 'rm -f \"$KOMARI_INSTALL_SCRIPT\"' EXIT\n")
+	builder.WriteString("if command -v wget >/dev/null 2>&1; then\n")
+	builder.WriteString("  wget -qO \"$KOMARI_INSTALL_SCRIPT\" \"$KOMARI_INSTALL_URL\"\n")
+	builder.WriteString("elif command -v curl >/dev/null 2>&1; then\n")
+	builder.WriteString("  curl -fsSL \"$KOMARI_INSTALL_URL\" -o \"$KOMARI_INSTALL_SCRIPT\"\n")
+	builder.WriteString("else\n")
+	builder.WriteString("  echo 'wget or curl is required to install komari-agent' >&2\n")
+	builder.WriteString("  exit 1\n")
+	builder.WriteString("fi\n")
+	builder.WriteString("if command -v sudo >/dev/null 2>&1; then\n")
+	builder.WriteString("  sudo bash \"$KOMARI_INSTALL_SCRIPT\" -e \"$KOMARI_ENDPOINT\" --auto-discovery \"$KOMARI_AUTO_DISCOVERY\"\n")
+	builder.WriteString("else\n")
+	builder.WriteString("  bash \"$KOMARI_INSTALL_SCRIPT\" -e \"$KOMARI_ENDPOINT\" --auto-discovery \"$KOMARI_AUTO_DISCOVERY\"\n")
+	builder.WriteString("fi\n")
+	builder.WriteString("rm -f \"$KOMARI_INSTALL_SCRIPT\"\n")
+	builder.WriteString("trap - EXIT\n")
+	return builder.String()
+}
+
+func mergeAutoConnectUserData(userData, installSnippet string, wrapInShellScript bool) (string, error) {
+	userData = strings.TrimSpace(userData)
+	if strings.HasPrefix(userData, "#cloud-config") {
+		return "", errors.New("auto connect cannot be combined with #cloud-config user_data; use shell commands instead")
+	}
+	installSnippet = strings.TrimSpace(installSnippet)
+	if installSnippet == "" {
+		return userData, nil
+	}
+
+	if userData == "" {
+		if !wrapInShellScript {
+			return installSnippet + "\n", nil
+		}
+		var builder strings.Builder
+		builder.WriteString("#!/bin/bash\n")
+		builder.WriteString("set -eu\n\n")
+		builder.WriteString(installSnippet)
+		builder.WriteString("\n")
+		return builder.String(), nil
+	}
+
+	var builder strings.Builder
+	builder.WriteString(userData)
+	if !strings.HasSuffix(userData, "\n") {
+		builder.WriteString("\n")
+	}
+	builder.WriteString("\n")
+	builder.WriteString(installSnippet)
+	if !strings.HasSuffix(installSnippet, "\n") {
+		builder.WriteString("\n")
+	}
+	return builder.String(), nil
+}
+
+func shellSingleQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", `'"'"'`) + "'"
+}
