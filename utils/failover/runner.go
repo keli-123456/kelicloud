@@ -128,7 +128,7 @@ func RunScheduledWork() error {
 	now := time.Now()
 	for _, task := range taskList {
 		taskCopy := task
-		report := latestReports[taskCopy.WatchClientUUID]
+		report := latestReports[strings.TrimSpace(taskCopy.WatchClientUUID)]
 		shouldTrigger, statusFields, reason := evaluateTaskHealth(&taskCopy, report, now)
 		if len(statusFields) > 0 {
 			if err := failoverdb.UpdateTaskFields(taskCopy.ID, statusFields); err != nil {
@@ -152,7 +152,7 @@ func RunTaskNowForUser(userUUID string, taskID uint) (*models.FailoverExecution,
 		return nil, err
 	}
 	latestReports := ws.GetLatestReport()
-	return queueExecution(task, latestReports[task.WatchClientUUID], "manual run")
+	return queueExecution(task, latestReports[strings.TrimSpace(task.WatchClientUUID)], "manual run")
 }
 
 func evaluateTaskHealth(task *models.FailoverTask, report *common.Report, now time.Time) (bool, map[string]interface{}, string) {
@@ -168,6 +168,12 @@ func evaluateTaskHealth(task *models.FailoverTask, report *common.Report, now ti
 			fields["last_message"] = "cooldown until " + nextRun.UTC().Format(time.RFC3339)
 			return false, fields, ""
 		}
+	}
+
+	if strings.TrimSpace(task.WatchClientUUID) == "" {
+		fields["last_status"] = models.FailoverTaskStatusUnknown
+		fields["last_message"] = "task is not initialized"
+		return false, fields, ""
 	}
 
 	if report == nil || report.CNConnectivity == nil {
@@ -390,6 +396,21 @@ func (r *executionRunner) executePlan(plan models.FailoverPlan) (*actionOutcome,
 		r.finishStep(scriptStep, models.FailoverStepStatusSuccess, "script finished successfully", nil)
 	}
 
+	if strings.TrimSpace(r.task.DNSProvider) == "" || strings.TrimSpace(r.task.DNSEntryID) == "" {
+		dnsStep := r.startStep("switch_dns", "Switch DNS", map[string]interface{}{
+			"configured": false,
+		})
+		skippedResult := map[string]interface{}{
+			"message": "dns switching is not configured for this task",
+		}
+		_ = failoverdb.UpdateExecutionFields(r.execution.ID, map[string]interface{}{
+			"dns_status": models.FailoverDNSStatusSkipped,
+			"dns_result": marshalJSON(skippedResult),
+		})
+		r.finishStep(dnsStep, models.FailoverStepStatusSkipped, "dns switching skipped", skippedResult)
+		return outcome, nil
+	}
+
 	dnsStep := r.startStep("switch_dns", "Switch DNS", map[string]interface{}{
 		"provider": r.task.DNSProvider,
 	})
@@ -559,11 +580,21 @@ func (r *executionRunner) succeedExecution(outcome *actionOutcome) {
 		fields["old_instance_ref"] = marshalJSON(outcome.OldInstanceRef)
 	}
 	_ = failoverdb.UpdateExecutionFields(r.execution.ID, fields)
-	_ = failoverdb.UpdateTaskFields(r.task.ID, map[string]interface{}{
+
+	taskUpdates := map[string]interface{}{
 		"last_status":       models.FailoverTaskStatusCooldown,
 		"last_message":      "failover completed",
 		"last_succeeded_at": models.FromTime(now),
-	})
+	}
+	if outcome != nil {
+		if nextClientUUID := strings.TrimSpace(firstNonEmpty(outcome.NewClientUUID, outcome.TargetClientUUID)); nextClientUUID != "" {
+			taskUpdates["watch_client_uuid"] = nextClientUUID
+		}
+		if nextAddress := primaryOutcomeAddress(outcome); nextAddress != "" {
+			taskUpdates["current_address"] = nextAddress
+		}
+	}
+	_ = failoverdb.UpdateTaskFields(r.task.ID, taskUpdates)
 	r.succeeded = true
 }
 
@@ -612,6 +643,16 @@ func (r *executionRunner) finishStep(step *models.FailoverExecutionStep, status,
 	if err := failoverdb.UpdateExecutionStepFields(step.ID, fields); err != nil {
 		log.Printf("failover: failed to update step %d: %v", step.ID, err)
 	}
+}
+
+func primaryOutcomeAddress(outcome *actionOutcome) string {
+	if outcome == nil {
+		return ""
+	}
+	if ipv4 := strings.TrimSpace(outcome.IPv4); ipv4 != "" {
+		return ipv4
+	}
+	return strings.TrimSpace(outcome.IPv6)
 }
 
 type commandResult struct {

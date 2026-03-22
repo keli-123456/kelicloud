@@ -413,6 +413,8 @@ func RunServer() {
 		)
 		{
 			failoverGroup.GET("/tasks", admin.GetFailoverTasks)
+			failoverGroup.GET("/dns/catalog", admin.GetFailoverDNSCatalog)
+			failoverGroup.GET("/plans/catalog", admin.GetFailoverPlanCatalog)
 			failoverGroup.POST("/tasks", admin.CreateFailoverTask)
 			failoverGroup.GET("/tasks/:id", admin.GetFailoverTask)
 			failoverGroup.POST("/tasks/:id", admin.UpdateFailoverTask)

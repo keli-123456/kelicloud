@@ -48,6 +48,7 @@ func taskStatusForEnabled(enabled bool, current string) string {
 func applyTaskDefaults(task *models.FailoverTask) {
 	task.Name = strings.TrimSpace(task.Name)
 	task.WatchClientUUID = strings.TrimSpace(task.WatchClientUUID)
+	task.CurrentAddress = strings.TrimSpace(task.CurrentAddress)
 	task.TriggerSource = strings.TrimSpace(task.TriggerSource)
 	task.DNSProvider = strings.TrimSpace(task.DNSProvider)
 	task.DNSEntryID = strings.TrimSpace(task.DNSEntryID)
@@ -204,7 +205,8 @@ func UpdateTaskForUser(userUUID string, taskID uint, task *models.FailoverTask, 
 		updates := map[string]interface{}{
 			"name":                 task.Name,
 			"enabled":              task.Enabled,
-			"watch_client_uuid":    task.WatchClientUUID,
+			"watch_client_uuid":    strings.TrimSpace(existing.WatchClientUUID),
+			"current_address":      strings.TrimSpace(existing.CurrentAddress),
 			"trigger_source":       task.TriggerSource,
 			"failure_threshold":    task.FailureThreshold,
 			"stale_after_seconds":  task.StaleAfterSeconds,
@@ -215,6 +217,12 @@ func UpdateTaskForUser(userUUID string, taskID uint, task *models.FailoverTask, 
 			"delete_strategy":      task.DeleteStrategy,
 			"delete_delay_seconds": task.DeleteDelaySeconds,
 			"last_status":          taskStatusForEnabled(task.Enabled, existing.LastStatus),
+		}
+		if task.WatchClientUUID != "" {
+			updates["watch_client_uuid"] = task.WatchClientUUID
+		}
+		if task.CurrentAddress != "" {
+			updates["current_address"] = task.CurrentAddress
 		}
 		if err := taskScopeWithDB(tx.Model(&models.FailoverTask{}), userUUID).
 			Where("id = ?", taskID).

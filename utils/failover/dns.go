@@ -32,6 +32,39 @@ type dnsUpdateResult struct {
 	RR       string `json:"rr,omitempty"`
 }
 
+type DNSCatalog struct {
+	Provider string             `json:"provider"`
+	Defaults DNSCatalogDefaults `json:"defaults"`
+	Records  []DNSRecordOption  `json:"records"`
+	Lines    []DNSOption        `json:"lines"`
+}
+
+type DNSCatalogDefaults struct {
+	ZoneID     string `json:"zone_id,omitempty"`
+	ZoneName   string `json:"zone_name,omitempty"`
+	DomainName string `json:"domain_name,omitempty"`
+	Proxied    *bool  `json:"proxied,omitempty"`
+}
+
+type DNSRecordOption struct {
+	ID         string `json:"id,omitempty"`
+	Name       string `json:"name,omitempty"`
+	Type       string `json:"type,omitempty"`
+	Value      string `json:"value,omitempty"`
+	TTL        int    `json:"ttl,omitempty"`
+	ZoneID     string `json:"zone_id,omitempty"`
+	ZoneName   string `json:"zone_name,omitempty"`
+	DomainName string `json:"domain_name,omitempty"`
+	RR         string `json:"rr,omitempty"`
+	Line       string `json:"line,omitempty"`
+	Proxied    *bool  `json:"proxied,omitempty"`
+}
+
+type DNSOption struct {
+	Value string `json:"value"`
+	Label string `json:"label"`
+}
+
 type cloudflareDNSPayload struct {
 	ZoneID     string `json:"zone_id,omitempty"`
 	ZoneName   string `json:"zone_name,omitempty"`
@@ -49,6 +82,20 @@ type aliyunRecordPayload struct {
 	Line       string `json:"line,omitempty"`
 }
 
+func LoadDNSCatalog(userUUID, providerName, entryID, zoneName, domainName string) (*DNSCatalog, error) {
+	providerName = strings.ToLower(strings.TrimSpace(providerName))
+	entryID = strings.TrimSpace(entryID)
+
+	switch providerName {
+	case cloudflareProviderName:
+		return loadCloudflareDNSCatalog(userUUID, entryID, zoneName)
+	case aliyunProviderName:
+		return loadAliyunDNSCatalog(userUUID, entryID, domainName)
+	default:
+		return nil, fmt.Errorf("unsupported dns provider: %s", providerName)
+	}
+}
+
 func applyDNSRecord(userUUID, providerName, entryID, payloadJSON, ipv4, ipv6 string) (*dnsUpdateResult, error) {
 	switch strings.ToLower(strings.TrimSpace(providerName)) {
 	case cloudflareProviderName:
@@ -58,6 +105,114 @@ func applyDNSRecord(userUUID, providerName, entryID, payloadJSON, ipv4, ipv6 str
 	default:
 		return nil, fmt.Errorf("unsupported dns provider: %s", providerName)
 	}
+}
+
+func loadCloudflareDNSCatalog(userUUID, entryID, zoneName string) (*DNSCatalog, error) {
+	entry, err := loadGenericProviderEntry(userUUID, cloudflareProviderName, entryID)
+	if err != nil {
+		return nil, err
+	}
+	configValue, err := decodeGenericEntryConfig[cloudflareConfig](entry)
+	if err != nil {
+		return nil, fmt.Errorf("cloudflare config is invalid: %w", err)
+	}
+	if strings.TrimSpace(configValue.APIToken) == "" {
+		return nil, errors.New("cloudflare api_token is required")
+	}
+
+	catalog := &DNSCatalog{
+		Provider: cloudflareProviderName,
+		Defaults: DNSCatalogDefaults{
+			ZoneID:   strings.TrimSpace(configValue.ZoneID),
+			ZoneName: firstNonEmpty(strings.TrimSpace(zoneName), strings.TrimSpace(configValue.ZoneName)),
+			Proxied:  ptrBool(configValue.Proxied),
+		},
+		Records: []DNSRecordOption{},
+		Lines:   []DNSOption{},
+	}
+
+	client := newCloudflareDNSClient(configValue.APIToken)
+	resolvedZoneID := strings.TrimSpace(catalog.Defaults.ZoneID)
+	if resolvedZoneID == "" && strings.TrimSpace(catalog.Defaults.ZoneName) != "" {
+		resolvedZoneID, err = client.resolveZoneID(context.Background(), catalog.Defaults.ZoneName)
+		if err != nil {
+			return nil, err
+		}
+		catalog.Defaults.ZoneID = resolvedZoneID
+	}
+	if resolvedZoneID == "" {
+		return catalog, nil
+	}
+
+	records, err := client.listRecords(context.Background(), resolvedZoneID)
+	if err != nil {
+		return nil, err
+	}
+	for _, record := range records {
+		proxied := record.Proxied
+		catalog.Records = append(catalog.Records, DNSRecordOption{
+			ID:       strings.TrimSpace(record.ID),
+			Name:     strings.TrimSpace(record.Name),
+			Type:     strings.TrimSpace(record.Type),
+			Value:    strings.TrimSpace(record.Content),
+			TTL:      record.TTL,
+			ZoneID:   resolvedZoneID,
+			ZoneName: strings.TrimSpace(catalog.Defaults.ZoneName),
+			Proxied:  &proxied,
+		})
+	}
+	return catalog, nil
+}
+
+func loadAliyunDNSCatalog(userUUID, entryID, domainName string) (*DNSCatalog, error) {
+	entry, err := loadGenericProviderEntry(userUUID, aliyunProviderName, entryID)
+	if err != nil {
+		return nil, err
+	}
+	configValue, err := decodeGenericEntryConfig[aliyunDNSConfig](entry)
+	if err != nil {
+		return nil, fmt.Errorf("aliyun dns config is invalid: %w", err)
+	}
+	if strings.TrimSpace(configValue.AccessKeyID) == "" || strings.TrimSpace(configValue.AccessKeySecret) == "" {
+		return nil, errors.New("aliyun access_key_id and access_key_secret are required")
+	}
+
+	resolvedDomainName := firstNonEmpty(strings.TrimSpace(domainName), strings.TrimSpace(configValue.DomainName))
+	catalog := &DNSCatalog{
+		Provider: aliyunProviderName,
+		Defaults: DNSCatalogDefaults{
+			DomainName: resolvedDomainName,
+		},
+		Records: []DNSRecordOption{},
+		Lines:   defaultAliyunDNSLines(),
+	}
+
+	client := newAliyunDNSClient(configValue.AccessKeyID, configValue.AccessKeySecret, configValue.RegionID)
+	if strings.TrimSpace(resolvedDomainName) == "" {
+		return catalog, nil
+	}
+
+	if lines, lineErr := client.listLines(context.Background(), resolvedDomainName); lineErr == nil && len(lines) > 0 {
+		catalog.Lines = lines
+	}
+
+	records, err := client.listRecords(context.Background(), resolvedDomainName)
+	if err != nil {
+		return nil, err
+	}
+	for _, record := range records {
+		catalog.Records = append(catalog.Records, DNSRecordOption{
+			ID:         strings.TrimSpace(record.RecordID),
+			Name:       joinAliyunRecordName(resolvedDomainName, record.RR),
+			Type:       strings.TrimSpace(record.Type),
+			Value:      strings.TrimSpace(record.Value),
+			TTL:        record.TTL,
+			DomainName: resolvedDomainName,
+			RR:         strings.TrimSpace(record.RR),
+			Line:       strings.TrimSpace(record.Line),
+		})
+	}
+	return catalog, nil
 }
 
 func applyCloudflareDNSRecord(userUUID, entryID, payloadJSON, ipv4, ipv6 string) (*dnsUpdateResult, error) {
@@ -292,6 +447,17 @@ func (c *cloudflareDNSClient) resolveZoneID(ctx context.Context, zoneName string
 	return strings.TrimSpace(response.Result[0].ID), nil
 }
 
+func (c *cloudflareDNSClient) listRecords(ctx context.Context, zoneID string) ([]cloudflareDNSRecord, error) {
+	query := url.Values{}
+	query.Set("per_page", "100")
+
+	var response cloudflareAPIEnvelope[[]cloudflareDNSRecord]
+	if err := c.do(ctx, http.MethodGet, fmt.Sprintf("https://api.cloudflare.com/client/v4/zones/%s/dns_records?%s", strings.TrimSpace(zoneID), query.Encode()), nil, &response); err != nil {
+		return nil, err
+	}
+	return response.Result, nil
+}
+
 func (c *cloudflareDNSClient) upsertRecord(ctx context.Context, zoneID, name, recordType, content string, ttl int, proxied bool) (*cloudflareDNSRecord, error) {
 	query := url.Values{}
 	query.Set("name", name)
@@ -392,8 +558,19 @@ type aliyunDescribeRecordsResponse struct {
 			RR       string `json:"RR"`
 			Type     string `json:"Type"`
 			Value    string `json:"Value"`
+			TTL      int    `json:"TTL"`
+			Line     string `json:"Line"`
 		} `json:"Record"`
 	} `json:"DomainRecords"`
+}
+
+type aliyunDescribeDomainLinesResponse struct {
+	DomainLines struct {
+		Line []struct {
+			LineCode string `json:"LineCode"`
+			LineName string `json:"LineName"`
+		} `json:"Line"`
+	} `json:"DomainLines"`
 }
 
 type aliyunRecordMutationResponse struct {
@@ -467,6 +644,54 @@ func (c *aliyunDNSClient) findRecordID(ctx context.Context, domainName, rr, reco
 		}
 	}
 	return "", nil
+}
+
+func (c *aliyunDNSClient) listRecords(ctx context.Context, domainName string) ([]struct {
+	RecordID string `json:"RecordId"`
+	RR       string `json:"RR"`
+	Type     string `json:"Type"`
+	Value    string `json:"Value"`
+	TTL      int    `json:"TTL"`
+	Line     string `json:"Line"`
+}, error) {
+	values := url.Values{}
+	values.Set("DomainName", domainName)
+	values.Set("PageSize", "100")
+
+	var response aliyunDescribeRecordsResponse
+	if err := c.doRPC(ctx, "DescribeDomainRecords", values, &response); err != nil {
+		return nil, err
+	}
+	return response.DomainRecords.Record, nil
+}
+
+func (c *aliyunDNSClient) listLines(ctx context.Context, domainName string) ([]DNSOption, error) {
+	values := url.Values{}
+	if strings.TrimSpace(domainName) != "" {
+		values.Set("DomainName", strings.TrimSpace(domainName))
+	}
+
+	var response aliyunDescribeDomainLinesResponse
+	if err := c.doRPC(ctx, "DescribeDomainLines", values, &response); err != nil {
+		return nil, err
+	}
+
+	options := make([]DNSOption, 0, len(response.DomainLines.Line))
+	for _, line := range response.DomainLines.Line {
+		value := strings.TrimSpace(line.LineCode)
+		label := strings.TrimSpace(line.LineName)
+		if value == "" {
+			continue
+		}
+		if label == "" {
+			label = value
+		}
+		options = append(options, DNSOption{
+			Value: value,
+			Label: label,
+		})
+	}
+	return options, nil
 }
 
 func (c *aliyunDNSClient) doRPC(ctx context.Context, action string, values url.Values, out any) error {
@@ -543,4 +768,34 @@ func percentEncode(value string) string {
 	encoded = strings.ReplaceAll(encoded, "*", "%2A")
 	encoded = strings.ReplaceAll(encoded, "%7E", "~")
 	return encoded
+}
+
+func defaultAliyunDNSLines() []DNSOption {
+	return []DNSOption{
+		{Value: "default", Label: "Default"},
+		{Value: "telecom", Label: "Telecom"},
+		{Value: "unicom", Label: "Unicom"},
+		{Value: "mobile", Label: "Mobile"},
+		{Value: "edu", Label: "Education"},
+		{Value: "oversea", Label: "Overseas"},
+		{Value: "search", Label: "Search Engine"},
+		{Value: "school", Label: "School"},
+	}
+}
+
+func joinAliyunRecordName(domainName, rr string) string {
+	domainName = strings.TrimSpace(domainName)
+	rr = strings.TrimSpace(rr)
+	if rr == "" || rr == "@" {
+		return domainName
+	}
+	if domainName == "" {
+		return rr
+	}
+	return rr + "." + domainName
+}
+
+func ptrBool(value bool) *bool {
+	result := value
+	return &result
 }

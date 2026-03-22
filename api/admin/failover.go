@@ -40,12 +40,13 @@ type failoverPlanRequest struct {
 type failoverTaskRequest struct {
 	Name               string                `json:"name" binding:"required"`
 	Enabled            *bool                 `json:"enabled"`
-	WatchClientUUID    string                `json:"watch_client_uuid" binding:"required"`
+	CurrentClientUUID  string                `json:"current_client_uuid"`
+	WatchClientUUID    string                `json:"watch_client_uuid"`
 	FailureThreshold   int                   `json:"failure_threshold"`
 	StaleAfterSeconds  int                   `json:"stale_after_seconds"`
 	CooldownSeconds    int                   `json:"cooldown_seconds"`
-	DNSProvider        string                `json:"dns_provider" binding:"required"`
-	DNSEntryID         string                `json:"dns_entry_id" binding:"required"`
+	DNSProvider        string                `json:"dns_provider"`
+	DNSEntryID         string                `json:"dns_entry_id"`
 	DNSPayload         json.RawMessage       `json:"dns_payload"`
 	DeleteStrategy     string                `json:"delete_strategy"`
 	DeleteDelaySeconds int                   `json:"delete_delay_seconds"`
@@ -78,6 +79,8 @@ type failoverTaskView struct {
 	ID                 uint                          `json:"id"`
 	Name               string                        `json:"name"`
 	Enabled            bool                          `json:"enabled"`
+	CurrentClientUUID  string                        `json:"current_client_uuid"`
+	CurrentAddress     string                        `json:"current_address"`
 	WatchClientUUID    string                        `json:"watch_client_uuid"`
 	TriggerSource      string                        `json:"trigger_source"`
 	FailureThreshold   int                           `json:"failure_threshold"`
@@ -286,6 +289,10 @@ func buildFailoverProbeView(task *models.FailoverTask, report *common.Report, no
 		Status: "unavailable",
 		Stale:  true,
 	}
+	if task != nil && strings.TrimSpace(task.WatchClientUUID) == "" {
+		view.Message = "task is not initialized"
+		return view
+	}
 	if task == nil || report == nil || report.CNConnectivity == nil {
 		return view
 	}
@@ -356,6 +363,8 @@ func buildFailoverTaskView(task *models.FailoverTask, latestExecution *models.Fa
 		ID:                 task.ID,
 		Name:               task.Name,
 		Enabled:            task.Enabled,
+		CurrentClientUUID:  task.WatchClientUUID,
+		CurrentAddress:     task.CurrentAddress,
 		WatchClientUUID:    task.WatchClientUUID,
 		TriggerSource:      task.TriggerSource,
 		FailureThreshold:   task.FailureThreshold,
@@ -543,6 +552,104 @@ func findDNSProviderEntryForScope(scope ownerScope, providerName, entryID string
 	return nil, fmt.Errorf("provider %s entry %s was not found", providerName, entryID)
 }
 
+type failoverCloudflareDNSPayload struct {
+	ZoneID     string `json:"zone_id,omitempty"`
+	ZoneName   string `json:"zone_name,omitempty"`
+	RecordName string `json:"record_name,omitempty"`
+	RecordType string `json:"record_type,omitempty"`
+	TTL        int    `json:"ttl,omitempty"`
+}
+
+type failoverAliyunDNSPayload struct {
+	DomainName string `json:"domain_name,omitempty"`
+	RR         string `json:"rr,omitempty"`
+	RecordType string `json:"record_type,omitempty"`
+	TTL        int    `json:"ttl,omitempty"`
+	Line       string `json:"line,omitempty"`
+}
+
+func trimEntryValue(values map[string]interface{}, key string) string {
+	if len(values) == 0 {
+		return ""
+	}
+	if raw, ok := values[key]; ok {
+		if value, ok := raw.(string); ok {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
+func validateFailoverDNSPayload(scope ownerScope, providerName, entryID, payloadJSON string) error {
+	entry, err := findDNSProviderEntryForScope(scope, providerName, entryID)
+	if err != nil {
+		return err
+	}
+
+	switch providerName {
+	case models.FailoverDNSProviderCloudflare:
+		var payload failoverCloudflareDNSPayload
+		if strings.TrimSpace(payloadJSON) != "" {
+			if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
+				return fmt.Errorf("cloudflare dns payload is invalid: %w", err)
+			}
+		}
+
+		recordType := strings.ToUpper(strings.TrimSpace(payload.RecordType))
+		if recordType == "" {
+			recordType = "A"
+		}
+		switch recordType {
+		case "A", "AAAA":
+		default:
+			return fmt.Errorf("unsupported dns record_type: %s", payload.RecordType)
+		}
+
+		if payload.TTL <= 0 {
+			return fmt.Errorf("dns ttl must be greater than 0")
+		}
+
+		zoneID := firstNonEmpty(strings.TrimSpace(payload.ZoneID), trimEntryValue(entry.Values, "zone_id"))
+		zoneName := firstNonEmpty(strings.TrimSpace(payload.ZoneName), trimEntryValue(entry.Values, "zone_name"))
+		if zoneID == "" && zoneName == "" {
+			return fmt.Errorf("cloudflare zone_name is required")
+		}
+		if strings.TrimSpace(payload.RecordName) == "" && zoneName == "" {
+			return fmt.Errorf("cloudflare record_name requires zone_name when using the apex record")
+		}
+	case models.FailoverDNSProviderAliyun:
+		var payload failoverAliyunDNSPayload
+		if strings.TrimSpace(payloadJSON) != "" {
+			if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
+				return fmt.Errorf("aliyun dns payload is invalid: %w", err)
+			}
+		}
+
+		recordType := strings.ToUpper(strings.TrimSpace(payload.RecordType))
+		if recordType == "" {
+			recordType = "A"
+		}
+		switch recordType {
+		case "A", "AAAA":
+		default:
+			return fmt.Errorf("unsupported dns record_type: %s", payload.RecordType)
+		}
+
+		if payload.TTL <= 0 {
+			return fmt.Errorf("dns ttl must be greater than 0")
+		}
+
+		domainName := firstNonEmpty(strings.TrimSpace(payload.DomainName), trimEntryValue(entry.Values, "domain_name"))
+		if domainName == "" {
+			return fmt.Errorf("aliyun domain_name is required")
+		}
+	default:
+		return fmt.Errorf("unsupported dns provider: %s", providerName)
+	}
+
+	return nil
+}
+
 func validateFailoverTaskRequest(scope ownerScope, req *failoverTaskRequest) (*models.FailoverTask, []models.FailoverPlan, error) {
 	if req == nil {
 		return nil, nil, fmt.Errorf("request is required")
@@ -553,35 +660,46 @@ func validateFailoverTaskRequest(scope ownerScope, req *failoverTaskRequest) (*m
 		return nil, nil, fmt.Errorf("name is required")
 	}
 
-	watchClientUUID := strings.TrimSpace(req.WatchClientUUID)
-	if watchClientUUID == "" {
-		return nil, nil, fmt.Errorf("watch_client_uuid is required")
+	currentClientUUID := strings.TrimSpace(req.CurrentClientUUID)
+	if currentClientUUID == "" {
+		currentClientUUID = strings.TrimSpace(req.WatchClientUUID)
 	}
-	if _, err := clientdb.GetClientByUUIDForUser(watchClientUUID, scope.UserUUID); err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, nil, fmt.Errorf("watch client not found")
+	if currentClientUUID != "" {
+		if _, err := clientdb.GetClientByUUIDForUser(currentClientUUID, scope.UserUUID); err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil, nil, fmt.Errorf("current client not found")
+			}
+			return nil, nil, err
 		}
-		return nil, nil, err
 	}
 
 	dnsProvider := strings.ToLower(strings.TrimSpace(req.DNSProvider))
-	switch dnsProvider {
-	case models.FailoverDNSProviderCloudflare, models.FailoverDNSProviderAliyun:
-	default:
-		return nil, nil, fmt.Errorf("unsupported DNS provider: %s", req.DNSProvider)
-	}
-
 	dnsEntryID := strings.TrimSpace(req.DNSEntryID)
-	if dnsEntryID == "" {
-		return nil, nil, fmt.Errorf("dns_entry_id is required")
-	}
-	if err := validateCloudProviderEntryForScope(scope, dnsProvider, dnsEntryID); err != nil {
-		return nil, nil, err
-	}
+	dnsPayload := "{}"
+	if dnsProvider != "" {
+		switch dnsProvider {
+		case models.FailoverDNSProviderCloudflare, models.FailoverDNSProviderAliyun:
+		default:
+			return nil, nil, fmt.Errorf("unsupported DNS provider: %s", req.DNSProvider)
+		}
 
-	dnsPayload, err := normalizeJSONPayload(req.DNSPayload, "{}")
-	if err != nil {
-		return nil, nil, fmt.Errorf("invalid dns_payload: %w", err)
+		if dnsEntryID == "" {
+			return nil, nil, fmt.Errorf("dns_entry_id is required")
+		}
+		if err := validateCloudProviderEntryForScope(scope, dnsProvider, dnsEntryID); err != nil {
+			return nil, nil, err
+		}
+
+		normalizedDNSPayload, err := normalizeJSONPayload(req.DNSPayload, "{}")
+		if err != nil {
+			return nil, nil, fmt.Errorf("invalid dns_payload: %w", err)
+		}
+		dnsPayload = normalizedDNSPayload
+		if err := validateFailoverDNSPayload(scope, dnsProvider, dnsEntryID, dnsPayload); err != nil {
+			return nil, nil, err
+		}
+	} else {
+		dnsEntryID = ""
 	}
 
 	deleteStrategy := strings.ToLower(strings.TrimSpace(req.DeleteStrategy))
@@ -714,7 +832,7 @@ func validateFailoverTaskRequest(scope ownerScope, req *failoverTaskRequest) (*m
 	return &models.FailoverTask{
 		Name:               name,
 		Enabled:            enabled,
-		WatchClientUUID:    watchClientUUID,
+		WatchClientUUID:    currentClientUUID,
 		TriggerSource:      models.FailoverTriggerSourceCNConnectivity,
 		FailureThreshold:   failureThreshold,
 		StaleAfterSeconds:  staleAfterSeconds,
@@ -725,6 +843,68 @@ func validateFailoverTaskRequest(scope ownerScope, req *failoverTaskRequest) (*m
 		DeleteStrategy:     deleteStrategy,
 		DeleteDelaySeconds: req.DeleteDelaySeconds,
 	}, plans, nil
+}
+
+func GetFailoverDNSCatalog(c *gin.Context) {
+	scope, ok := requireCurrentOwnerScope(c)
+	if !ok {
+		return
+	}
+
+	providerName := strings.TrimSpace(c.Query("provider"))
+	entryID := strings.TrimSpace(c.Query("entry_id"))
+	if providerName == "" || entryID == "" {
+		api.RespondError(c, http.StatusBadRequest, "provider and entry_id are required")
+		return
+	}
+
+	catalog, err := failoversvc.LoadDNSCatalog(
+		scope.UserUUID,
+		providerName,
+		entryID,
+		strings.TrimSpace(c.Query("zone_name")),
+		strings.TrimSpace(c.Query("domain_name")),
+	)
+	if err != nil {
+		api.RespondError(c, http.StatusBadRequest, "Failed to load DNS catalog: "+err.Error())
+		return
+	}
+
+	api.RespondSuccess(c, catalog)
+}
+
+func GetFailoverPlanCatalog(c *gin.Context) {
+	scope, ok := requireCurrentOwnerScope(c)
+	if !ok {
+		return
+	}
+
+	providerName := strings.TrimSpace(c.Query("provider"))
+	entryID := strings.TrimSpace(c.Query("entry_id"))
+	if providerName == "" || entryID == "" {
+		api.RespondError(c, http.StatusBadRequest, "provider and entry_id are required")
+		return
+	}
+
+	actionType := strings.TrimSpace(c.Query("action_type"))
+	if actionType == "" {
+		actionType = models.FailoverActionProvisionInstance
+	}
+
+	catalog, err := failoversvc.LoadPlanCatalog(
+		scope.UserUUID,
+		providerName,
+		entryID,
+		actionType,
+		strings.TrimSpace(c.Query("service")),
+		strings.TrimSpace(c.Query("region")),
+	)
+	if err != nil {
+		api.RespondError(c, http.StatusBadRequest, "Failed to load plan catalog: "+err.Error())
+		return
+	}
+
+	api.RespondSuccess(c, catalog)
 }
 
 func loadLatestExecutionLookup(taskList []models.FailoverTask) (map[uint]*models.FailoverExecution, error) {
@@ -775,10 +955,11 @@ func GetFailoverTasks(c *gin.Context) {
 	response := make([]failoverTaskView, 0, len(taskList))
 	for _, task := range taskList {
 		taskCopy := task
+		report := reports[strings.TrimSpace(taskCopy.WatchClientUUID)]
 		response = append(response, buildFailoverTaskView(
 			&taskCopy,
 			executionLookup[taskCopy.ID],
-			buildFailoverProbeView(&taskCopy, reports[taskCopy.WatchClientUUID], now),
+			buildFailoverProbeView(&taskCopy, report, now),
 			now,
 		))
 	}
@@ -845,7 +1026,8 @@ func GetFailoverTask(c *gin.Context) {
 
 	now := time.Now()
 	reports := ws.GetLatestReport()
-	api.RespondSuccess(c, buildFailoverTaskView(task, latestExecution, buildFailoverProbeView(task, reports[task.WatchClientUUID], now), now))
+	report := reports[strings.TrimSpace(task.WatchClientUUID)]
+	api.RespondSuccess(c, buildFailoverTaskView(task, latestExecution, buildFailoverProbeView(task, report, now), now))
 }
 
 func UpdateFailoverTask(c *gin.Context) {

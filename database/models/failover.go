@@ -80,6 +80,7 @@ type FailoverTask struct {
 	Name               string              `json:"name" gorm:"type:varchar(255);not null;index"`
 	Enabled            bool                `json:"enabled" gorm:"default:true"`
 	WatchClientUUID    string              `json:"watch_client_uuid" gorm:"type:varchar(36);not null;index"`
+	CurrentAddress     string              `json:"current_address" gorm:"type:varchar(255)"`
 	TriggerSource      string              `json:"trigger_source" gorm:"type:varchar(64);not null;default:'cn_connectivity'"`
 	FailureThreshold   int                 `json:"failure_threshold" gorm:"type:int;not null;default:2"`
 	StaleAfterSeconds  int                 `json:"stale_after_seconds" gorm:"type:int;not null;default:300"`
