@@ -34,3 +34,9 @@ go.work.sum
 
 # build
 komari
+
+# local build caches and generated frontend bundle
+.gocache/
+.gomodcache/
+node_modules/
+public/frontend/
