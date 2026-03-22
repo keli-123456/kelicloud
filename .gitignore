@@ -40,3 +40,7 @@ komari
 .gomodcache/
 node_modules/
 public/frontend/
+/package.json
+/package-lock.json
+utils/cloudflared/data/
+utils/cloudprovider/digitalocean/data/
