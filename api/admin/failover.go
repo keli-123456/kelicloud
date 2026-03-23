@@ -561,11 +561,12 @@ type failoverCloudflareDNSPayload struct {
 }
 
 type failoverAliyunDNSPayload struct {
-	DomainName string `json:"domain_name,omitempty"`
-	RR         string `json:"rr,omitempty"`
-	RecordType string `json:"record_type,omitempty"`
-	TTL        int    `json:"ttl,omitempty"`
-	Line       string `json:"line,omitempty"`
+	DomainName string   `json:"domain_name,omitempty"`
+	RR         string   `json:"rr,omitempty"`
+	RecordType string   `json:"record_type,omitempty"`
+	TTL        int      `json:"ttl,omitempty"`
+	Line       string   `json:"line,omitempty"`
+	Lines      []string `json:"lines,omitempty"`
 }
 
 func trimEntryValue(values map[string]interface{}, key string) string {
@@ -642,6 +643,11 @@ func validateFailoverDNSPayload(scope ownerScope, providerName, entryID, payload
 		domainName := firstNonEmpty(strings.TrimSpace(payload.DomainName), trimEntryValue(entry.Values, "domain_name"))
 		if domainName == "" {
 			return fmt.Errorf("aliyun domain_name is required")
+		}
+		for _, line := range payload.Lines {
+			if strings.TrimSpace(line) == "" {
+				return fmt.Errorf("aliyun lines must not contain empty values")
+			}
 		}
 	default:
 		return fmt.Errorf("unsupported dns provider: %s", providerName)

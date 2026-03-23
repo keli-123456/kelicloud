@@ -39,6 +39,7 @@ type DNSCatalog struct {
 	Domains  []DNSOption        `json:"domains"`
 	Records  []DNSRecordOption  `json:"records"`
 	Lines    []DNSOption        `json:"lines"`
+	TTLs     []DNSOption        `json:"ttls"`
 }
 
 type DNSCatalogDefaults struct {
@@ -77,11 +78,97 @@ type cloudflareDNSPayload struct {
 }
 
 type aliyunRecordPayload struct {
-	DomainName string `json:"domain_name,omitempty"`
-	RR         string `json:"rr,omitempty"`
-	RecordType string `json:"record_type,omitempty"`
-	TTL        int    `json:"ttl,omitempty"`
-	Line       string `json:"line,omitempty"`
+	DomainName string   `json:"domain_name,omitempty"`
+	RR         string   `json:"rr,omitempty"`
+	RecordType string   `json:"record_type,omitempty"`
+	TTL        int      `json:"ttl,omitempty"`
+	Line       string   `json:"line,omitempty"`
+	Lines      []string `json:"lines,omitempty"`
+}
+
+func buildDNSTTLOptions(providerName string, records []DNSRecordOption) []DNSOption {
+	base := []int{60, 120, 300, 600, 900, 1800, 3600, 7200}
+	switch strings.ToLower(strings.TrimSpace(providerName)) {
+	case cloudflareProviderName, aliyunProviderName:
+		base = append([]int{1}, base...)
+	}
+
+	return buildDNSTTLOptionsFromValues(base, records)
+}
+
+func buildDNSTTLOptionsFromValues(base []int, records []DNSRecordOption) []DNSOption {
+	if len(base) == 0 && len(records) == 0 {
+		return nil
+	}
+
+	values := make([]int, 0, len(base)+len(records))
+	values = append(values, base...)
+	for _, record := range records {
+		if record.TTL > 0 {
+			values = append(values, record.TTL)
+		}
+	}
+
+	seen := make(map[int]struct{}, len(values))
+	options := make([]DNSOption, 0, len(values))
+	for _, ttl := range values {
+		if ttl <= 0 {
+			continue
+		}
+		if _, ok := seen[ttl]; ok {
+			continue
+		}
+		seen[ttl] = struct{}{}
+		options = append(options, DNSOption{
+			Value: strconv.Itoa(ttl),
+			Label: strconv.Itoa(ttl),
+		})
+	}
+
+	sort.Slice(options, func(i, j int) bool {
+		left, _ := strconv.Atoi(options[i].Value)
+		right, _ := strconv.Atoi(options[j].Value)
+		return left < right
+	})
+	return options
+}
+
+func parseAliyunTTLValues(values []string) []int {
+	ttls := make([]int, 0, len(values))
+	for _, value := range values {
+		text := strings.TrimSpace(value)
+		if text == "" {
+			continue
+		}
+		text = strings.TrimPrefix(text, "[")
+		text = strings.TrimSuffix(text, "]")
+		for _, item := range strings.Split(text, ",") {
+			ttl, err := strconv.Atoi(strings.TrimSpace(item))
+			if err != nil || ttl <= 0 {
+				continue
+			}
+			ttls = append(ttls, ttl)
+		}
+	}
+	return ttls
+}
+
+func buildDNSTTLOptionsFromMinTTL(minTTL int) []DNSOption {
+	if minTTL <= 0 {
+		return nil
+	}
+
+	candidates := []int{1, 60, 120, 300, 600, 900, 1800, 3600, 7200, 43200, 86400}
+	values := make([]int, 0, len(candidates))
+	for _, ttl := range candidates {
+		if ttl >= minTTL {
+			values = append(values, ttl)
+		}
+	}
+	if len(values) == 0 {
+		values = append(values, minTTL)
+	}
+	return buildDNSTTLOptionsFromValues(values, nil)
 }
 
 func LoadDNSCatalog(userUUID, providerName, entryID, zoneName, domainName string) (*DNSCatalog, error) {
@@ -140,6 +227,7 @@ func loadCloudflareDNSCatalog(userUUID, entryID, zoneName string) (*DNSCatalog, 
 		Domains: []DNSOption{},
 		Records: []DNSRecordOption{},
 		Lines:   []DNSOption{},
+		TTLs:    buildDNSTTLOptions(cloudflareProviderName, nil),
 	}
 
 	client := newCloudflareDNSClient(configValue.APIToken)
@@ -191,6 +279,7 @@ func loadCloudflareDNSCatalog(userUUID, entryID, zoneName string) (*DNSCatalog, 
 			Proxied:  &proxied,
 		})
 	}
+	catalog.TTLs = buildDNSTTLOptions(cloudflareProviderName, catalog.Records)
 	return catalog, nil
 }
 
@@ -217,6 +306,7 @@ func loadAliyunDNSCatalog(userUUID, entryID, domainName string) (*DNSCatalog, er
 		Domains: []DNSOption{},
 		Records: []DNSRecordOption{},
 		Lines:   defaultAliyunDNSLines(),
+		TTLs:    buildDNSTTLOptions(aliyunProviderName, nil),
 	}
 
 	client := newAliyunDNSClient(configValue.AccessKeyID, configValue.AccessKeySecret, configValue.RegionID)
@@ -243,6 +333,14 @@ func loadAliyunDNSCatalog(userUUID, entryID, domainName string) (*DNSCatalog, er
 		return catalog, nil
 	}
 
+	if info, infoErr := client.describeDomainInfo(context.Background(), resolvedDomainName); infoErr == nil && info != nil {
+		if ttlValues := parseAliyunTTLValues(info.AvailableTTLs.AvailableTTL); len(ttlValues) > 0 {
+			catalog.TTLs = buildDNSTTLOptionsFromValues(ttlValues, nil)
+		} else if info.MinTTL > 0 {
+			catalog.TTLs = buildDNSTTLOptionsFromMinTTL(info.MinTTL)
+		}
+	}
+
 	if lines, lineErr := client.listLines(context.Background(), resolvedDomainName); lineErr == nil && len(lines) > 0 {
 		catalog.Lines = lines
 	}
@@ -262,6 +360,9 @@ func loadAliyunDNSCatalog(userUUID, entryID, domainName string) (*DNSCatalog, er
 			RR:         strings.TrimSpace(record.RR),
 			Line:       strings.TrimSpace(record.Line),
 		})
+	}
+	if len(catalog.TTLs) == 0 {
+		catalog.TTLs = buildDNSTTLOptions(aliyunProviderName, catalog.Records)
 	}
 	return catalog, nil
 }
@@ -405,25 +506,50 @@ func applyAliyunDNSRecord(userUUID, entryID, payloadJSON, ipv4, ipv6 string) (*d
 	if ttl <= 0 {
 		ttl = 600
 	}
-	line := strings.TrimSpace(payload.Line)
-	if line == "" {
-		line = "default"
-	}
-
 	client := newAliyunDNSClient(configValue.AccessKeyID, configValue.AccessKeySecret, configValue.RegionID)
-	recordID, err := client.upsertRecord(context.Background(), domainName, rr, recordType, recordValue, ttl, line)
-	if err != nil {
-		return nil, err
+	lines := normalizeAliyunLines(payload.Line, payload.Lines)
+	recordIDs := make([]string, 0, len(lines))
+	for _, line := range lines {
+		recordID, err := client.upsertRecord(context.Background(), domainName, rr, recordType, recordValue, ttl, line)
+		if err != nil {
+			return nil, err
+		}
+		recordIDs = append(recordIDs, recordID)
 	}
 
 	return &dnsUpdateResult{
 		Provider: aliyunProviderName,
-		ID:       recordID,
+		ID:       strings.Join(recordIDs, ","),
 		Type:     recordType,
 		Value:    recordValue,
 		Domain:   domainName,
 		RR:       rr,
 	}, nil
+}
+
+func normalizeAliyunLines(primary string, values []string) []string {
+	normalized := make([]string, 0, len(values)+1)
+	seen := map[string]struct{}{}
+	appendValue := func(value string) {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return
+		}
+		if _, ok := seen[value]; ok {
+			return
+		}
+		seen[value] = struct{}{}
+		normalized = append(normalized, value)
+	}
+
+	appendValue(primary)
+	for _, value := range values {
+		appendValue(value)
+	}
+	if len(normalized) == 0 {
+		normalized = append(normalized, "default")
+	}
+	return normalized
 }
 
 func selectRecordValue(recordType, ipv4, ipv6 string) (string, error) {
@@ -644,6 +770,13 @@ type aliyunDescribeDomainsResponse struct {
 	} `json:"Domains"`
 }
 
+type aliyunDescribeDomainInfoResponse struct {
+	MinTTL        int `json:"MinTtl"`
+	AvailableTTLs struct {
+		AvailableTTL []string `json:"AvailableTtl"`
+	} `json:"AvailableTtls"`
+}
+
 type aliyunRecordMutationResponse struct {
 	RecordID string `json:"RecordId"`
 }
@@ -784,6 +917,23 @@ func (c *aliyunDNSClient) listDomains(ctx context.Context) ([]string, error) {
 	}
 	sort.Strings(domains)
 	return domains, nil
+}
+
+func (c *aliyunDNSClient) describeDomainInfo(ctx context.Context, domainName string) (*aliyunDescribeDomainInfoResponse, error) {
+	domainName = strings.TrimSpace(domainName)
+	if domainName == "" {
+		return nil, nil
+	}
+
+	values := url.Values{}
+	values.Set("DomainName", domainName)
+	values.Set("NeedDetailAttributes", "true")
+
+	var response aliyunDescribeDomainInfoResponse
+	if err := c.doRPC(ctx, "DescribeDomainInfo", values, &response); err != nil {
+		return nil, err
+	}
+	return &response, nil
 }
 
 func (c *aliyunDNSClient) doRPC(ctx context.Context, action string, values url.Values, out any) error {
