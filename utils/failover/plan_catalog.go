@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	awscloud "github.com/komari-monitor/komari/utils/cloudprovider/aws"
@@ -25,6 +26,7 @@ type PlanCatalog struct {
 	Service           string          `json:"service,omitempty"`
 	Region            string          `json:"region,omitempty"`
 	Regions           []CatalogOption `json:"regions"`
+	Instances         []CatalogOption `json:"instances"`
 	AvailabilityZones []CatalogOption `json:"availability_zones"`
 	Images            []CatalogOption `json:"images"`
 	InstanceTypes     []CatalogOption `json:"instance_types"`
@@ -43,16 +45,21 @@ func LoadPlanCatalog(userUUID, providerName, entryID, actionType, service, regio
 	service = strings.ToLower(strings.TrimSpace(service))
 	region = strings.TrimSpace(region)
 
-	switch providerName {
-	case "aws":
-		return loadAWSPlanCatalog(userUUID, entryID, actionType, service, region)
-	case "digitalocean":
-		return loadDigitalOceanPlanCatalog(userUUID, entryID, actionType)
-	case "linode":
-		return loadLinodePlanCatalog(userUUID, entryID, actionType)
-	default:
-		return nil, fmt.Errorf("unsupported failover plan provider: %s", providerName)
-	}
+	return loadCatalogWithCache(
+		fmt.Sprintf("plan:%s:%s:%s:%s:%s:%s", strings.TrimSpace(userUUID), providerName, strings.TrimSpace(entryID), actionType, service, region),
+		func() (*PlanCatalog, error) {
+			switch providerName {
+			case "aws":
+				return loadAWSPlanCatalog(userUUID, entryID, actionType, service, region)
+			case "digitalocean":
+				return loadDigitalOceanPlanCatalog(userUUID, entryID, actionType)
+			case "linode":
+				return loadLinodePlanCatalog(userUUID, entryID, actionType)
+			default:
+				return nil, fmt.Errorf("unsupported failover plan provider: %s", providerName)
+			}
+		},
+	)
 }
 
 func loadAWSPlanCatalog(userUUID, entryID, actionType, service, region string) (*PlanCatalog, error) {
@@ -84,6 +91,7 @@ func loadAWSPlanCatalog(userUUID, entryID, actionType, service, region string) (
 		Service:           service,
 		Region:            resolvedRegion,
 		Regions:           []CatalogOption{},
+		Instances:         []CatalogOption{},
 		AvailabilityZones: []CatalogOption{},
 		Images:            []CatalogOption{},
 		InstanceTypes:     []CatalogOption{},
@@ -98,28 +106,63 @@ func loadAWSPlanCatalog(userUUID, entryID, actionType, service, region string) (
 
 	switch service {
 	case "", "ec2":
-		regions, err := awscloud.ListRegions(ctx, credential)
-		if err != nil {
-			return nil, err
-		}
-		instanceTypes, err := awscloud.ListInstanceTypes(ctx, credential, resolvedRegion)
-		if err != nil {
-			return nil, err
-		}
-		images, err := awscloud.ListSuggestedImages(ctx, credential, resolvedRegion)
-		if err != nil {
-			return nil, err
-		}
-		keyPairs, err := awscloud.ListKeyPairs(ctx, credential, resolvedRegion)
-		if err != nil {
-			return nil, err
-		}
-		subnets, err := awscloud.ListSubnets(ctx, credential, resolvedRegion)
-		if err != nil {
-			return nil, err
-		}
-		securityGroups, err := awscloud.ListSecurityGroups(ctx, credential, resolvedRegion)
-		if err != nil {
+		var (
+			regions        []awscloud.Region
+			instanceTypes  []awscloud.InstanceType
+			images         []awscloud.Image
+			keyPairs       []awscloud.KeyPair
+			subnets        []awscloud.Subnet
+			securityGroups []awscloud.SecurityGroup
+			instances      []awscloud.Instance
+		)
+		if err := runCatalogTasks(
+			func() error {
+				var taskErr error
+				regions, taskErr = awscloud.ListRegions(ctx, credential)
+				return taskErr
+			},
+			func() error {
+				var taskErr error
+				if actionType == "rebind_public_ip" {
+					instances, taskErr = awscloud.ListInstances(ctx, credential, resolvedRegion)
+					return taskErr
+				}
+				instanceTypes, taskErr = awscloud.ListInstanceTypes(ctx, credential, resolvedRegion)
+				return taskErr
+			},
+			func() error {
+				var taskErr error
+				if actionType == "rebind_public_ip" {
+					return nil
+				}
+				images, taskErr = awscloud.ListSuggestedImages(ctx, credential, resolvedRegion)
+				return taskErr
+			},
+			func() error {
+				var taskErr error
+				if actionType == "rebind_public_ip" {
+					return nil
+				}
+				keyPairs, taskErr = awscloud.ListKeyPairs(ctx, credential, resolvedRegion)
+				return taskErr
+			},
+			func() error {
+				var taskErr error
+				if actionType == "rebind_public_ip" {
+					return nil
+				}
+				subnets, taskErr = awscloud.ListSubnets(ctx, credential, resolvedRegion)
+				return taskErr
+			},
+			func() error {
+				var taskErr error
+				if actionType == "rebind_public_ip" {
+					return nil
+				}
+				securityGroups, taskErr = awscloud.ListSecurityGroups(ctx, credential, resolvedRegion)
+				return taskErr
+			},
+		); err != nil {
 			return nil, err
 		}
 
@@ -129,6 +172,27 @@ func loadAWSPlanCatalog(userUUID, entryID, actionType, service, region string) (
 				Label: strings.TrimSpace(item.Name),
 				Hint:  strings.TrimSpace(item.Endpoint),
 			})
+		}
+		if actionType == "rebind_public_ip" {
+			for _, item := range instances {
+				label := firstNonEmpty(strings.TrimSpace(item.Name), strings.TrimSpace(item.InstanceID))
+				hintParts := make([]string, 0, 3)
+				if privateIP := strings.TrimSpace(item.PrivateIP); privateIP != "" {
+					hintParts = append(hintParts, privateIP)
+				}
+				if publicIP := strings.TrimSpace(item.PublicIP); publicIP != "" {
+					hintParts = append(hintParts, publicIP)
+				}
+				if state := strings.TrimSpace(item.State); state != "" {
+					hintParts = append(hintParts, state)
+				}
+				catalog.Instances = append(catalog.Instances, CatalogOption{
+					Value: strings.TrimSpace(item.InstanceID),
+					Label: label,
+					Hint:  strings.Join(hintParts, " · "),
+				})
+			}
+			return catalog, nil
 		}
 		for _, item := range instanceTypes {
 			catalog.InstanceTypes = append(catalog.InstanceTypes, CatalogOption{
@@ -178,20 +242,45 @@ func loadAWSPlanCatalog(userUUID, entryID, actionType, service, region string) (
 			})
 		}
 	case "lightsail":
-		regions, err := awscloud.ListLightsailRegions(ctx, credential, resolvedRegion)
-		if err != nil {
-			return nil, err
-		}
-		bundles, err := awscloud.ListLightsailBundles(ctx, credential, resolvedRegion)
-		if err != nil {
-			return nil, err
-		}
-		blueprints, err := awscloud.ListLightsailBlueprints(ctx, credential, resolvedRegion)
-		if err != nil {
-			return nil, err
-		}
-		keyPairs, err := awscloud.ListLightsailKeyPairs(ctx, credential, resolvedRegion)
-		if err != nil {
+		var (
+			regions    []awscloud.LightsailRegion
+			bundles    []awscloud.LightsailBundle
+			blueprints []awscloud.LightsailBlueprint
+			keyPairs   []awscloud.LightsailKeyPair
+			instances  []awscloud.LightsailInstance
+		)
+		if err := runCatalogTasks(
+			func() error {
+				var taskErr error
+				regions, taskErr = awscloud.ListLightsailRegions(ctx, credential, resolvedRegion)
+				return taskErr
+			},
+			func() error {
+				var taskErr error
+				if actionType == "rebind_public_ip" {
+					instances, taskErr = awscloud.ListLightsailInstances(ctx, credential, resolvedRegion)
+					return taskErr
+				}
+				bundles, taskErr = awscloud.ListLightsailBundles(ctx, credential, resolvedRegion)
+				return taskErr
+			},
+			func() error {
+				var taskErr error
+				if actionType == "rebind_public_ip" {
+					return nil
+				}
+				blueprints, taskErr = awscloud.ListLightsailBlueprints(ctx, credential, resolvedRegion)
+				return taskErr
+			},
+			func() error {
+				var taskErr error
+				if actionType == "rebind_public_ip" {
+					return nil
+				}
+				keyPairs, taskErr = awscloud.ListLightsailKeyPairs(ctx, credential, resolvedRegion)
+				return taskErr
+			},
+		); err != nil {
 			return nil, err
 		}
 
@@ -210,6 +299,23 @@ func loadAWSPlanCatalog(userUUID, entryID, actionType, service, region string) (
 					})
 				}
 			}
+		}
+		if actionType == "rebind_public_ip" {
+			for _, item := range instances {
+				hintParts := make([]string, 0, 2)
+				if publicIP := strings.TrimSpace(item.PublicIP); publicIP != "" {
+					hintParts = append(hintParts, publicIP)
+				}
+				if privateIP := strings.TrimSpace(item.PrivateIP); privateIP != "" {
+					hintParts = append(hintParts, privateIP)
+				}
+				catalog.Instances = append(catalog.Instances, CatalogOption{
+					Value: strings.TrimSpace(item.Name),
+					Label: strings.TrimSpace(item.Name),
+					Hint:  strings.Join(hintParts, " · "),
+				})
+			}
+			return catalog, nil
 		}
 		for _, item := range bundles {
 			catalog.Bundles = append(catalog.Bundles, CatalogOption{
@@ -285,6 +391,7 @@ func loadDigitalOceanPlanCatalog(userUUID, entryID, actionType string) (*PlanCat
 		Provider:          "digitalocean",
 		ActionType:        actionType,
 		Regions:           []CatalogOption{},
+		Instances:         []CatalogOption{},
 		AvailabilityZones: []CatalogOption{},
 		Images:            []CatalogOption{},
 		InstanceTypes:     []CatalogOption{},
@@ -370,6 +477,7 @@ func loadLinodePlanCatalog(userUUID, entryID, actionType string) (*PlanCatalog, 
 		Provider:          "linode",
 		ActionType:        actionType,
 		Regions:           []CatalogOption{},
+		Instances:         []CatalogOption{},
 		AvailabilityZones: []CatalogOption{},
 		Images:            []CatalogOption{},
 		InstanceTypes:     []CatalogOption{},
@@ -408,4 +516,32 @@ func loadLinodePlanCatalog(userUUID, entryID, actionType string) (*PlanCatalog, 
 		})
 	}
 	return catalog, nil
+}
+
+func runCatalogTasks(tasks ...func() error) error {
+	var wg sync.WaitGroup
+	errCh := make(chan error, len(tasks))
+
+	for _, task := range tasks {
+		if task == nil {
+			continue
+		}
+		wg.Add(1)
+		go func(run func() error) {
+			defer wg.Done()
+			if err := run(); err != nil {
+				errCh <- err
+			}
+		}(task)
+	}
+
+	wg.Wait()
+	close(errCh)
+
+	for err := range errCh {
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }

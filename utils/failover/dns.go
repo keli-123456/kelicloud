@@ -35,6 +35,8 @@ type dnsUpdateResult struct {
 type DNSCatalog struct {
 	Provider string             `json:"provider"`
 	Defaults DNSCatalogDefaults `json:"defaults"`
+	Zones    []DNSOption        `json:"zones"`
+	Domains  []DNSOption        `json:"domains"`
 	Records  []DNSRecordOption  `json:"records"`
 	Lines    []DNSOption        `json:"lines"`
 }
@@ -85,15 +87,22 @@ type aliyunRecordPayload struct {
 func LoadDNSCatalog(userUUID, providerName, entryID, zoneName, domainName string) (*DNSCatalog, error) {
 	providerName = strings.ToLower(strings.TrimSpace(providerName))
 	entryID = strings.TrimSpace(entryID)
+	zoneName = strings.TrimSpace(zoneName)
+	domainName = strings.TrimSpace(domainName)
 
-	switch providerName {
-	case cloudflareProviderName:
-		return loadCloudflareDNSCatalog(userUUID, entryID, zoneName)
-	case aliyunProviderName:
-		return loadAliyunDNSCatalog(userUUID, entryID, domainName)
-	default:
-		return nil, fmt.Errorf("unsupported dns provider: %s", providerName)
-	}
+	return loadCatalogWithCache(
+		fmt.Sprintf("dns:%s:%s:%s:%s:%s", strings.TrimSpace(userUUID), providerName, entryID, zoneName, domainName),
+		func() (*DNSCatalog, error) {
+			switch providerName {
+			case cloudflareProviderName:
+				return loadCloudflareDNSCatalog(userUUID, entryID, zoneName)
+			case aliyunProviderName:
+				return loadAliyunDNSCatalog(userUUID, entryID, domainName)
+			default:
+				return nil, fmt.Errorf("unsupported dns provider: %s", providerName)
+			}
+		},
+	)
 }
 
 func applyDNSRecord(userUUID, providerName, entryID, payloadJSON, ipv4, ipv6 string) (*dnsUpdateResult, error) {
@@ -127,11 +136,32 @@ func loadCloudflareDNSCatalog(userUUID, entryID, zoneName string) (*DNSCatalog, 
 			ZoneName: firstNonEmpty(strings.TrimSpace(zoneName), strings.TrimSpace(configValue.ZoneName)),
 			Proxied:  ptrBool(configValue.Proxied),
 		},
+		Zones:   []DNSOption{},
+		Domains: []DNSOption{},
 		Records: []DNSRecordOption{},
 		Lines:   []DNSOption{},
 	}
 
 	client := newCloudflareDNSClient(configValue.APIToken)
+	zones, err := client.listZones(context.Background())
+	if err != nil {
+		return nil, err
+	}
+	for _, zone := range zones {
+		label := strings.TrimSpace(zone.Name)
+		if label == "" {
+			label = strings.TrimSpace(zone.ID)
+		}
+		catalog.Zones = append(catalog.Zones, DNSOption{
+			Value: strings.TrimSpace(zone.Name),
+			Label: label,
+		})
+	}
+
+	if strings.TrimSpace(catalog.Defaults.ZoneName) == "" && len(catalog.Zones) == 1 {
+		catalog.Defaults.ZoneName = strings.TrimSpace(catalog.Zones[0].Value)
+	}
+
 	resolvedZoneID := strings.TrimSpace(catalog.Defaults.ZoneID)
 	if resolvedZoneID == "" && strings.TrimSpace(catalog.Defaults.ZoneName) != "" {
 		resolvedZoneID, err = client.resolveZoneID(context.Background(), catalog.Defaults.ZoneName)
@@ -183,11 +213,32 @@ func loadAliyunDNSCatalog(userUUID, entryID, domainName string) (*DNSCatalog, er
 		Defaults: DNSCatalogDefaults{
 			DomainName: resolvedDomainName,
 		},
+		Zones:   []DNSOption{},
+		Domains: []DNSOption{},
 		Records: []DNSRecordOption{},
 		Lines:   defaultAliyunDNSLines(),
 	}
 
 	client := newAliyunDNSClient(configValue.AccessKeyID, configValue.AccessKeySecret, configValue.RegionID)
+	domains, err := client.listDomains(context.Background())
+	if err != nil {
+		return nil, err
+	}
+	for _, domain := range domains {
+		value := strings.TrimSpace(domain)
+		if value == "" {
+			continue
+		}
+		catalog.Domains = append(catalog.Domains, DNSOption{
+			Value: value,
+			Label: value,
+		})
+	}
+	if strings.TrimSpace(catalog.Defaults.DomainName) == "" && len(catalog.Domains) == 1 {
+		catalog.Defaults.DomainName = strings.TrimSpace(catalog.Domains[0].Value)
+		resolvedDomainName = catalog.Defaults.DomainName
+	}
+
 	if strings.TrimSpace(resolvedDomainName) == "" {
 		return catalog, nil
 	}
@@ -413,6 +464,18 @@ type cloudflareZone struct {
 	Name string `json:"name"`
 }
 
+func (c *cloudflareDNSClient) listZones(ctx context.Context) ([]cloudflareZone, error) {
+	query := url.Values{}
+	query.Set("status", "active")
+	query.Set("per_page", "100")
+
+	var response cloudflareAPIEnvelope[[]cloudflareZone]
+	if err := c.do(ctx, http.MethodGet, "https://api.cloudflare.com/client/v4/zones?"+query.Encode(), nil, &response); err != nil {
+		return nil, err
+	}
+	return response.Result, nil
+}
+
 type cloudflareDNSRecord struct {
 	ID      string `json:"id"`
 	Type    string `json:"type"`
@@ -573,6 +636,14 @@ type aliyunDescribeDomainLinesResponse struct {
 	} `json:"DomainLines"`
 }
 
+type aliyunDescribeDomainsResponse struct {
+	Domains struct {
+		Domain []struct {
+			DomainName string `json:"DomainName"`
+		} `json:"Domain"`
+	} `json:"Domains"`
+}
+
 type aliyunRecordMutationResponse struct {
 	RecordID string `json:"RecordId"`
 }
@@ -679,7 +750,7 @@ func (c *aliyunDNSClient) listLines(ctx context.Context, domainName string) ([]D
 	options := make([]DNSOption, 0, len(response.DomainLines.Line))
 	for _, line := range response.DomainLines.Line {
 		value := strings.TrimSpace(line.LineCode)
-		label := strings.TrimSpace(line.LineName)
+		label := localizedAliyunLineLabel(value, strings.TrimSpace(line.LineName))
 		if value == "" {
 			continue
 		}
@@ -692,6 +763,27 @@ func (c *aliyunDNSClient) listLines(ctx context.Context, domainName string) ([]D
 		})
 	}
 	return options, nil
+}
+
+func (c *aliyunDNSClient) listDomains(ctx context.Context) ([]string, error) {
+	values := url.Values{}
+	values.Set("PageSize", "100")
+
+	var response aliyunDescribeDomainsResponse
+	if err := c.doRPC(ctx, "DescribeDomains", values, &response); err != nil {
+		return nil, err
+	}
+
+	domains := make([]string, 0, len(response.Domains.Domain))
+	for _, item := range response.Domains.Domain {
+		value := strings.TrimSpace(item.DomainName)
+		if value == "" {
+			continue
+		}
+		domains = append(domains, value)
+	}
+	sort.Strings(domains)
+	return domains, nil
 }
 
 func (c *aliyunDNSClient) doRPC(ctx context.Context, action string, values url.Values, out any) error {
@@ -772,15 +864,41 @@ func percentEncode(value string) string {
 
 func defaultAliyunDNSLines() []DNSOption {
 	return []DNSOption{
-		{Value: "default", Label: "Default"},
-		{Value: "telecom", Label: "Telecom"},
-		{Value: "unicom", Label: "Unicom"},
-		{Value: "mobile", Label: "Mobile"},
-		{Value: "edu", Label: "Education"},
-		{Value: "oversea", Label: "Overseas"},
-		{Value: "search", Label: "Search Engine"},
-		{Value: "school", Label: "School"},
+		{Value: "default", Label: "默认"},
+		{Value: "telecom", Label: "电信"},
+		{Value: "unicom", Label: "联通"},
+		{Value: "mobile", Label: "移动"},
+		{Value: "edu", Label: "教育网"},
+		{Value: "oversea", Label: "境外"},
+		{Value: "search", Label: "搜索引擎"},
+		{Value: "school", Label: "校园网"},
 	}
+}
+
+func localizedAliyunLineLabel(value, fallback string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "default":
+		return "默认"
+	case "telecom":
+		return "电信"
+	case "unicom":
+		return "联通"
+	case "mobile":
+		return "移动"
+	case "edu":
+		return "教育网"
+	case "oversea":
+		return "境外"
+	case "search":
+		return "搜索引擎"
+	case "school":
+		return "校园网"
+	}
+
+	if strings.TrimSpace(fallback) != "" {
+		return strings.TrimSpace(fallback)
+	}
+	return strings.TrimSpace(value)
 }
 
 func joinAliyunRecordName(domainName, rr string) string {

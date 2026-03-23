@@ -13,6 +13,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/komari-monitor/komari/common"
+	"github.com/komari-monitor/komari/config"
 	clientdb "github.com/komari-monitor/komari/database/clients"
 	clipboarddb "github.com/komari-monitor/komari/database/clipboard"
 	failoverdb "github.com/komari-monitor/komari/database/failover"
@@ -51,7 +52,43 @@ type actionOutcome struct {
 	OldInstanceRef   map[string]interface{}
 	CleanupLabel     string
 	Cleanup          func() error
+	RollbackLabel    string
+	Rollback         func() error
 }
+
+type blockedOutletError struct {
+	ClientUUID string
+	Status     string
+	Message    string
+}
+
+func (e *blockedOutletError) Error() string {
+	if e == nil {
+		return "new outlet connectivity validation failed"
+	}
+	parts := make([]string, 0, 3)
+	if strings.TrimSpace(e.ClientUUID) != "" {
+		parts = append(parts, "client "+strings.TrimSpace(e.ClientUUID))
+	}
+	if strings.TrimSpace(e.Status) != "" {
+		parts = append(parts, "status="+strings.TrimSpace(e.Status))
+	}
+	if strings.TrimSpace(e.Message) != "" {
+		parts = append(parts, strings.TrimSpace(e.Message))
+	}
+	if len(parts) == 0 {
+		return "new outlet connectivity validation failed"
+	}
+	return "new outlet connectivity validation failed: " + strings.Join(parts, ", ")
+}
+
+type planExecutionFailureDecision struct {
+	Class          string
+	RetrySameEntry bool
+	Cooldown       time.Duration
+}
+
+const providerEntryProvisionRetryLimit = 2
 
 type awsProvisionPayload struct {
 	Service             string         `json:"service,omitempty"`
@@ -300,11 +337,18 @@ func (r *executionRunner) run(report *common.Report) {
 			"selected_plan_id": plan.ID,
 		})
 
-		outcome, err := r.executePlan(plan)
+		outcome, selectedEntryID, entryAttempts, err := r.executePlan(plan)
 		attempt := map[string]interface{}{
-			"plan_id":     plan.ID,
-			"provider":    plan.Provider,
-			"action_type": plan.ActionType,
+			"plan_id":            plan.ID,
+			"provider":           plan.Provider,
+			"action_type":        plan.ActionType,
+			"preferred_entry_id": plan.ProviderEntryID,
+		}
+		if selectedEntryID != "" {
+			attempt["provider_entry_id"] = selectedEntryID
+		}
+		if len(entryAttempts) > 0 {
+			attempt["provider_entry_attempts"] = entryAttempts
 		}
 		if err != nil {
 			attempt["status"] = "failed"
@@ -334,7 +378,114 @@ func (r *executionRunner) run(report *common.Report) {
 	r.failExecution("all failover plans failed")
 }
 
-func (r *executionRunner) executePlan(plan models.FailoverPlan) (*actionOutcome, error) {
+func (r *executionRunner) executePlan(plan models.FailoverPlan) (*actionOutcome, string, []map[string]interface{}, error) {
+	return r.executePlanActionWithProviderPool(plan)
+}
+
+func (r *executionRunner) executePlanActionWithProviderPool(plan models.FailoverPlan) (*actionOutcome, string, []map[string]interface{}, error) {
+	candidates, err := listProviderPoolCandidates(r.task.UserID, plan)
+	if err != nil {
+		return nil, "", nil, err
+	}
+
+	entryAttempts := make([]map[string]interface{}, 0, len(candidates))
+	for _, candidate := range candidates {
+		candidateDetail := map[string]interface{}{
+			"entry_id":   candidate.EntryID,
+			"entry_name": candidate.EntryName,
+		}
+		if candidate.Preferred {
+			candidateDetail["preferred"] = true
+		}
+		if candidate.Active {
+			candidateDetail["active"] = true
+		}
+
+		lease, availability, reserveErr := acquireProviderEntryLease(r.task.UserID, plan, candidate)
+		if len(availability) > 0 {
+			candidateDetail["availability"] = availability
+		}
+		if reserveErr != nil {
+			candidateDetail["status"] = "skipped"
+			candidateDetail["error"] = reserveErr.Error()
+			entryAttempts = append(entryAttempts, candidateDetail)
+			continue
+		}
+
+		selectedPlan := plan
+		selectedPlan.ProviderEntryID = candidate.EntryID
+		maxAttempts := providerEntryMaxAttempts(selectedPlan)
+		for attemptNumber := 1; attemptNumber <= maxAttempts; attemptNumber++ {
+			attemptDetail := make(map[string]interface{}, len(candidateDetail)+1)
+			for key, value := range candidateDetail {
+				attemptDetail[key] = value
+			}
+			attemptDetail["attempt"] = attemptNumber
+
+			finishOperation := func() {}
+			if shouldSerializeProviderOperation(selectedPlan) {
+				serialDone, serialErr := lease.BeginSerializedOperation(providerEntryOperationSpacing(selectedPlan))
+				if serialErr != nil {
+					lease.Release(false)
+					attemptDetail["status"] = "skipped"
+					attemptDetail["error"] = serialErr.Error()
+					entryAttempts = append(entryAttempts, attemptDetail)
+					goto nextCandidate
+				}
+				finishOperation = serialDone
+			}
+
+			outcome, actionErr := r.executePlanAction(selectedPlan)
+			if actionErr != nil {
+				lease.Release(false)
+				decision := classifyProviderFailure(plan.Provider, actionErr)
+				applyProviderEntryFailure(r.task.UserID, plan.Provider, candidate.EntryID, decision, actionErr)
+				finishOperation()
+				attemptDetail["status"] = "failed"
+				attemptDetail["error"] = actionErr.Error()
+				attemptDetail["failure_class"] = decision.Class
+				entryAttempts = append(entryAttempts, attemptDetail)
+				goto nextCandidate
+			}
+
+			finalizeErr := r.finalizePlan(selectedPlan, outcome)
+			if finalizeErr != nil {
+				finishOperation()
+				executionDecision := classifyPlanExecutionFailure(finalizeErr)
+				attemptDetail["error"] = finalizeErr.Error()
+				attemptDetail["failure_class"] = executionDecision.Class
+				if executionDecision.RetrySameEntry && attemptNumber < maxAttempts {
+					attemptDetail["status"] = "retry"
+					entryAttempts = append(entryAttempts, attemptDetail)
+					continue
+				}
+				if executionDecision.Cooldown > 0 {
+					applyProviderEntryFailure(r.task.UserID, plan.Provider, candidate.EntryID, providerFailureDecision{
+						Class:    executionDecision.Class,
+						Cooldown: executionDecision.Cooldown,
+					}, finalizeErr)
+				}
+				lease.Release(false)
+				attemptDetail["status"] = "failed"
+				entryAttempts = append(entryAttempts, attemptDetail)
+				goto nextCandidate
+			}
+
+			lease.Release(strings.TrimSpace(plan.ActionType) == models.FailoverActionProvisionInstance)
+			clearProviderEntryCooldown(r.task.UserID, plan.Provider, candidate.EntryID)
+			finishOperation()
+			attemptDetail["status"] = "success"
+			entryAttempts = append(entryAttempts, attemptDetail)
+			return outcome, candidate.EntryID, entryAttempts, nil
+		}
+
+	nextCandidate:
+	}
+
+	return nil, "", entryAttempts, errors.New("no provider entry in the selected pool is currently available")
+}
+
+func (r *executionRunner) executePlanAction(plan models.FailoverPlan) (*actionOutcome, error) {
 	var (
 		outcome *actionOutcome
 		err     error
@@ -352,6 +503,42 @@ func (r *executionRunner) executePlan(plan models.FailoverPlan) (*actionOutcome,
 		return nil, err
 	}
 
+	return outcome, nil
+}
+
+func providerEntryMaxAttempts(plan models.FailoverPlan) int {
+	if strings.TrimSpace(plan.ActionType) == models.FailoverActionProvisionInstance {
+		return providerEntryProvisionRetryLimit
+	}
+	return 1
+}
+
+func classifyPlanExecutionFailure(err error) planExecutionFailureDecision {
+	var blockedErr *blockedOutletError
+	if errors.As(err, &blockedErr) {
+		return planExecutionFailureDecision{
+			Class:          "outlet_blocked",
+			RetrySameEntry: true,
+			Cooldown:       providerEntryCooldownTransient,
+		}
+	}
+
+	return planExecutionFailureDecision{
+		Class:          "post_provision_error",
+		RetrySameEntry: false,
+	}
+}
+
+func (r *executionRunner) finalizePlan(plan models.FailoverPlan, outcome *actionOutcome) (err error) {
+	defer func() {
+		if err == nil || outcome == nil || outcome.Rollback == nil {
+			return
+		}
+		if rollbackErr := r.rollbackOutcome(outcome, err); rollbackErr != nil {
+			err = rollbackErr
+		}
+	}()
+
 	targetClientUUID := strings.TrimSpace(outcome.TargetClientUUID)
 	if targetClientUUID == "" && strings.TrimSpace(outcome.AutoConnectGroup) != "" {
 		waitStep := r.startStep("wait_agent", "Wait For Agent", map[string]interface{}{
@@ -364,7 +551,7 @@ func (r *executionRunner) executePlan(plan models.FailoverPlan) (*actionOutcome,
 		clientUUID, waitErr := waitForClientByGroup(r.task.UserID, outcome.AutoConnectGroup, r.task.WatchClientUUID, r.startedAt, plan.WaitAgentTimeoutSec)
 		if waitErr != nil {
 			r.finishStep(waitStep, models.FailoverStepStatusFailed, waitErr.Error(), nil)
-			return nil, waitErr
+			return waitErr
 		}
 		targetClientUUID = clientUUID
 		outcome.NewClientUUID = clientUUID
@@ -377,9 +564,13 @@ func (r *executionRunner) executePlan(plan models.FailoverPlan) (*actionOutcome,
 		})
 	}
 
+	if validationErr := r.validateProvisionedOutlet(plan, outcome, targetClientUUID); validationErr != nil {
+		return validationErr
+	}
+
 	if plan.ScriptClipboardID != nil {
 		if targetClientUUID == "" {
-			return nil, errors.New("script execution requires a target client but none became available")
+			return errors.New("script execution requires a target client but none became available")
 		}
 
 		scriptStep := r.startStep("run_script", "Run Script", map[string]interface{}{
@@ -391,7 +582,7 @@ func (r *executionRunner) executePlan(plan models.FailoverPlan) (*actionOutcome,
 		})
 		if err := r.runScript(plan, targetClientUUID); err != nil {
 			r.finishStep(scriptStep, models.FailoverStepStatusFailed, err.Error(), nil)
-			return nil, err
+			return err
 		}
 		r.finishStep(scriptStep, models.FailoverStepStatusSuccess, "script finished successfully", nil)
 	}
@@ -408,7 +599,7 @@ func (r *executionRunner) executePlan(plan models.FailoverPlan) (*actionOutcome,
 			"dns_result": marshalJSON(skippedResult),
 		})
 		r.finishStep(dnsStep, models.FailoverStepStatusSkipped, "dns switching skipped", skippedResult)
-		return outcome, nil
+		return nil
 	}
 
 	dnsStep := r.startStep("switch_dns", "Switch DNS", map[string]interface{}{
@@ -424,14 +615,136 @@ func (r *executionRunner) executePlan(plan models.FailoverPlan) (*actionOutcome,
 			"dns_result": marshalJSON(map[string]interface{}{"error": err.Error()}),
 		})
 		r.finishStep(dnsStep, models.FailoverStepStatusFailed, err.Error(), nil)
-		return nil, err
+		return err
 	}
 	_ = failoverdb.UpdateExecutionFields(r.execution.ID, map[string]interface{}{
 		"dns_status": models.FailoverDNSStatusSuccess,
 		"dns_result": marshalJSON(dnsResult),
 	})
 	r.finishStep(dnsStep, models.FailoverStepStatusSuccess, "dns updated", dnsResult)
-	return outcome, nil
+	return nil
+}
+
+func (r *executionRunner) validateProvisionedOutlet(plan models.FailoverPlan, outcome *actionOutcome, targetClientUUID string) error {
+	if strings.TrimSpace(plan.ActionType) != models.FailoverActionProvisionInstance {
+		return nil
+	}
+
+	validateStep := r.startStep("validate_outlet", "Validate New Outlet", map[string]interface{}{
+		"client_uuid": targetClientUUID,
+	})
+
+	if strings.TrimSpace(targetClientUUID) == "" {
+		r.finishStep(validateStep, models.FailoverStepStatusSkipped, "connectivity validation skipped because no target client is available", nil)
+		return nil
+	}
+
+	report, err := waitForHealthyClientConnectivity(r.task.UserID, targetClientUUID, r.startedAt)
+	if err != nil {
+		detail := map[string]interface{}{
+			"client_uuid": targetClientUUID,
+		}
+		if report != nil && report.CNConnectivity != nil {
+			detail["status"] = strings.TrimSpace(report.CNConnectivity.Status)
+			detail["message"] = strings.TrimSpace(report.CNConnectivity.Message)
+			detail["checked_at"] = report.CNConnectivity.CheckedAt
+			detail["consecutive_failures"] = report.CNConnectivity.ConsecutiveFailures
+		}
+		r.finishStep(validateStep, models.FailoverStepStatusFailed, err.Error(), detail)
+		return err
+	}
+
+	successDetail := map[string]interface{}{
+		"client_uuid": targetClientUUID,
+	}
+	if report != nil && report.CNConnectivity != nil {
+		successDetail["status"] = strings.TrimSpace(report.CNConnectivity.Status)
+		successDetail["target"] = strings.TrimSpace(report.CNConnectivity.Target)
+		successDetail["latency"] = report.CNConnectivity.Latency
+		successDetail["checked_at"] = report.CNConnectivity.CheckedAt
+	}
+	r.finishStep(validateStep, models.FailoverStepStatusSuccess, "new outlet connectivity looks healthy", successDetail)
+	return nil
+}
+
+func waitForHealthyClientConnectivity(userUUID, clientUUID string, startedAt time.Time) (*common.Report, error) {
+	timeout := failoverConnectivityValidationTimeout(userUUID)
+	deadline := time.Now().Add(timeout)
+	clientUUID = strings.TrimSpace(clientUUID)
+	var lastReport *common.Report
+
+	for time.Now().Before(deadline) {
+		report := ws.GetLatestReport()[clientUUID]
+		if report != nil && report.CNConnectivity != nil {
+			lastReport = cloneReport(report)
+			reportTime := report.UpdatedAt
+			if report.CNConnectivity.CheckedAt.After(reportTime) {
+				reportTime = report.CNConnectivity.CheckedAt
+			}
+			if reportTime.After(startedAt) || report.CNConnectivity.CheckedAt.After(startedAt) {
+				status := strings.ToLower(strings.TrimSpace(report.CNConnectivity.Status))
+				switch status {
+				case "ok":
+					return cloneReport(report), nil
+				case "blocked_suspected":
+					return cloneReport(report), &blockedOutletError{
+						ClientUUID: clientUUID,
+						Status:     report.CNConnectivity.Status,
+						Message:    report.CNConnectivity.Message,
+					}
+				}
+			}
+		}
+		time.Sleep(5 * time.Second)
+	}
+
+	if lastReport != nil && lastReport.CNConnectivity != nil {
+		return lastReport, fmt.Errorf("timed out waiting for a healthy cn_connectivity report from client %s (last status: %s)", clientUUID, strings.TrimSpace(lastReport.CNConnectivity.Status))
+	}
+	return nil, fmt.Errorf("timed out waiting for cn_connectivity report from client %s", clientUUID)
+}
+
+func failoverConnectivityValidationTimeout(userUUID string) time.Duration {
+	interval, err := config.GetAsForUser[int](userUUID, config.CNConnectivityIntervalKey, 60)
+	if err != nil || interval <= 0 {
+		interval = 60
+	}
+	timeoutSeconds := interval*2 + 20
+	if timeoutSeconds < 90 {
+		timeoutSeconds = 90
+	}
+	return time.Duration(timeoutSeconds) * time.Second
+}
+
+func (r *executionRunner) rollbackOutcome(outcome *actionOutcome, originalErr error) error {
+	if outcome == nil || outcome.Rollback == nil {
+		return originalErr
+	}
+
+	rollbackStep := r.startStep("rollback_new", "Cleanup Failed New Instance", map[string]interface{}{
+		"label": outcome.RollbackLabel,
+		"error": func() string {
+			if originalErr == nil {
+				return ""
+			}
+			return originalErr.Error()
+		}(),
+	})
+
+	if err := outcome.Rollback(); err != nil {
+		detail := map[string]interface{}{
+			"label": outcome.RollbackLabel,
+			"error": err.Error(),
+		}
+		r.finishStep(rollbackStep, models.FailoverStepStatusFailed, err.Error(), detail)
+		return fmt.Errorf("%w; rollback failed: %v", originalErr, err)
+	}
+
+	detail := map[string]interface{}{
+		"label": outcome.RollbackLabel,
+	}
+	r.finishStep(rollbackStep, models.FailoverStepStatusSuccess, "failed new instance deleted", detail)
+	return originalErr
 }
 
 func (r *executionRunner) executeProvisionPlan(plan models.FailoverPlan) (*actionOutcome, error) {
@@ -941,6 +1254,10 @@ func provisionAWSInstance(userUUID string, plan models.FailoverPlan) (*actionOut
 				"private_ip": instance.PrivateIP,
 				"addresses":  detail.Addresses,
 			},
+			RollbackLabel: "terminate failed aws ec2 instance " + strings.TrimSpace(instance.InstanceID),
+			Rollback: func() error {
+				return awscloud.TerminateInstance(context.Background(), credential, region, strings.TrimSpace(instance.InstanceID))
+			},
 		}
 		if cleanupInstanceID := strings.TrimSpace(payload.CleanupInstanceID); cleanupInstanceID != "" {
 			outcome.OldInstanceRef = map[string]interface{}{
@@ -1005,6 +1322,10 @@ func provisionAWSInstance(userUUID string, plan models.FailoverPlan) (*actionOut
 				"public_ip":      detail.Instance.PublicIP,
 				"private_ip":     detail.Instance.PrivateIP,
 				"ipv6_addresses": detail.Instance.IPv6Addresses,
+			},
+			RollbackLabel: "delete failed aws lightsail instance " + name,
+			Rollback: func() error {
+				return awscloud.DeleteLightsailInstance(context.Background(), credential, region, name)
 			},
 		}
 		if cleanupName := strings.TrimSpace(payload.CleanupInstanceName); cleanupName != "" {
@@ -1116,6 +1437,10 @@ func provisionDigitalOceanDroplet(userUUID string, plan models.FailoverPlan) (*a
 			"ipv4": droplet.Networks.V4,
 			"ipv6": droplet.Networks.V6,
 		},
+		RollbackLabel: fmt.Sprintf("delete failed digitalocean droplet %d", droplet.ID),
+		Rollback: func() error {
+			return client.DeleteDroplet(context.Background(), droplet.ID)
+		},
 	}
 	if payload.CleanupDropletID > 0 {
 		outcome.OldInstanceRef = map[string]interface{}{
@@ -1219,6 +1544,10 @@ func provisionLinodeInstance(userUUID string, plan models.FailoverPlan) (*action
 		NewAddresses: map[string]interface{}{
 			"ipv4": instance.IPv4,
 			"ipv6": instance.IPv6,
+		},
+		RollbackLabel: fmt.Sprintf("delete failed linode instance %d", instance.ID),
+		Rollback: func() error {
+			return client.DeleteInstance(context.Background(), instance.ID)
 		},
 	}
 	if payload.CleanupInstanceID > 0 {
