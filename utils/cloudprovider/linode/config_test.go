@@ -192,3 +192,31 @@ func TestAdditionMergePersistentStateFromPreservesSavedInstancePassword(t *testi
 	require.NoError(t, err)
 	require.Equal(t, "Secret!123", passwordView.RootPassword)
 }
+
+func TestAdditionRevealInstancePasswordAcrossTokens(t *testing.T) {
+	t.Setenv(RootPasswordVaultKeyEnv, "komari-test-secret")
+
+	addition := &Addition{
+		ActiveTokenID: "token-1",
+		Tokens: []TokenRecord{
+			{
+				ID:    "token-1",
+				Name:  "active",
+				Token: "linode-active",
+			},
+			{
+				ID:    "token-2",
+				Name:  "secondary",
+				Token: "linode-secondary",
+			},
+		},
+	}
+	require.NoError(t, addition.Tokens[1].SaveInstancePassword(2001, "web-01", "custom", "Secret!123", time.Unix(1710000000, 0)))
+
+	require.True(t, addition.HasSavedInstancePassword(2001))
+	require.NotEmpty(t, addition.SavedInstancePasswordUpdatedAt(2001))
+
+	passwordView, err := addition.RevealInstancePassword(2001)
+	require.NoError(t, err)
+	require.Equal(t, "Secret!123", passwordView.RootPassword)
+}

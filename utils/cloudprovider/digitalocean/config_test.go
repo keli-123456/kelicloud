@@ -344,3 +344,31 @@ func TestAdditionMergePersistentStateFromPreservesSavedDropletPassword(t *testin
 	require.NoError(t, err)
 	require.Equal(t, "Secret!123", passwordView.RootPassword)
 }
+
+func TestAdditionRevealDropletPasswordAcrossTokens(t *testing.T) {
+	t.Setenv(DropletPasswordVaultKeyEnv, "komari-test-secret")
+
+	addition := &Addition{
+		ActiveTokenID: "token-1",
+		Tokens: []TokenRecord{
+			{
+				ID:    "token-1",
+				Name:  "active",
+				Token: "dop_active",
+			},
+			{
+				ID:    "token-2",
+				Name:  "secondary",
+				Token: "dop_secondary",
+			},
+		},
+	}
+	require.NoError(t, addition.Tokens[1].SaveDropletPassword(1001, "web-01", "custom", "Secret!123", time.Unix(1710000000, 0)))
+
+	require.True(t, addition.HasSavedDropletPassword(1001))
+	require.NotEmpty(t, addition.SavedDropletPasswordUpdatedAt(1001))
+
+	passwordView, err := addition.RevealDropletPassword(1001)
+	require.NoError(t, err)
+	require.Equal(t, "Secret!123", passwordView.RootPassword)
+}

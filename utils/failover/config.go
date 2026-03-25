@@ -10,6 +10,7 @@ import (
 
 	"github.com/komari-monitor/komari/config"
 	"github.com/komari-monitor/komari/database"
+	"github.com/komari-monitor/komari/database/models"
 	awscloud "github.com/komari-monitor/komari/utils/cloudprovider/aws"
 	"github.com/komari-monitor/komari/utils/cloudprovider/digitalocean"
 	"github.com/komari-monitor/komari/utils/cloudprovider/linode"
@@ -49,6 +50,14 @@ func loadProviderAddition(userUUID, providerName string) (string, error) {
 		return "", err
 	}
 	return strings.TrimSpace(providerConfig.Addition), nil
+}
+
+func saveProviderAddition(userUUID, providerName, addition string) error {
+	return database.SaveCloudProviderConfigForUser(&models.CloudProvider{
+		UserID:   strings.TrimSpace(userUUID),
+		Name:     strings.TrimSpace(providerName),
+		Addition: addition,
+	})
 }
 
 func loadAWSCredential(userUUID, entryID string) (*awscloud.Addition, *awscloud.CredentialRecord, error) {
@@ -111,6 +120,19 @@ func loadDigitalOceanToken(userUUID, entryID string) (*digitalocean.Addition, *d
 	return addition, token, nil
 }
 
+func saveDigitalOceanAddition(userUUID string, addition *digitalocean.Addition) error {
+	if addition == nil {
+		addition = &digitalocean.Addition{}
+	}
+	addition.Normalize()
+
+	payload, err := json.Marshal(addition)
+	if err != nil {
+		return err
+	}
+	return saveProviderAddition(userUUID, "digitalocean", string(payload))
+}
+
 func loadLinodeToken(userUUID, entryID string) (*linode.Addition, *linode.TokenRecord, error) {
 	raw, err := loadProviderAddition(userUUID, "linode")
 	if err != nil {
@@ -139,6 +161,19 @@ func loadLinodeToken(userUUID, entryID string) (*linode.Addition, *linode.TokenR
 		return nil, nil, fmt.Errorf("Linode token not found: %s", entryID)
 	}
 	return addition, token, nil
+}
+
+func saveLinodeAddition(userUUID string, addition *linode.Addition) error {
+	if addition == nil {
+		addition = &linode.Addition{}
+	}
+	addition.Normalize()
+
+	payload, err := json.Marshal(addition)
+	if err != nil {
+		return err
+	}
+	return saveProviderAddition(userUUID, "linode", string(payload))
 }
 
 func loadGenericProviderEntry(userUUID, providerName, entryID string) (*genericProviderEntry, error) {
@@ -268,7 +303,7 @@ func resolveAutoConnectOriginForUser(userUUID string) (string, error) {
 	}
 	scriptDomain = strings.TrimSpace(scriptDomain)
 	if scriptDomain == "" {
-		return "", errors.New("script_domain is required for automatic failover auto-connect")
+		return "", errors.New("script_domain is required for automatic failover auto-connect; set Settings -> Site -> Agent connection address because failover tasks run without a browser request context")
 	}
 	if strings.Contains(scriptDomain, "://") {
 		return strings.TrimRight(scriptDomain, "/"), nil

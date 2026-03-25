@@ -256,7 +256,7 @@ func resolveDigitalOceanActiveResource(userID, resourceID string) (*AdminResourc
 		ResourceName:          strings.TrimSpace(droplet.Name),
 		CredentialID:          token.ID,
 		CredentialName:        token.Name,
-		CanSharePassword:      token.HasSavedDropletPassword(dropletID),
+		CanSharePassword:      addition.HasSavedDropletPassword(dropletID),
 		CanShareManagedSSHKey: addition.HasManagedSSHKeyMaterial(),
 	}, nil
 }
@@ -293,7 +293,7 @@ func resolveLinodeActiveResource(userID, resourceID string) (*AdminResourceState
 		ResourceName:          strings.TrimSpace(instance.Label),
 		CredentialID:          token.ID,
 		CredentialName:        token.Name,
-		CanSharePassword:      token.HasSavedInstancePassword(instanceID),
+		CanSharePassword:      addition.HasSavedInstancePassword(instanceID),
 		CanShareManagedSSHKey: false,
 	}, nil
 }
@@ -416,7 +416,7 @@ func resolvePublicDigitalOceanShare(share *models.CloudInstanceShare, resourceID
 
 	if share.SharePassword {
 		if dropletID, err := strconv.Atoi(resourceID); err == nil {
-			if passwordView, err := token.RevealDropletPassword(dropletID); err == nil && passwordView != nil {
+			if passwordView, err := addition.RevealDropletPassword(dropletID); err == nil && passwordView != nil {
 				view.RootPassword = &SharedRootPasswordView{
 					Username:     firstNonEmpty(passwordView.Username, "root"),
 					PasswordMode: passwordView.PasswordMode,
@@ -503,7 +503,7 @@ func resolvePublicLinodeShare(share *models.CloudInstanceShare, resourceID strin
 	}
 
 	if share.SharePassword {
-		if passwordView, err := token.RevealInstancePassword(instanceID); err == nil && passwordView != nil {
+		if passwordView, err := addition.RevealInstancePassword(instanceID); err == nil && passwordView != nil {
 			view.RootPassword = &SharedRootPasswordView{
 				Username:     firstNonEmpty(passwordView.Username, "root"),
 				PasswordMode: passwordView.PasswordMode,

@@ -437,13 +437,7 @@ func GetDigitalOceanDropletPassword(c *gin.Context) {
 		return
 	}
 
-	activeToken := addition.ActiveToken()
-	if activeToken == nil {
-		api.RespondError(c, http.StatusBadRequest, "DigitalOcean token is not configured")
-		return
-	}
-
-	passwordView, err := activeToken.RevealDropletPassword(dropletID)
+	passwordView, err := addition.RevealDropletPassword(dropletID)
 	if err != nil {
 		switch {
 		case errors.Is(err, digitalocean.ErrSavedDropletPasswordNotFound):
@@ -585,7 +579,7 @@ func ListDigitalOceanDroplets(c *gin.Context) {
 		if activeToken != nil && activeToken.SyncDropletCredentialName(droplets[index].ID, droplets[index].Name) {
 			credentialsChanged = true
 		}
-		view := buildDigitalOceanDropletView(&droplets[index], activeToken)
+		view := buildDigitalOceanDropletView(&droplets[index], addition)
 		if view != nil {
 			views = append(views, *view)
 		}
@@ -631,6 +625,13 @@ func CreateDigitalOceanDroplet(c *gin.Context) {
 	payload.AutoConnectGroup = strings.TrimSpace(payload.AutoConnectGroup)
 
 	passwordMode := normalizeRootPasswordMode(payload.RootPasswordMode)
+	if strings.TrimSpace(payload.RootPasswordMode) == "" {
+		if payload.RootPassword != "" {
+			passwordMode = "custom"
+		} else {
+			passwordMode = "random"
+		}
+	}
 	if passwordMode == "" {
 		api.RespondError(c, http.StatusBadRequest, "Unsupported root password mode: "+payload.RootPasswordMode)
 		return
@@ -724,7 +725,7 @@ func CreateDigitalOceanDroplet(c *gin.Context) {
 	logMessage += ")"
 	logCloudAudit(c, logMessage)
 	api.RespondSuccess(c, createDigitalOceanDropletResponse{
-		Droplet:           buildDigitalOceanDropletView(droplet, activeToken),
+		Droplet:           buildDigitalOceanDropletView(droplet, addition),
 		GeneratedPassword: generatedPassword,
 		ManagedSSHKey:     managedSSHKey,
 		PasswordSaved:     passwordSaved,
@@ -903,7 +904,7 @@ func appendUniqueInt(values []int, value int) []int {
 	return append(values, value)
 }
 
-func buildDigitalOceanDropletView(droplet *digitalocean.Droplet, token *digitalocean.TokenRecord) *digitalOceanDropletView {
+func buildDigitalOceanDropletView(droplet *digitalocean.Droplet, addition *digitalocean.Addition) *digitalOceanDropletView {
 	if droplet == nil {
 		return nil
 	}
@@ -911,9 +912,9 @@ func buildDigitalOceanDropletView(droplet *digitalocean.Droplet, token *digitalo
 	view := &digitalOceanDropletView{
 		Droplet: *droplet,
 	}
-	if token != nil && token.HasSavedDropletPassword(droplet.ID) {
+	if addition != nil && addition.HasSavedDropletPassword(droplet.ID) {
 		view.SavedRootPassword = true
-		view.SavedRootPasswordUpdatedAt = token.SavedDropletPasswordUpdatedAt(droplet.ID)
+		view.SavedRootPasswordUpdatedAt = addition.SavedDropletPasswordUpdatedAt(droplet.ID)
 	}
 
 	return view

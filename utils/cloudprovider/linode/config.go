@@ -213,6 +213,39 @@ func (a *Addition) ActiveToken() *TokenRecord {
 	return a.FindToken(a.ActiveTokenID)
 }
 
+func (a *Addition) FindTokenWithSavedInstancePassword(instanceID int) *TokenRecord {
+	if a == nil || instanceID <= 0 {
+		return nil
+	}
+	a.Normalize()
+	for index := range a.Tokens {
+		if a.Tokens[index].HasSavedInstancePassword(instanceID) {
+			return &a.Tokens[index]
+		}
+	}
+	return nil
+}
+
+func (a *Addition) HasSavedInstancePassword(instanceID int) bool {
+	return a.FindTokenWithSavedInstancePassword(instanceID) != nil
+}
+
+func (a *Addition) SavedInstancePasswordUpdatedAt(instanceID int) string {
+	token := a.FindTokenWithSavedInstancePassword(instanceID)
+	if token == nil {
+		return ""
+	}
+	return token.SavedInstancePasswordUpdatedAt(instanceID)
+}
+
+func (a *Addition) RevealInstancePassword(instanceID int) (*InstancePasswordView, error) {
+	token := a.FindTokenWithSavedInstancePassword(instanceID)
+	if token == nil {
+		return nil, ErrSavedRootPasswordNotFound
+	}
+	return token.RevealInstancePassword(instanceID)
+}
+
 func (a *Addition) SetActiveToken(id string) bool {
 	if a == nil {
 		return false

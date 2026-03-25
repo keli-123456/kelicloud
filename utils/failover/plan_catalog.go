@@ -39,22 +39,47 @@ type PlanCatalog struct {
 	Types             []CatalogOption `json:"types"`
 }
 
-func LoadPlanCatalog(userUUID, providerName, entryID, actionType, service, region string) (*PlanCatalog, error) {
+func newEmptyPlanCatalog(providerName, actionType, service, region string) *PlanCatalog {
+	return &PlanCatalog{
+		Provider:          providerName,
+		ActionType:        actionType,
+		Service:           service,
+		Region:            region,
+		Regions:           []CatalogOption{},
+		Instances:         []CatalogOption{},
+		AvailabilityZones: []CatalogOption{},
+		Images:            []CatalogOption{},
+		InstanceTypes:     []CatalogOption{},
+		KeyPairs:          []CatalogOption{},
+		Subnets:           []CatalogOption{},
+		SecurityGroups:    []CatalogOption{},
+		Bundles:           []CatalogOption{},
+		Blueprints:        []CatalogOption{},
+		Sizes:             []CatalogOption{},
+		Types:             []CatalogOption{},
+	}
+}
+
+func LoadPlanCatalog(userUUID, providerName, entryID, actionType, service, region, mode string) (*PlanCatalog, error) {
 	providerName = strings.ToLower(strings.TrimSpace(providerName))
 	actionType = strings.ToLower(strings.TrimSpace(actionType))
 	service = strings.ToLower(strings.TrimSpace(service))
 	region = strings.TrimSpace(region)
+	mode = strings.ToLower(strings.TrimSpace(mode))
+	if mode == "" {
+		mode = "full"
+	}
 
 	return loadCatalogWithCache(
-		fmt.Sprintf("plan:%s:%s:%s:%s:%s:%s", strings.TrimSpace(userUUID), providerName, strings.TrimSpace(entryID), actionType, service, region),
+		fmt.Sprintf("plan:%s:%s:%s:%s:%s:%s:%s", strings.TrimSpace(userUUID), providerName, strings.TrimSpace(entryID), actionType, service, region, mode),
 		func() (*PlanCatalog, error) {
 			switch providerName {
 			case "aws":
-				return loadAWSPlanCatalog(userUUID, entryID, actionType, service, region)
+				return loadAWSPlanCatalog(userUUID, entryID, actionType, service, region, mode)
 			case "digitalocean":
-				return loadDigitalOceanPlanCatalog(userUUID, entryID, actionType)
+				return loadDigitalOceanPlanCatalog(userUUID, entryID, actionType, mode)
 			case "linode":
-				return loadLinodePlanCatalog(userUUID, entryID, actionType)
+				return loadLinodePlanCatalog(userUUID, entryID, actionType, mode)
 			default:
 				return nil, fmt.Errorf("unsupported failover plan provider: %s", providerName)
 			}
@@ -62,7 +87,7 @@ func LoadPlanCatalog(userUUID, providerName, entryID, actionType, service, regio
 	)
 }
 
-func loadAWSPlanCatalog(userUUID, entryID, actionType, service, region string) (*PlanCatalog, error) {
+func loadAWSPlanCatalog(userUUID, entryID, actionType, service, region, mode string) (*PlanCatalog, error) {
 	addition, credential, err := loadAWSCredential(userUUID, entryID)
 	if err != nil {
 		return nil, err
@@ -85,24 +110,7 @@ func loadAWSPlanCatalog(userUUID, entryID, actionType, service, region string) (
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
-	catalog := &PlanCatalog{
-		Provider:          "aws",
-		ActionType:        actionType,
-		Service:           service,
-		Region:            resolvedRegion,
-		Regions:           []CatalogOption{},
-		Instances:         []CatalogOption{},
-		AvailabilityZones: []CatalogOption{},
-		Images:            []CatalogOption{},
-		InstanceTypes:     []CatalogOption{},
-		KeyPairs:          []CatalogOption{},
-		Subnets:           []CatalogOption{},
-		SecurityGroups:    []CatalogOption{},
-		Bundles:           []CatalogOption{},
-		Blueprints:        []CatalogOption{},
-		Sizes:             []CatalogOption{},
-		Types:             []CatalogOption{},
-	}
+	catalog := newEmptyPlanCatalog("aws", actionType, service, resolvedRegion)
 
 	switch service {
 	case "", "ec2":
@@ -172,6 +180,9 @@ func loadAWSPlanCatalog(userUUID, entryID, actionType, service, region string) (
 				Label: strings.TrimSpace(item.Name),
 				Hint:  strings.TrimSpace(item.Endpoint),
 			})
+		}
+		if mode == "regions" {
+			return catalog, nil
 		}
 		if actionType == "rebind_public_ip" {
 			for _, item := range instances {
@@ -300,6 +311,9 @@ func loadAWSPlanCatalog(userUUID, entryID, actionType, service, region string) (
 				}
 			}
 		}
+		if mode == "regions" {
+			return catalog, nil
+		}
 		if actionType == "rebind_public_ip" {
 			for _, item := range instances {
 				hintParts := make([]string, 0, 2)
@@ -349,7 +363,7 @@ func loadAWSPlanCatalog(userUUID, entryID, actionType, service, region string) (
 	return catalog, nil
 }
 
-func loadDigitalOceanPlanCatalog(userUUID, entryID, actionType string) (*PlanCatalog, error) {
+func loadDigitalOceanPlanCatalog(userUUID, entryID, actionType, mode string) (*PlanCatalog, error) {
 	_, token, err := loadDigitalOceanToken(userUUID, entryID)
 	if err != nil {
 		return nil, err
@@ -366,6 +380,21 @@ func loadDigitalOceanPlanCatalog(userUUID, entryID, actionType string) (*PlanCat
 	if err != nil {
 		return nil, err
 	}
+	sort.Slice(regions, func(i, j int) bool {
+		return regions[i].Slug < regions[j].Slug
+	})
+
+	catalog := newEmptyPlanCatalog("digitalocean", actionType, "", "")
+	for _, item := range regions {
+		catalog.Regions = append(catalog.Regions, CatalogOption{
+			Value: strings.TrimSpace(item.Slug),
+			Label: firstNonEmpty(strings.TrimSpace(item.Name), strings.TrimSpace(item.Slug)),
+		})
+	}
+	if mode == "regions" {
+		return catalog, nil
+	}
+
 	sizes, err := client.ListSizes(ctx)
 	if err != nil {
 		return nil, err
@@ -375,9 +404,6 @@ func loadDigitalOceanPlanCatalog(userUUID, entryID, actionType string) (*PlanCat
 		return nil, err
 	}
 
-	sort.Slice(regions, func(i, j int) bool {
-		return regions[i].Slug < regions[j].Slug
-	})
 	sort.Slice(sizes, func(i, j int) bool {
 		return sizes[i].PriceMonthly < sizes[j].PriceMonthly
 	})
@@ -387,28 +413,6 @@ func loadDigitalOceanPlanCatalog(userUUID, entryID, actionType string) (*PlanCat
 		return left < right
 	})
 
-	catalog := &PlanCatalog{
-		Provider:          "digitalocean",
-		ActionType:        actionType,
-		Regions:           []CatalogOption{},
-		Instances:         []CatalogOption{},
-		AvailabilityZones: []CatalogOption{},
-		Images:            []CatalogOption{},
-		InstanceTypes:     []CatalogOption{},
-		KeyPairs:          []CatalogOption{},
-		Subnets:           []CatalogOption{},
-		SecurityGroups:    []CatalogOption{},
-		Bundles:           []CatalogOption{},
-		Blueprints:        []CatalogOption{},
-		Sizes:             []CatalogOption{},
-		Types:             []CatalogOption{},
-	}
-	for _, item := range regions {
-		catalog.Regions = append(catalog.Regions, CatalogOption{
-			Value: strings.TrimSpace(item.Slug),
-			Label: firstNonEmpty(strings.TrimSpace(item.Name), strings.TrimSpace(item.Slug)),
-		})
-	}
 	for _, item := range sizes {
 		catalog.Sizes = append(catalog.Sizes, CatalogOption{
 			Value: strings.TrimSpace(item.Slug),
@@ -435,7 +439,7 @@ func loadDigitalOceanPlanCatalog(userUUID, entryID, actionType string) (*PlanCat
 	return catalog, nil
 }
 
-func loadLinodePlanCatalog(userUUID, entryID, actionType string) (*PlanCatalog, error) {
+func loadLinodePlanCatalog(userUUID, entryID, actionType, mode string) (*PlanCatalog, error) {
 	_, token, err := loadLinodeToken(userUUID, entryID)
 	if err != nil {
 		return nil, err
@@ -452,6 +456,22 @@ func loadLinodePlanCatalog(userUUID, entryID, actionType string) (*PlanCatalog, 
 	if err != nil {
 		return nil, err
 	}
+	sort.Slice(regions, func(i, j int) bool {
+		return regions[i].ID < regions[j].ID
+	})
+
+	catalog := newEmptyPlanCatalog("linode", actionType, "", "")
+	for _, item := range regions {
+		catalog.Regions = append(catalog.Regions, CatalogOption{
+			Value: strings.TrimSpace(item.ID),
+			Label: firstNonEmpty(strings.TrimSpace(item.Label), strings.TrimSpace(item.ID)),
+			Hint:  strings.TrimSpace(item.Country),
+		})
+	}
+	if mode == "regions" {
+		return catalog, nil
+	}
+
 	types, err := client.ListTypes(ctx)
 	if err != nil {
 		return nil, err
@@ -461,9 +481,6 @@ func loadLinodePlanCatalog(userUUID, entryID, actionType string) (*PlanCatalog, 
 		return nil, err
 	}
 
-	sort.Slice(regions, func(i, j int) bool {
-		return regions[i].ID < regions[j].ID
-	})
 	sort.Slice(types, func(i, j int) bool {
 		return types[i].Price.Monthly < types[j].Price.Monthly
 	})
@@ -473,29 +490,6 @@ func loadLinodePlanCatalog(userUUID, entryID, actionType string) (*PlanCatalog, 
 		return left < right
 	})
 
-	catalog := &PlanCatalog{
-		Provider:          "linode",
-		ActionType:        actionType,
-		Regions:           []CatalogOption{},
-		Instances:         []CatalogOption{},
-		AvailabilityZones: []CatalogOption{},
-		Images:            []CatalogOption{},
-		InstanceTypes:     []CatalogOption{},
-		KeyPairs:          []CatalogOption{},
-		Subnets:           []CatalogOption{},
-		SecurityGroups:    []CatalogOption{},
-		Bundles:           []CatalogOption{},
-		Blueprints:        []CatalogOption{},
-		Sizes:             []CatalogOption{},
-		Types:             []CatalogOption{},
-	}
-	for _, item := range regions {
-		catalog.Regions = append(catalog.Regions, CatalogOption{
-			Value: strings.TrimSpace(item.ID),
-			Label: firstNonEmpty(strings.TrimSpace(item.Label), strings.TrimSpace(item.ID)),
-			Hint:  strings.TrimSpace(item.Country),
-		})
-	}
 	for _, item := range types {
 		catalog.Types = append(catalog.Types, CatalogOption{
 			Value: strings.TrimSpace(item.ID),

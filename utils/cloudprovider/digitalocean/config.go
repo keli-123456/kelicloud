@@ -314,6 +314,39 @@ func (a *Addition) ActiveToken() *TokenRecord {
 	return a.FindToken(a.ActiveTokenID)
 }
 
+func (a *Addition) FindTokenWithSavedDropletPassword(dropletID int) *TokenRecord {
+	if a == nil || dropletID <= 0 {
+		return nil
+	}
+	a.Normalize()
+	for index := range a.Tokens {
+		if a.Tokens[index].HasSavedDropletPassword(dropletID) {
+			return &a.Tokens[index]
+		}
+	}
+	return nil
+}
+
+func (a *Addition) HasSavedDropletPassword(dropletID int) bool {
+	return a.FindTokenWithSavedDropletPassword(dropletID) != nil
+}
+
+func (a *Addition) SavedDropletPasswordUpdatedAt(dropletID int) string {
+	token := a.FindTokenWithSavedDropletPassword(dropletID)
+	if token == nil {
+		return ""
+	}
+	return token.SavedDropletPasswordUpdatedAt(dropletID)
+}
+
+func (a *Addition) RevealDropletPassword(dropletID int) (*DropletPasswordView, error) {
+	token := a.FindTokenWithSavedDropletPassword(dropletID)
+	if token == nil {
+		return nil, ErrSavedDropletPasswordNotFound
+	}
+	return token.RevealDropletPassword(dropletID)
+}
+
 func (a *Addition) SetActiveToken(id string) bool {
 	if a == nil {
 		return false

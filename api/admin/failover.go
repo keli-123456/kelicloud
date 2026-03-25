@@ -904,6 +904,7 @@ func GetFailoverPlanCatalog(c *gin.Context) {
 		actionType,
 		strings.TrimSpace(c.Query("service")),
 		strings.TrimSpace(c.Query("region")),
+		strings.TrimSpace(c.Query("mode")),
 	)
 	if err != nil {
 		api.RespondError(c, http.StatusBadRequest, "Failed to load plan catalog: "+err.Error())

@@ -325,13 +325,7 @@ func GetLinodeInstancePassword(c *gin.Context) {
 		return
 	}
 
-	activeToken := addition.ActiveToken()
-	if activeToken == nil {
-		api.RespondError(c, http.StatusBadRequest, "Linode token is not configured")
-		return
-	}
-
-	passwordView, err := activeToken.RevealInstancePassword(instanceID)
+	passwordView, err := addition.RevealInstancePassword(instanceID)
 	if err != nil {
 		switch {
 		case errors.Is(err, linodecloud.ErrSavedRootPasswordNotFound):
@@ -485,7 +479,7 @@ func ListLinodeInstances(c *gin.Context) {
 		if activeToken != nil && activeToken.SyncInstanceCredentialLabel(instances[index].ID, instances[index].Label) {
 			credentialsChanged = true
 		}
-		view := buildLinodeInstanceView(&instances[index], activeToken)
+		view := buildLinodeInstanceView(&instances[index], addition)
 		if view != nil {
 			views = append(views, *view)
 		}
@@ -507,7 +501,7 @@ func GetLinodeInstanceDetail(c *gin.Context) {
 		return
 	}
 
-	client, _, activeToken, ctx, cancel, err := getLinodeActiveTokenClient(c, scope)
+	client, addition, _, ctx, cancel, err := getLinodeActiveTokenClient(c, scope)
 	if err != nil {
 		respondLinodeError(c, err)
 		return
@@ -549,7 +543,7 @@ func GetLinodeInstanceDetail(c *gin.Context) {
 	}
 
 	api.RespondSuccess(c, linodeInstanceDetailView{
-		Instance: buildLinodeInstanceView(instance, activeToken),
+		Instance: buildLinodeInstanceView(instance, addition),
 		Disks:    disks,
 		Configs:  configs,
 		Backups:  backups,
@@ -586,6 +580,13 @@ func CreateLinodeInstance(c *gin.Context) {
 	payload.AutoConnectGroup = strings.TrimSpace(payload.AutoConnectGroup)
 
 	passwordMode := normalizeLinodeRootPasswordMode(payload.RootPasswordMode)
+	if strings.TrimSpace(payload.RootPasswordMode) == "" {
+		if payload.RootPassword != "" {
+			passwordMode = "custom"
+		} else {
+			passwordMode = "random"
+		}
+	}
 	if passwordMode == "" {
 		api.RespondError(c, http.StatusBadRequest, "Unsupported root password mode: "+payload.RootPasswordMode)
 		return
@@ -667,7 +668,7 @@ func CreateLinodeInstance(c *gin.Context) {
 	logMessage += ")"
 	logCloudAudit(c, logMessage)
 	api.RespondSuccess(c, createLinodeInstanceResponse{
-		Instance:          buildLinodeInstanceView(instance, activeToken),
+		Instance:          buildLinodeInstanceView(instance, addition),
 		GeneratedPassword: generatedPassword,
 		PasswordSaved:     passwordSaved,
 		PasswordSaveError: passwordSaveError,
@@ -859,7 +860,7 @@ func PostLinodeInstanceAction(c *gin.Context) {
 			}
 		}
 		response["generated_password"] = generatedPassword
-		response["instance"] = buildLinodeInstanceView(rebuilt, activeToken)
+		response["instance"] = buildLinodeInstanceView(rebuilt, addition)
 	default:
 		api.RespondError(c, http.StatusBadRequest, "Unsupported instance action: "+payload.Type)
 		return
@@ -912,7 +913,7 @@ func respondLinodeError(c *gin.Context, err error) {
 	api.RespondError(c, http.StatusBadRequest, err.Error())
 }
 
-func buildLinodeInstanceView(instance *linodecloud.Instance, token *linodecloud.TokenRecord) *linodeInstanceView {
+func buildLinodeInstanceView(instance *linodecloud.Instance, addition *linodecloud.Addition) *linodeInstanceView {
 	if instance == nil {
 		return nil
 	}
@@ -920,9 +921,9 @@ func buildLinodeInstanceView(instance *linodecloud.Instance, token *linodecloud.
 	view := &linodeInstanceView{
 		Instance: *instance,
 	}
-	if token != nil && token.HasSavedInstancePassword(instance.ID) {
+	if addition != nil && addition.HasSavedInstancePassword(instance.ID) {
 		view.SavedRootPassword = true
-		view.SavedRootPasswordUpdatedAt = token.SavedInstancePasswordUpdatedAt(instance.ID)
+		view.SavedRootPasswordUpdatedAt = addition.SavedInstancePasswordUpdatedAt(instance.ID)
 	}
 	return view
 }

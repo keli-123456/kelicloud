@@ -482,7 +482,218 @@ func (r *executionRunner) executePlanActionWithProviderPool(plan models.Failover
 	nextCandidate:
 	}
 
-	return nil, "", entryAttempts, errors.New("no provider entry in the selected pool is currently available")
+	return nil, "", entryAttempts, buildProviderPoolUnavailableError(entryAttempts)
+}
+
+func buildProviderPoolUnavailableError(entryAttempts []map[string]interface{}) error {
+	base := "no provider entry in the selected pool is currently available"
+	summary := summarizeProviderEntryAttempts(entryAttempts)
+	if summary == "" {
+		return errors.New(base)
+	}
+	return fmt.Errorf("%s: %s", base, summary)
+}
+
+func summarizeProviderEntryAttempts(entryAttempts []map[string]interface{}) string {
+	if len(entryAttempts) == 0 {
+		return ""
+	}
+
+	type entrySummary struct {
+		label  string
+		reason string
+	}
+
+	order := make([]string, 0, len(entryAttempts))
+	summaries := make(map[string]entrySummary, len(entryAttempts))
+	for index := len(entryAttempts) - 1; index >= 0; index-- {
+		attempt := entryAttempts[index]
+		entryID := strings.TrimSpace(stringMapValue(attempt, "entry_id"))
+		entryName := strings.TrimSpace(stringMapValue(attempt, "entry_name"))
+		key := firstNonEmpty(entryID, entryName)
+		if key == "" {
+			key = fmt.Sprintf("entry-%d", index)
+		}
+		if _, exists := summaries[key]; exists {
+			continue
+		}
+
+		reason := describeProviderEntryAttempt(attempt)
+		if reason == "" {
+			continue
+		}
+
+		summaries[key] = entrySummary{
+			label:  firstNonEmpty(entryName, entryID, key),
+			reason: reason,
+		}
+		order = append(order, key)
+	}
+
+	if len(order) == 0 {
+		return ""
+	}
+
+	parts := make([]string, 0, len(order))
+	for index := len(order) - 1; index >= 0; index-- {
+		summary := summaries[order[index]]
+		if summary.label == "" {
+			parts = append(parts, summary.reason)
+			continue
+		}
+		parts = append(parts, fmt.Sprintf("%s: %s", summary.label, summary.reason))
+	}
+	return strings.Join(parts, "; ")
+}
+
+func describeProviderEntryAttempt(attempt map[string]interface{}) string {
+	availability := mapValue(attempt, "availability")
+	availabilityStatus := strings.TrimSpace(stringMapValue(availability, "status"))
+	switch availabilityStatus {
+	case "cooldown":
+		reason := strings.TrimSpace(stringMapValue(availability, "reason"))
+		until := strings.TrimSpace(stringMapValue(availability, "cooldown_until"))
+		switch {
+		case reason != "" && until != "":
+			return fmt.Sprintf("cooldown until %s (%s)", until, reason)
+		case until != "":
+			return fmt.Sprintf("cooldown until %s", until)
+		case reason != "":
+			return "cooldown (" + reason + ")"
+		default:
+			return "cooldown"
+		}
+	case "full":
+		used := intMapValue(availability, "used")
+		limit := intMapValue(availability, "limit")
+		free := intMapValue(availability, "free")
+		switch {
+		case limit > 0:
+			return fmt.Sprintf("capacity full (%d/%d used, %d free)", used, limit, free)
+		case free == 0:
+			return "no available capacity"
+		}
+	case "reserved":
+		return "reserved by another running task"
+	}
+
+	failureClass := strings.TrimSpace(stringMapValue(attempt, "failure_class"))
+	errorMessage := strings.TrimSpace(stringMapValue(attempt, "error"))
+	switch failureClass {
+	case "rate_limited":
+		if errorMessage != "" {
+			return "rate limited (" + errorMessage + ")"
+		}
+		return "rate limited"
+	case "quota_exhausted":
+		if errorMessage != "" {
+			return "quota exhausted (" + errorMessage + ")"
+		}
+		return "quota exhausted"
+	case "billing_locked":
+		if errorMessage != "" {
+			return "billing locked (" + errorMessage + ")"
+		}
+		return "billing locked"
+	case "auth_invalid":
+		if errorMessage != "" {
+			return "credential invalid (" + errorMessage + ")"
+		}
+		return "credential invalid"
+	case "outlet_blocked":
+		if errorMessage != "" {
+			return "new outlet blocked (" + errorMessage + ")"
+		}
+		return "new outlet blocked"
+	case "post_provision_error":
+		if errorMessage != "" {
+			return errorMessage
+		}
+		return "post-provision step failed"
+	}
+
+	if errorMessage != "" {
+		return errorMessage
+	}
+	status := strings.TrimSpace(stringMapValue(attempt, "status"))
+	if status != "" && status != "success" {
+		return status
+	}
+	return ""
+}
+
+func mapValue(source map[string]interface{}, key string) map[string]interface{} {
+	if source == nil {
+		return nil
+	}
+	value, ok := source[key]
+	if !ok {
+		return nil
+	}
+	object, ok := value.(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	return object
+}
+
+func stringMapValue(source map[string]interface{}, key string) string {
+	if source == nil {
+		return ""
+	}
+	value, ok := source[key]
+	if !ok || value == nil {
+		return ""
+	}
+	switch typed := value.(type) {
+	case string:
+		return typed
+	case fmt.Stringer:
+		return typed.String()
+	default:
+		return fmt.Sprintf("%v", typed)
+	}
+}
+
+func intMapValue(source map[string]interface{}, key string) int {
+	if source == nil {
+		return 0
+	}
+	value, ok := source[key]
+	if !ok || value == nil {
+		return 0
+	}
+	switch typed := value.(type) {
+	case int:
+		return typed
+	case int8:
+		return int(typed)
+	case int16:
+		return int(typed)
+	case int32:
+		return int(typed)
+	case int64:
+		return int(typed)
+	case uint:
+		return int(typed)
+	case uint8:
+		return int(typed)
+	case uint16:
+		return int(typed)
+	case uint32:
+		return int(typed)
+	case uint64:
+		return int(typed)
+	case float32:
+		return int(typed)
+	case float64:
+		return int(typed)
+	case json.Number:
+		parsed, _ := typed.Int64()
+		return int(parsed)
+	default:
+		return 0
+	}
 }
 
 func (r *executionRunner) executePlanAction(plan models.FailoverPlan) (*actionOutcome, error) {
@@ -702,6 +913,62 @@ func waitForHealthyClientConnectivity(userUUID, clientUUID string, startedAt tim
 		return lastReport, fmt.Errorf("timed out waiting for a healthy cn_connectivity report from client %s (last status: %s)", clientUUID, strings.TrimSpace(lastReport.CNConnectivity.Status))
 	}
 	return nil, fmt.Errorf("timed out waiting for cn_connectivity report from client %s", clientUUID)
+}
+
+func persistDigitalOceanRootPassword(userUUID string, addition *digitalocean.Addition, token *digitalocean.TokenRecord, dropletID int, dropletName, passwordMode, rootPassword string) error {
+	if addition == nil || token == nil || dropletID <= 0 || strings.TrimSpace(rootPassword) == "" {
+		return nil
+	}
+	if err := token.SaveDropletPassword(dropletID, dropletName, passwordMode, rootPassword, time.Now()); err != nil {
+		log.Printf("failover: failed to save DigitalOcean root password for droplet %d: %v", dropletID, err)
+		return err
+	}
+	if err := saveDigitalOceanAddition(userUUID, addition); err != nil {
+		token.RemoveSavedDropletPassword(dropletID)
+		log.Printf("failover: failed to persist DigitalOcean root password for droplet %d: %v", dropletID, err)
+		return err
+	}
+	return nil
+}
+
+func removeSavedDigitalOceanRootPassword(userUUID string, addition *digitalocean.Addition, token *digitalocean.TokenRecord, dropletID int) {
+	if addition == nil || token == nil || dropletID <= 0 {
+		return
+	}
+	if !token.RemoveSavedDropletPassword(dropletID) {
+		return
+	}
+	if err := saveDigitalOceanAddition(userUUID, addition); err != nil {
+		log.Printf("failover: failed to remove saved DigitalOcean root password for droplet %d: %v", dropletID, err)
+	}
+}
+
+func persistLinodeRootPassword(userUUID string, addition *linodecloud.Addition, token *linodecloud.TokenRecord, instanceID int, instanceLabel, passwordMode, rootPassword string) error {
+	if addition == nil || token == nil || instanceID <= 0 || strings.TrimSpace(rootPassword) == "" {
+		return nil
+	}
+	if err := token.SaveInstancePassword(instanceID, instanceLabel, passwordMode, rootPassword, time.Now()); err != nil {
+		log.Printf("failover: failed to save Linode root password for instance %d: %v", instanceID, err)
+		return err
+	}
+	if err := saveLinodeAddition(userUUID, addition); err != nil {
+		token.RemoveSavedInstancePassword(instanceID)
+		log.Printf("failover: failed to persist Linode root password for instance %d: %v", instanceID, err)
+		return err
+	}
+	return nil
+}
+
+func removeSavedLinodeRootPassword(userUUID string, addition *linodecloud.Addition, token *linodecloud.TokenRecord, instanceID int) {
+	if addition == nil || token == nil || instanceID <= 0 {
+		return
+	}
+	if !token.RemoveSavedInstancePassword(instanceID) {
+		return
+	}
+	if err := saveLinodeAddition(userUUID, addition); err != nil {
+		log.Printf("failover: failed to remove saved Linode root password for instance %d: %v", instanceID, err)
+	}
 }
 
 func failoverConnectivityValidationTimeout(userUUID string) time.Duration {
@@ -1352,7 +1619,7 @@ func provisionDigitalOceanDroplet(userUUID string, plan models.FailoverPlan) (*a
 		return nil, fmt.Errorf("invalid digitalocean provision payload: %w", err)
 	}
 
-	_, token, err := loadDigitalOceanToken(userUUID, plan.ProviderEntryID)
+	addition, token, err := loadDigitalOceanToken(userUUID, plan.ProviderEntryID)
 	if err != nil {
 		return nil, err
 	}
@@ -1382,10 +1649,11 @@ func provisionDigitalOceanDroplet(userUUID string, plan models.FailoverPlan) (*a
 	}
 
 	passwordMode := strings.ToLower(strings.TrimSpace(payload.RootPasswordMode))
+	rootPassword := ""
 	switch passwordMode {
-	case "", "none":
-	case "random":
-		rootPassword, err := digitalocean.GenerateRandomPassword(20)
+	case "", "random":
+		passwordMode = "random"
+		rootPassword, err = digitalocean.GenerateRandomPassword(20)
 		if err != nil {
 			return nil, err
 		}
@@ -1393,11 +1661,13 @@ func provisionDigitalOceanDroplet(userUUID string, plan models.FailoverPlan) (*a
 		if err != nil {
 			return nil, err
 		}
+	case "none":
 	case "custom":
 		if strings.TrimSpace(payload.RootPassword) == "" {
 			return nil, errors.New("digitalocean root_password cannot be empty when root_password_mode=custom")
 		}
-		userData, err = digitalocean.BuildRootPasswordUserData(strings.TrimSpace(payload.RootPassword), userData)
+		rootPassword = strings.TrimSpace(payload.RootPassword)
+		userData, err = digitalocean.BuildRootPasswordUserData(rootPassword, userData)
 		if err != nil {
 			return nil, err
 		}
@@ -1424,22 +1694,35 @@ func provisionDigitalOceanDroplet(userUUID string, plan models.FailoverPlan) (*a
 	if err != nil {
 		return nil, err
 	}
+	passwordSaveErr := persistDigitalOceanRootPassword(userUUID, addition, token, droplet.ID, droplet.Name, passwordMode, rootPassword)
+	newInstanceRef := map[string]interface{}{
+		"provider":   "digitalocean",
+		"droplet_id": droplet.ID,
+		"name":       droplet.Name,
+	}
+	if rootPassword != "" {
+		newInstanceRef["root_password_mode"] = passwordMode
+		newInstanceRef["root_password_saved"] = passwordSaveErr == nil
+		if passwordSaveErr != nil {
+			newInstanceRef["root_password_save_error"] = passwordSaveErr.Error()
+		}
+	}
 	outcome := &actionOutcome{
 		IPv4:             digitalOceanPublicIPv4(droplet),
 		IPv6:             digitalOceanPublicIPv6(droplet),
 		AutoConnectGroup: autoConnectGroup,
-		NewInstanceRef: map[string]interface{}{
-			"provider":   "digitalocean",
-			"droplet_id": droplet.ID,
-			"name":       droplet.Name,
-		},
+		NewInstanceRef:   newInstanceRef,
 		NewAddresses: map[string]interface{}{
 			"ipv4": droplet.Networks.V4,
 			"ipv6": droplet.Networks.V6,
 		},
 		RollbackLabel: fmt.Sprintf("delete failed digitalocean droplet %d", droplet.ID),
 		Rollback: func() error {
-			return client.DeleteDroplet(context.Background(), droplet.ID)
+			if err := client.DeleteDroplet(context.Background(), droplet.ID); err != nil {
+				return err
+			}
+			removeSavedDigitalOceanRootPassword(userUUID, addition, token, droplet.ID)
+			return nil
 		},
 	}
 	if payload.CleanupDropletID > 0 {
@@ -1449,7 +1732,11 @@ func provisionDigitalOceanDroplet(userUUID string, plan models.FailoverPlan) (*a
 		}
 		outcome.CleanupLabel = fmt.Sprintf("delete digitalocean droplet %d", payload.CleanupDropletID)
 		outcome.Cleanup = func() error {
-			return client.DeleteDroplet(context.Background(), payload.CleanupDropletID)
+			if err := client.DeleteDroplet(context.Background(), payload.CleanupDropletID); err != nil {
+				return err
+			}
+			removeSavedDigitalOceanRootPassword(userUUID, addition, token, payload.CleanupDropletID)
+			return nil
 		}
 	}
 	return outcome, nil
@@ -1461,7 +1748,7 @@ func provisionLinodeInstance(userUUID string, plan models.FailoverPlan) (*action
 		return nil, fmt.Errorf("invalid linode provision payload: %w", err)
 	}
 
-	_, token, err := loadLinodeToken(userUUID, plan.ProviderEntryID)
+	addition, token, err := loadLinodeToken(userUUID, plan.ProviderEntryID)
 	if err != nil {
 		return nil, err
 	}
@@ -1491,8 +1778,10 @@ func provisionLinodeInstance(userUUID string, plan models.FailoverPlan) (*action
 	}
 
 	rootPassword := strings.TrimSpace(payload.RootPassword)
-	switch strings.ToLower(strings.TrimSpace(payload.RootPasswordMode)) {
+	passwordMode := strings.ToLower(strings.TrimSpace(payload.RootPasswordMode))
+	switch passwordMode {
 	case "", "random":
+		passwordMode = "random"
 		rootPassword, err = linodecloud.GenerateRandomPassword(20)
 		if err != nil {
 			return nil, err
@@ -1532,22 +1821,43 @@ func provisionLinodeInstance(userUUID string, plan models.FailoverPlan) (*action
 	if err != nil {
 		return nil, err
 	}
+	passwordSaveErr := persistLinodeRootPassword(
+		userUUID,
+		addition,
+		token,
+		instance.ID,
+		instance.Label,
+		passwordMode,
+		rootPassword,
+	)
+	newInstanceRef := map[string]interface{}{
+		"provider":    "linode",
+		"instance_id": instance.ID,
+		"label":       instance.Label,
+	}
+	if rootPassword != "" {
+		newInstanceRef["root_password_mode"] = passwordMode
+		newInstanceRef["root_password_saved"] = passwordSaveErr == nil
+		if passwordSaveErr != nil {
+			newInstanceRef["root_password_save_error"] = passwordSaveErr.Error()
+		}
+	}
 	outcome := &actionOutcome{
 		IPv4:             firstString(instance.IPv4),
 		IPv6:             strings.TrimSpace(instance.IPv6),
 		AutoConnectGroup: autoConnectGroup,
-		NewInstanceRef: map[string]interface{}{
-			"provider":    "linode",
-			"instance_id": instance.ID,
-			"label":       instance.Label,
-		},
+		NewInstanceRef:   newInstanceRef,
 		NewAddresses: map[string]interface{}{
 			"ipv4": instance.IPv4,
 			"ipv6": instance.IPv6,
 		},
 		RollbackLabel: fmt.Sprintf("delete failed linode instance %d", instance.ID),
 		Rollback: func() error {
-			return client.DeleteInstance(context.Background(), instance.ID)
+			if err := client.DeleteInstance(context.Background(), instance.ID); err != nil {
+				return err
+			}
+			removeSavedLinodeRootPassword(userUUID, addition, token, instance.ID)
+			return nil
 		},
 	}
 	if payload.CleanupInstanceID > 0 {
@@ -1557,7 +1867,11 @@ func provisionLinodeInstance(userUUID string, plan models.FailoverPlan) (*action
 		}
 		outcome.CleanupLabel = fmt.Sprintf("delete linode instance %d", payload.CleanupInstanceID)
 		outcome.Cleanup = func() error {
-			return client.DeleteInstance(context.Background(), payload.CleanupInstanceID)
+			if err := client.DeleteInstance(context.Background(), payload.CleanupInstanceID); err != nil {
+				return err
+			}
+			removeSavedLinodeRootPassword(userUUID, addition, token, payload.CleanupInstanceID)
+			return nil
 		}
 	}
 	return outcome, nil
