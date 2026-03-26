@@ -22,6 +22,29 @@ func getClientIPType(ip net.IP) int {
 	}
 }
 
+func populateBasicInfoFallbackIP(cbi map[string]interface{}, clientIP string) {
+	if (func() bool {
+		if v4, ok := cbi["ipv4"].(string); !ok || v4 == "" {
+			if v6, ok := cbi["ipv6"].(string); !ok || v6 == "" {
+				return true
+			}
+		}
+		return false
+	})() {
+		ip := net.ParseIP(clientIP)
+		ipType := getClientIPType(ip)
+
+		switch ipType {
+		case 0:
+			cbi["ipv4"] = ip.String()
+		case 1:
+			cbi["ipv6"] = ip.String()
+		default:
+			break
+		}
+	}
+}
+
 func UploadBasicInfo(c *gin.Context) {
 	var cbi = map[string]interface{}{}
 	if err := c.ShouldBindJSON(&cbi); err != nil {
@@ -38,27 +61,7 @@ func UploadBasicInfo(c *gin.Context) {
 
 	cbi["uuid"] = uuid
 
-	if (func() bool {
-		if v4, ok := cbi["ipv4"].(string); !ok || v4 == "" {
-			if v6, ok := cbi["ipv6"].(string); !ok || v6 == "" {
-				return true
-			}
-		}
-		return false
-	})() {
-		ipStr := c.ClientIP()
-		ip := net.ParseIP(ipStr)
-		ipType := getClientIPType(ip)
-
-		switch ipType {
-		case 0:
-			cbi["ipv4"] = ip
-		case 1:
-			cbi["ipv6"] = ip
-		default:
-			break
-		}
-	}
+	populateBasicInfoFallbackIP(cbi, c.ClientIP())
 
 	if cfg, err := config.GetAs[bool](config.GeoIpEnabledKey); err == nil && cfg {
 		if ipv4, ok := cbi["ipv4"].(string); ok && ipv4 != "" {
