@@ -13,6 +13,12 @@ type Legacy struct {
 	CNConnectivityEnabled  bool   `json:"cn_connectivity_enabled" default:"false"`             // 是否启用国内连通性探测
 	CNConnectivityTarget   string `json:"cn_connectivity_target" default:""`                   // 国内连通性探测目标
 	CNConnectivityInterval int    `json:"cn_connectivity_interval" default:"60"`               // 国内连通性探测间隔，单位秒
+	OutboundProxyEnabled   bool   `json:"outbound_proxy_enabled" default:"false"`              // 是否启用全局出站代理
+	OutboundProxyProtocol  string `json:"outbound_proxy_protocol" default:"socks5"`            // 出站代理协议
+	OutboundProxyHost      string `json:"outbound_proxy_host" default:""`                      // 出站代理主机
+	OutboundProxyPort      int    `json:"outbound_proxy_port" default:"1080"`                  // 出站代理端口
+	OutboundProxyUsername  string `json:"outbound_proxy_username" default:""`                  // 出站代理用户名
+	OutboundProxyPassword  string `json:"outbound_proxy_password" default:""`                  // 出站代理密码
 	SendIpAddrToGuest      bool   `json:"send_ip_addr_to_guest" default:"false"`               // 是否向访客页面发送 IP 地址，默认 false
 	EulaAccepted           bool   `json:"eula_accepted" default:"false"`
 	BaseScriptsURL         string `json:"base_scripts_url" default:""` // 安装脚本源地址
@@ -54,6 +60,12 @@ const (
 	CNConnectivityEnabledKey               = "cn_connectivity_enabled"
 	CNConnectivityTargetKey                = "cn_connectivity_target"
 	CNConnectivityIntervalKey              = "cn_connectivity_interval"
+	OutboundProxyEnabledKey                = "outbound_proxy_enabled"
+	OutboundProxyProtocolKey               = "outbound_proxy_protocol"
+	OutboundProxyHostKey                   = "outbound_proxy_host"
+	OutboundProxyPortKey                   = "outbound_proxy_port"
+	OutboundProxyUsernameKey               = "outbound_proxy_username"
+	OutboundProxyPasswordKey               = "outbound_proxy_password"
 	SendIpAddrToGuestKey                   = "send_ip_addr_to_guest"
 	EulaAcceptedKey                        = "eula_accepted"
 	BaseScriptsURLKey                      = "base_scripts_url"

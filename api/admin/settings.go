@@ -1,14 +1,18 @@
 package admin
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
+	"time"
 
 	"github.com/komari-monitor/komari/api"
 	"github.com/komari-monitor/komari/config"
 	"github.com/komari-monitor/komari/database/accounts"
 	"github.com/komari-monitor/komari/database/records"
 	"github.com/komari-monitor/komari/database/tasks"
+	"github.com/komari-monitor/komari/utils/outboundproxy"
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
@@ -24,6 +28,12 @@ var systemSettingKeys = map[string]struct{}{
 	config.CNConnectivityEnabledKey:      {},
 	config.CNConnectivityTargetKey:       {},
 	config.CNConnectivityIntervalKey:     {},
+	config.OutboundProxyEnabledKey:       {},
+	config.OutboundProxyProtocolKey:      {},
+	config.OutboundProxyHostKey:          {},
+	config.OutboundProxyPortKey:          {},
+	config.OutboundProxyUsernameKey:      {},
+	config.OutboundProxyPasswordKey:      {},
 	config.EulaAcceptedKey:               {},
 	config.GeoIpEnabledKey:               {},
 	config.GeoIpProviderKey:              {},
@@ -186,6 +196,66 @@ func GetSystemSettings(c *gin.Context) {
 		return
 	}
 	api.RespondSuccess(c, cst)
+}
+
+type outboundProxyTestRequest struct {
+	OutboundProxyEnabled  bool   `json:"outbound_proxy_enabled"`
+	OutboundProxyProtocol string `json:"outbound_proxy_protocol"`
+	OutboundProxyHost     string `json:"outbound_proxy_host"`
+	OutboundProxyPort     int    `json:"outbound_proxy_port"`
+	OutboundProxyUsername string `json:"outbound_proxy_username"`
+	OutboundProxyPassword string `json:"outbound_proxy_password"`
+}
+
+func parseOutboundProxyTestRequest(c *gin.Context) (*outboundproxy.Settings, error) {
+	body, err := c.GetRawData()
+	if err != nil {
+		return nil, err
+	}
+	if len(bytes.TrimSpace(body)) == 0 {
+		return nil, nil
+	}
+
+	var payload outboundProxyTestRequest
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil, err
+	}
+
+	return &outboundproxy.Settings{
+		Enabled:  payload.OutboundProxyEnabled,
+		Protocol: payload.OutboundProxyProtocol,
+		Host:     payload.OutboundProxyHost,
+		Port:     payload.OutboundProxyPort,
+		Username: payload.OutboundProxyUsername,
+		Password: payload.OutboundProxyPassword,
+	}, nil
+}
+
+func TestOutboundProxy(c *gin.Context) {
+	if !requirePlatformAdmin(c) {
+		return
+	}
+
+	settings, err := parseOutboundProxyTestRequest(c)
+	if err != nil {
+		api.RespondError(c, 400, "Invalid outbound proxy test payload: "+err.Error())
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 20*time.Second)
+	defer cancel()
+
+	var result *outboundproxy.ProbeResult
+	if settings == nil {
+		result, err = outboundproxy.Probe(ctx)
+	} else {
+		result, err = outboundproxy.ProbeWithSettings(ctx, settings)
+	}
+	if err != nil {
+		api.RespondError(c, 500, "Failed to test outbound proxy: "+err.Error())
+		return
+	}
+	api.RespondSuccess(c, result)
 }
 
 // GetSettings 获取自定义配置

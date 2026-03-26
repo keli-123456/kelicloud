@@ -11,6 +11,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/komari-monitor/komari/utils/outboundproxy"
 )
 
 const defaultBaseURL = "https://api.digitalocean.com"
@@ -67,11 +69,9 @@ func newClient(token, baseURL string) (*Client, error) {
 	}
 
 	return &Client{
-		token:   token,
-		baseURL: baseURL,
-		httpClient: &http.Client{
-			Timeout: 20 * time.Second,
-		},
+		token:      token,
+		baseURL:    baseURL,
+		httpClient: outboundproxy.NewHTTPClient(20 * time.Second),
 	}, nil
 }
 

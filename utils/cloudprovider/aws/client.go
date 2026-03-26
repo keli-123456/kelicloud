@@ -16,6 +16,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
+	"github.com/komari-monitor/komari/utils/outboundproxy"
 )
 
 type Identity struct {
@@ -126,6 +127,7 @@ func buildConfig(ctx context.Context, credential *CredentialRecord, region strin
 	return awsconfig.LoadDefaultConfig(
 		ctx,
 		awsconfig.WithRegion(resolvedRegion),
+		awsconfig.WithHTTPClient(outboundproxy.NewHTTPClient(20*time.Second)),
 		awsconfig.WithCredentialsProvider(
 			awscredentials.NewStaticCredentialsProvider(
 				strings.TrimSpace(credential.AccessKeyID),

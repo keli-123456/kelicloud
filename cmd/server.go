@@ -249,6 +249,7 @@ func RunServer() {
 			settingsGroup.POST("/", admin.EditSettings)
 			settingsGroup.GET("/system", admin.RequirePlatformAdminMiddleware(), admin.GetSystemSettings)
 			settingsGroup.POST("/system", admin.RequirePlatformAdminMiddleware(), admin.EditSystemSettings)
+			settingsGroup.POST("/proxy/test", admin.RequirePlatformAdminMiddleware(), admin.TestOutboundProxy)
 			settingsGroup.POST("/oidc", admin.RequirePlatformAdminMiddleware(), admin.SetOidcProvider)
 			settingsGroup.GET("/oidc", admin.RequirePlatformAdminMiddleware(), admin.GetOidcProvider)
 			settingsGroup.POST("/message-sender", admin.RequirePlatformAdminMiddleware(), admin.SetMessageSenderProvider)

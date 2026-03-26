@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/komari-monitor/komari/utils/outboundproxy"
 )
 
 type dnsUpdateResult struct {
@@ -613,10 +614,8 @@ type cloudflareDNSRecord struct {
 
 func newCloudflareDNSClient(token string) *cloudflareDNSClient {
 	return &cloudflareDNSClient{
-		token: strings.TrimSpace(token),
-		httpClient: &http.Client{
-			Timeout: 20 * time.Second,
-		},
+		token:      strings.TrimSpace(token),
+		httpClient: outboundproxy.NewHTTPClient(20 * time.Second),
 	}
 }
 
@@ -791,9 +790,7 @@ func newAliyunDNSClient(accessKeyID, accessKeySecret, regionID string) *aliyunDN
 		accessKeyID:     strings.TrimSpace(accessKeyID),
 		accessKeySecret: strings.TrimSpace(accessKeySecret),
 		endpoint:        endpoint,
-		httpClient: &http.Client{
-			Timeout: 20 * time.Second,
-		},
+		httpClient:      outboundproxy.NewHTTPClient(20 * time.Second),
 	}
 }
 
