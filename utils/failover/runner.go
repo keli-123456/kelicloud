@@ -1229,6 +1229,7 @@ func (r *executionRunner) runScript(plan models.FailoverPlan, clientUUID string)
 	}
 
 	result, err := dispatchScriptToClient(r.task.UserID, clientUUID, clipboard.Text, time.Duration(plan.ScriptTimeoutSec)*time.Second)
+	result = ensureCommandResult(result)
 	if err != nil {
 		status := models.FailoverScriptStatusFailed
 		if errors.Is(err, context.DeadlineExceeded) {
@@ -1245,6 +1246,20 @@ func (r *executionRunner) runScript(plan models.FailoverPlan, clientUUID string)
 			"script_output_truncated": result.Truncated,
 		})
 		return err
+	}
+
+	if execErr := commandResultExecutionError(result); execErr != nil {
+		_ = failoverdb.UpdateExecutionFields(r.execution.ID, map[string]interface{}{
+			"script_clipboard_id":     clipboard.Id,
+			"script_name_snapshot":    clipboard.Name,
+			"script_task_id":          result.TaskID,
+			"script_status":           models.FailoverScriptStatusFailed,
+			"script_exit_code":        result.ExitCode,
+			"script_finished_at":      result.FinishedAt,
+			"script_output":           result.Output,
+			"script_output_truncated": result.Truncated,
+		})
+		return execErr
 	}
 
 	_ = failoverdb.UpdateExecutionFields(r.execution.ID, map[string]interface{}{
@@ -1800,6 +1815,39 @@ type commandResult struct {
 	ExitCode   *int
 	FinishedAt *models.LocalTime
 	Truncated  bool
+}
+
+func ensureCommandResult(result *commandResult) *commandResult {
+	if result != nil {
+		return result
+	}
+	return &commandResult{}
+}
+
+func commandResultExecutionError(result *commandResult) error {
+	if result == nil || result.ExitCode == nil || *result.ExitCode == 0 {
+		return nil
+	}
+
+	message := fmt.Sprintf("script exited with code %d", *result.ExitCode)
+	if excerpt := firstMeaningfulOutputLine(result.Output); excerpt != "" {
+		message += ": " + excerpt
+	}
+	return errors.New(message)
+}
+
+func firstMeaningfulOutputLine(output string) string {
+	for _, line := range strings.Split(strings.ReplaceAll(output, "\r\n", "\n"), "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		if len(trimmed) > 200 {
+			return trimmed[:200]
+		}
+		return trimmed
+	}
+	return ""
 }
 
 func dispatchScriptToClient(userUUID, clientUUID, command string, timeout time.Duration) (*commandResult, error) {

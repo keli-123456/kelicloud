@@ -122,3 +122,35 @@ func TestWaitForClientByGroupStopsWhenContextCancelled(t *testing.T) {
 		t.Fatalf("expected empty client UUID, got %q", clientUUID)
 	}
 }
+
+func TestCommandResultExecutionErrorTreatsNonZeroExitCodeAsFailure(t *testing.T) {
+	exitCode := 2
+	err := commandResultExecutionError(&commandResult{
+		ExitCode: &exitCode,
+		Output:   "sh: 41: Syntax error: \"(\" unexpected (expecting \"}\")\n",
+	})
+
+	if err == nil {
+		t.Fatal("expected non-zero exit code to mark script execution as failed")
+	}
+	if got := err.Error(); got != "script exited with code 2: sh: 41: Syntax error: \"(\" unexpected (expecting \"}\")" {
+		t.Fatalf("unexpected script execution error: %q", got)
+	}
+}
+
+func TestCommandResultExecutionErrorAllowsZeroExitCode(t *testing.T) {
+	exitCode := 0
+	if err := commandResultExecutionError(&commandResult{ExitCode: &exitCode, Output: "ok"}); err != nil {
+		t.Fatalf("expected zero exit code to be treated as success, got %v", err)
+	}
+}
+
+func TestEnsureCommandResultReturnsEmptyResultForNil(t *testing.T) {
+	result := ensureCommandResult(nil)
+	if result == nil {
+		t.Fatal("expected ensureCommandResult to return an empty result for nil input")
+	}
+	if result.TaskID != "" || result.Output != "" || result.ExitCode != nil {
+		t.Fatalf("expected zero-value command result, got %+v", result)
+	}
+}
