@@ -1184,6 +1184,30 @@ func RunFailoverTask(c *gin.Context) {
 	api.RespondSuccess(c, buildFailoverExecutionView(execution, false))
 }
 
+func StopFailoverExecution(c *gin.Context) {
+	scope, ok := requireCurrentOwnerScope(c)
+	if !ok {
+		return
+	}
+
+	executionID, ok := parseFailoverExecutionID(c)
+	if !ok {
+		return
+	}
+
+	execution, err := failoversvc.StopExecutionForUser(scope.UserUUID, executionID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			api.RespondError(c, http.StatusNotFound, "Failover execution not found")
+			return
+		}
+		api.RespondError(c, http.StatusBadRequest, "Failed to stop failover execution: "+err.Error())
+		return
+	}
+
+	api.RespondSuccess(c, buildFailoverExecutionView(execution, true))
+}
+
 func GetFailoverExecutions(c *gin.Context) {
 	scope, ok := requireCurrentOwnerScope(c)
 	if !ok {

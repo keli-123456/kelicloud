@@ -179,3 +179,37 @@ func TestRecoverInterruptedExecutionsWithDBScopesToTask(t *testing.T) {
 		t.Fatalf("expected execution B to remain %q, got %q", models.FailoverExecutionStatusProvisioning, updatedExecutionB.Status)
 	}
 }
+
+func TestStopExecutionForUserMarksExecutionFailed(t *testing.T) {
+	db := openFailoverTestDB(t)
+	if err := db.AutoMigrate(
+		&models.FailoverTask{},
+		&models.FailoverExecution{},
+		&models.FailoverExecutionStep{},
+	); err != nil {
+		t.Fatalf("failed to migrate test schema: %v", err)
+	}
+
+	task, execution, step := seedActiveExecution(t, db, "task-stop", models.FailoverExecutionStatusWaitingAgent)
+	stopped, err := stopExecutionForUserWithDB(db, task.UserID, execution.ID, "failover execution stopped by user")
+	if err != nil {
+		t.Fatalf("stopExecutionForUserWithDB returned error: %v", err)
+	}
+	if stopped == nil {
+		t.Fatal("expected stopped execution")
+	}
+	if stopped.Status != models.FailoverExecutionStatusFailed {
+		t.Fatalf("expected stopped execution status %q, got %q", models.FailoverExecutionStatusFailed, stopped.Status)
+	}
+	if stopped.ErrorMessage != "failover execution stopped by user" {
+		t.Fatalf("expected stopped execution message to be persisted, got %q", stopped.ErrorMessage)
+	}
+
+	var updatedStep models.FailoverExecutionStep
+	if err := db.First(&updatedStep, step.ID).Error; err != nil {
+		t.Fatalf("failed to reload step: %v", err)
+	}
+	if updatedStep.Status != models.FailoverStepStatusFailed {
+		t.Fatalf("expected step status %q, got %q", models.FailoverStepStatusFailed, updatedStep.Status)
+	}
+}

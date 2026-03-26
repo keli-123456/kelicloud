@@ -1,6 +1,8 @@
 package failover
 
 import (
+	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -102,5 +104,21 @@ func TestEvaluateTaskHealthResetsRetryCounterOnHealthyReport(t *testing.T) {
 	}
 	if reason != "" {
 		t.Fatalf("expected no reason for healthy report, got %q", reason)
+	}
+}
+
+func TestWaitForClientByGroupStopsWhenContextCancelled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	clientUUID, err := waitForClientByGroup(ctx, "user-a", "test-group", "", time.Now(), 30)
+	if err == nil {
+		t.Fatal("expected waitForClientByGroup to stop on cancelled context")
+	}
+	if !errors.Is(err, errExecutionStopped) {
+		t.Fatalf("expected errExecutionStopped, got %v", err)
+	}
+	if clientUUID != "" {
+		t.Fatalf("expected empty client UUID, got %q", clientUUID)
 	}
 }

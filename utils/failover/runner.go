@@ -29,15 +29,20 @@ import (
 )
 
 var (
-	runningTasksMu sync.Mutex
-	runningTasks   = map[uint]struct{}{}
+	runningTasksMu   sync.Mutex
+	runningTasks     = map[uint]struct{}{}
+	executionStopMu  sync.Mutex
+	executionCancels = map[uint]context.CancelFunc{}
 )
 
 const interruptedExecutionMessage = "failover execution was interrupted before completion"
 
+var errExecutionStopped = errors.New("failover execution stopped by user")
+
 type executionRunner struct {
 	task      models.FailoverTask
 	execution *models.FailoverExecution
+	ctx       context.Context
 	startedAt time.Time
 	stepSort  int
 	attempts  []map[string]interface{}
@@ -200,6 +205,15 @@ func RecoverInterruptedExecutions() error {
 	return nil
 }
 
+func StopExecutionForUser(userUUID string, executionID uint) (*models.FailoverExecution, error) {
+	execution, err := failoverdb.StopExecutionForUser(userUUID, executionID, errExecutionStopped.Error())
+	if err != nil {
+		return nil, err
+	}
+	cancelExecution(executionID)
+	return execution, nil
+}
+
 func RunTaskNowForUser(userUUID string, taskID uint) (*models.FailoverExecution, error) {
 	task, err := failoverdb.GetTaskByIDForUser(userUUID, taskID)
 	if err != nil {
@@ -334,9 +348,13 @@ func queueExecution(task *models.FailoverTask, report *common.Report, reason str
 
 	go func(taskCopy models.FailoverTask, execCopy models.FailoverExecution, reportCopy *common.Report) {
 		defer releaseTaskRun(taskCopy.ID)
+		ctx, cancel := context.WithCancel(context.Background())
+		registerExecutionCancel(execCopy.ID, cancel)
+		defer unregisterExecutionCancel(execCopy.ID)
 		runner := &executionRunner{
 			task:      taskCopy,
 			execution: &execCopy,
+			ctx:       ctx,
 			startedAt: now,
 		}
 		runner.run(reportCopy)
@@ -353,6 +371,11 @@ func (r *executionRunner) run(report *common.Report) {
 			r.failExecution(message)
 		}
 	}()
+
+	if err := r.checkStopped(); err != nil {
+		r.failExecution(err.Error())
+		return
+	}
 
 	if err := failoverdb.UpdateExecutionFields(r.execution.ID, map[string]interface{}{
 		"status": models.FailoverExecutionStatusDetecting,
@@ -384,6 +407,10 @@ func (r *executionRunner) run(report *common.Report) {
 	}
 
 	for _, plan := range plans {
+		if err := r.checkStopped(); err != nil {
+			r.failExecution(err.Error())
+			return
+		}
 		attemptStep := r.startStep(fmt.Sprintf("plan:%d", plan.ID), "Plan Attempt", map[string]interface{}{
 			"plan_id":      plan.ID,
 			"provider":     plan.Provider,
@@ -418,6 +445,10 @@ func (r *executionRunner) run(report *common.Report) {
 				"attempted_plans": marshalJSON(r.attempts),
 			})
 			r.finishStep(attemptStep, models.FailoverStepStatusFailed, err.Error(), attempt)
+			if errors.Is(err, errExecutionStopped) {
+				r.failExecution(err.Error())
+				return
+			}
 			continue
 		}
 
@@ -439,6 +470,9 @@ func (r *executionRunner) run(report *common.Report) {
 }
 
 func (r *executionRunner) executePlan(plan models.FailoverPlan) (*actionOutcome, string, []map[string]interface{}, error) {
+	if err := r.checkStopped(); err != nil {
+		return nil, "", nil, err
+	}
 	return r.executePlanActionWithProviderPool(plan)
 }
 
@@ -450,6 +484,9 @@ func (r *executionRunner) executePlanActionWithProviderPool(plan models.Failover
 
 	entryAttempts := make([]map[string]interface{}, 0, len(candidates))
 	for _, candidate := range candidates {
+		if err := r.checkStopped(); err != nil {
+			return nil, "", entryAttempts, err
+		}
 		candidateDetail := map[string]interface{}{
 			"entry_id":   candidate.EntryID,
 			"entry_name": candidate.EntryName,
@@ -489,6 +526,9 @@ func (r *executionRunner) executePlanActionWithProviderPool(plan models.Failover
 		selectedPlan.ProviderEntryID = candidate.EntryID
 		maxAttempts := providerEntryMaxAttempts(selectedPlan)
 		for attemptNumber := 1; attemptNumber <= maxAttempts; attemptNumber++ {
+			if err := r.checkStopped(); err != nil {
+				return nil, "", entryAttempts, err
+			}
 			attemptDetail := make(map[string]interface{}, len(candidateDetail)+1)
 			for key, value := range candidateDetail {
 				attemptDetail[key] = value
@@ -511,9 +551,15 @@ func (r *executionRunner) executePlanActionWithProviderPool(plan models.Failover
 			outcome, actionErr := r.executePlanAction(selectedPlan)
 			if actionErr != nil {
 				lease.Release(false)
+				finishOperation()
+				if errors.Is(actionErr, errExecutionStopped) {
+					attemptDetail["status"] = "failed"
+					attemptDetail["error"] = actionErr.Error()
+					entryAttempts = append(entryAttempts, attemptDetail)
+					return nil, "", entryAttempts, actionErr
+				}
 				decision := classifyProviderFailure(plan.Provider, actionErr)
 				applyProviderEntryFailure(r.task.UserID, plan.Provider, candidate.EntryID, decision, actionErr)
-				finishOperation()
 				attemptDetail["status"] = "failed"
 				attemptDetail["error"] = actionErr.Error()
 				attemptDetail["failure_class"] = decision.Class
@@ -535,6 +581,13 @@ func (r *executionRunner) executePlanActionWithProviderPool(plan models.Failover
 			finalizeErr := r.finalizePlan(selectedPlan, outcome)
 			if finalizeErr != nil {
 				finishOperation()
+				if errors.Is(finalizeErr, errExecutionStopped) {
+					lease.Release(false)
+					attemptDetail["status"] = "failed"
+					attemptDetail["error"] = finalizeErr.Error()
+					entryAttempts = append(entryAttempts, attemptDetail)
+					return nil, "", entryAttempts, finalizeErr
+				}
 				executionDecision := classifyPlanExecutionFailure(finalizeErr)
 				attemptDetail["error"] = finalizeErr.Error()
 				attemptDetail["failure_class"] = executionDecision.Class
@@ -843,7 +896,7 @@ func (r *executionRunner) finalizePlan(plan models.FailoverPlan, outcome *action
 			"status": models.FailoverExecutionStatusWaitingAgent,
 		})
 
-		clientUUID, waitErr := waitForClientByGroup(r.task.UserID, outcome.AutoConnectGroup, r.task.WatchClientUUID, r.startedAt, plan.WaitAgentTimeoutSec)
+		clientUUID, waitErr := waitForClientByGroup(r.ctx, r.task.UserID, outcome.AutoConnectGroup, r.task.WatchClientUUID, r.startedAt, plan.WaitAgentTimeoutSec)
 		if waitErr != nil {
 			r.finishStep(waitStep, models.FailoverStepStatusFailed, waitErr.Error(), nil)
 			return waitErr
@@ -934,7 +987,7 @@ func (r *executionRunner) validateProvisionedOutlet(plan models.FailoverPlan, ou
 		return nil
 	}
 
-	report, err := waitForHealthyClientConnectivity(r.task.UserID, targetClientUUID, r.startedAt)
+	report, err := waitForHealthyClientConnectivity(r.ctx, r.task.UserID, targetClientUUID, r.startedAt)
 	if err != nil {
 		detail := map[string]interface{}{
 			"client_uuid": targetClientUUID,
@@ -962,13 +1015,16 @@ func (r *executionRunner) validateProvisionedOutlet(plan models.FailoverPlan, ou
 	return nil
 }
 
-func waitForHealthyClientConnectivity(userUUID, clientUUID string, startedAt time.Time) (*common.Report, error) {
+func waitForHealthyClientConnectivity(ctx context.Context, userUUID, clientUUID string, startedAt time.Time) (*common.Report, error) {
 	timeout := failoverConnectivityValidationTimeout(userUUID)
 	deadline := time.Now().Add(timeout)
 	clientUUID = strings.TrimSpace(clientUUID)
 	var lastReport *common.Report
 
 	for time.Now().Before(deadline) {
+		if err := waitContextOrDelay(ctx, 0); err != nil {
+			return nil, err
+		}
 		report := ws.GetLatestReport()[clientUUID]
 		if report != nil && report.CNConnectivity != nil {
 			lastReport = cloneReport(report)
@@ -990,7 +1046,9 @@ func waitForHealthyClientConnectivity(userUUID, clientUUID string, startedAt tim
 				}
 			}
 		}
-		time.Sleep(5 * time.Second)
+		if err := waitContextOrDelay(ctx, 5*time.Second); err != nil {
+			return nil, err
+		}
 	}
 
 	if lastReport != nil && lastReport.CNConnectivity != nil {
@@ -1112,11 +1170,11 @@ func (r *executionRunner) executeProvisionPlan(plan models.FailoverPlan) (*actio
 	)
 	switch plan.Provider {
 	case "aws":
-		outcome, err = provisionAWSInstance(r.task.UserID, plan)
+		outcome, err = provisionAWSInstance(r.ctx, r.task.UserID, plan)
 	case "digitalocean":
-		outcome, err = provisionDigitalOceanDroplet(r.task.UserID, plan)
+		outcome, err = provisionDigitalOceanDroplet(r.ctx, r.task.UserID, plan)
 	case "linode":
-		outcome, err = provisionLinodeInstance(r.task.UserID, plan)
+		outcome, err = provisionLinodeInstance(r.ctx, r.task.UserID, plan)
 	default:
 		err = fmt.Errorf("unsupported provision provider: %s", plan.Provider)
 	}
@@ -1811,7 +1869,7 @@ func truncateOutput(output string, limit int) (string, bool) {
 	return output[:limit], true
 }
 
-func waitForClientByGroup(userUUID, group, excludeUUID string, startedAt time.Time, timeoutSeconds int) (string, error) {
+func waitForClientByGroup(ctx context.Context, userUUID, group, excludeUUID string, startedAt time.Time, timeoutSeconds int) (string, error) {
 	if timeoutSeconds <= 0 {
 		timeoutSeconds = 600
 	}
@@ -1819,6 +1877,9 @@ func waitForClientByGroup(userUUID, group, excludeUUID string, startedAt time.Ti
 	group = strings.TrimSpace(group)
 
 	for time.Now().Before(deadline) {
+		if err := waitContextOrDelay(ctx, 0); err != nil {
+			return "", err
+		}
 		clientList, err := clientdb.GetAllClientBasicInfoByUser(userUUID)
 		if err != nil {
 			return "", err
@@ -1847,7 +1908,9 @@ func waitForClientByGroup(userUUID, group, excludeUUID string, startedAt time.Ti
 			sortClientsNewestFirst(candidates)
 			return candidates[0].UUID, nil
 		}
-		time.Sleep(5 * time.Second)
+		if err := waitContextOrDelay(ctx, 5*time.Second); err != nil {
+			return "", err
+		}
 	}
 	return "", fmt.Errorf("timed out waiting for agent group %q", group)
 }
@@ -1908,6 +1971,73 @@ func releaseTaskRun(taskID uint) {
 	delete(runningTasks, taskID)
 }
 
+func registerExecutionCancel(executionID uint, cancel context.CancelFunc) {
+	if executionID == 0 || cancel == nil {
+		return
+	}
+	executionStopMu.Lock()
+	defer executionStopMu.Unlock()
+	executionCancels[executionID] = cancel
+}
+
+func unregisterExecutionCancel(executionID uint) {
+	if executionID == 0 {
+		return
+	}
+	executionStopMu.Lock()
+	defer executionStopMu.Unlock()
+	delete(executionCancels, executionID)
+}
+
+func cancelExecution(executionID uint) {
+	if executionID == 0 {
+		return
+	}
+	executionStopMu.Lock()
+	cancel := executionCancels[executionID]
+	executionStopMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+func (r *executionRunner) checkStopped() error {
+	if r == nil || r.ctx == nil {
+		return nil
+	}
+	select {
+	case <-r.ctx.Done():
+		return errExecutionStopped
+	default:
+		return nil
+	}
+}
+
+func waitContextOrDelay(ctx context.Context, delay time.Duration) error {
+	if ctx == nil {
+		if delay > 0 {
+			time.Sleep(delay)
+		}
+		return nil
+	}
+	if delay <= 0 {
+		select {
+		case <-ctx.Done():
+			return errExecutionStopped
+		default:
+			return nil
+		}
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return errExecutionStopped
+	case <-timer.C:
+		return nil
+	}
+}
+
 func ptrLocalTime(t time.Time) *models.LocalTime {
 	value := models.FromTime(t)
 	return &value
@@ -1942,7 +2072,7 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
-func provisionAWSInstance(userUUID string, plan models.FailoverPlan) (*actionOutcome, error) {
+func provisionAWSInstance(ctx context.Context, userUUID string, plan models.FailoverPlan) (*actionOutcome, error) {
 	var payload awsProvisionPayload
 	if err := json.Unmarshal([]byte(plan.Payload), &payload); err != nil {
 		return nil, fmt.Errorf("invalid aws provision payload: %w", err)
@@ -1988,7 +2118,7 @@ func provisionAWSInstance(userUUID string, plan models.FailoverPlan) (*actionOut
 				return nil, err
 			}
 		}
-		instance, err := awscloud.CreateInstance(context.Background(), credential, region, awscloud.CreateInstanceRequest{
+		instance, err := awscloud.CreateInstance(ctx, credential, region, awscloud.CreateInstanceRequest{
 			Name:             name,
 			ImageID:          strings.TrimSpace(payload.ImageID),
 			InstanceType:     strings.TrimSpace(payload.InstanceType),
@@ -2002,7 +2132,7 @@ func provisionAWSInstance(userUUID string, plan models.FailoverPlan) (*actionOut
 		if err != nil {
 			return nil, err
 		}
-		instance, detail, err := waitForAWSEC2Instance(region, credential, strings.TrimSpace(instance.InstanceID))
+		instance, detail, err := waitForAWSEC2Instance(ctx, region, credential, strings.TrimSpace(instance.InstanceID))
 		if err != nil {
 			return nil, err
 		}
@@ -2064,7 +2194,7 @@ func provisionAWSInstance(userUUID string, plan models.FailoverPlan) (*actionOut
 				return nil, err
 			}
 		}
-		if err := awscloud.CreateLightsailInstance(context.Background(), credential, region, awscloud.CreateLightsailInstanceRequest{
+		if err := awscloud.CreateLightsailInstance(ctx, credential, region, awscloud.CreateLightsailInstanceRequest{
 			Name:             name,
 			AvailabilityZone: strings.TrimSpace(payload.AvailabilityZone),
 			BlueprintID:      strings.TrimSpace(payload.BlueprintID),
@@ -2076,7 +2206,7 @@ func provisionAWSInstance(userUUID string, plan models.FailoverPlan) (*actionOut
 		}); err != nil {
 			return nil, err
 		}
-		detail, err := waitForLightsailInstance(region, credential, name)
+		detail, err := waitForLightsailInstance(ctx, region, credential, name)
 		if err != nil {
 			return nil, err
 		}
@@ -2122,7 +2252,7 @@ func provisionAWSInstance(userUUID string, plan models.FailoverPlan) (*actionOut
 	}
 }
 
-func provisionDigitalOceanDroplet(userUUID string, plan models.FailoverPlan) (*actionOutcome, error) {
+func provisionDigitalOceanDroplet(ctx context.Context, userUUID string, plan models.FailoverPlan) (*actionOutcome, error) {
 	var payload digitalOceanProvisionPayload
 	if err := json.Unmarshal([]byte(plan.Payload), &payload); err != nil {
 		return nil, fmt.Errorf("invalid digitalocean provision payload: %w", err)
@@ -2184,7 +2314,7 @@ func provisionDigitalOceanDroplet(userUUID string, plan models.FailoverPlan) (*a
 		return nil, fmt.Errorf("unsupported digitalocean root_password_mode: %s", payload.RootPasswordMode)
 	}
 
-	droplet, err := client.CreateDroplet(context.Background(), digitalocean.CreateDropletRequest{
+	droplet, err := client.CreateDroplet(ctx, digitalocean.CreateDropletRequest{
 		Name:       name,
 		Region:     strings.TrimSpace(payload.Region),
 		Size:       strings.TrimSpace(payload.Size),
@@ -2199,7 +2329,7 @@ func provisionDigitalOceanDroplet(userUUID string, plan models.FailoverPlan) (*a
 	if err != nil {
 		return nil, err
 	}
-	droplet, err = waitForDigitalOceanDroplet(client, droplet.ID)
+	droplet, err = waitForDigitalOceanDroplet(ctx, client, droplet.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -2256,7 +2386,7 @@ func provisionDigitalOceanDroplet(userUUID string, plan models.FailoverPlan) (*a
 	return outcome, nil
 }
 
-func provisionLinodeInstance(userUUID string, plan models.FailoverPlan) (*actionOutcome, error) {
+func provisionLinodeInstance(ctx context.Context, userUUID string, plan models.FailoverPlan) (*actionOutcome, error) {
 	var payload linodeProvisionPayload
 	if err := json.Unmarshal([]byte(plan.Payload), &payload); err != nil {
 		return nil, fmt.Errorf("invalid linode provision payload: %w", err)
@@ -2327,11 +2457,11 @@ func provisionLinodeInstance(userUUID string, plan models.FailoverPlan) (*action
 		}
 	}
 
-	instance, err := client.CreateInstance(context.Background(), request)
+	instance, err := client.CreateInstance(ctx, request)
 	if err != nil {
 		return nil, err
 	}
-	instance, err = waitForLinodeInstance(client, instance.ID)
+	instance, err = waitForLinodeInstance(ctx, client, instance.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -2475,7 +2605,7 @@ func rebindAWSIPAddress(task models.FailoverTask, plan models.FailoverPlan) (*ac
 		if err := awscloud.AttachLightsailStaticIP(context.Background(), credential, region, staticIPName, instanceName); err != nil {
 			return nil, err
 		}
-		detail, err = waitForLightsailInstance(region, credential, instanceName)
+		detail, err = waitForLightsailInstance(context.Background(), region, credential, instanceName)
 		if err != nil {
 			return nil, err
 		}
@@ -2503,43 +2633,56 @@ func rebindAWSIPAddress(task models.FailoverTask, plan models.FailoverPlan) (*ac
 	}
 }
 
-func waitForAWSEC2Instance(region string, credential *awscloud.CredentialRecord, instanceID string) (*awscloud.Instance, *awscloud.InstanceDetail, error) {
+func waitForAWSEC2Instance(ctx context.Context, region string, credential *awscloud.CredentialRecord, instanceID string) (*awscloud.Instance, *awscloud.InstanceDetail, error) {
 	deadline := time.Now().Add(5 * time.Minute)
 	for time.Now().Before(deadline) {
-		instance, err := awscloud.GetInstance(context.Background(), credential, region, instanceID)
+		if err := waitContextOrDelay(ctx, 0); err != nil {
+			return nil, nil, err
+		}
+		instance, err := awscloud.GetInstance(ctx, credential, region, instanceID)
 		if err == nil && instance != nil && strings.TrimSpace(instance.PublicIP) != "" {
-			detail, detailErr := awscloud.GetInstanceDetail(context.Background(), credential, region, instanceID)
+			detail, detailErr := awscloud.GetInstanceDetail(ctx, credential, region, instanceID)
 			if detailErr != nil {
 				return instance, nil, nil
 			}
 			return instance, detail, nil
 		}
-		time.Sleep(5 * time.Second)
+		if err := waitContextOrDelay(ctx, 5*time.Second); err != nil {
+			return nil, nil, err
+		}
 	}
-	instance, err := awscloud.GetInstance(context.Background(), credential, region, instanceID)
+	instance, err := awscloud.GetInstance(ctx, credential, region, instanceID)
 	if err != nil {
 		return nil, nil, err
 	}
-	detail, _ := awscloud.GetInstanceDetail(context.Background(), credential, region, instanceID)
+	detail, _ := awscloud.GetInstanceDetail(ctx, credential, region, instanceID)
 	return instance, detail, nil
 }
 
-func waitForLightsailInstance(region string, credential *awscloud.CredentialRecord, instanceName string) (*awscloud.LightsailInstanceDetail, error) {
+func waitForLightsailInstance(ctx context.Context, region string, credential *awscloud.CredentialRecord, instanceName string) (*awscloud.LightsailInstanceDetail, error) {
 	deadline := time.Now().Add(5 * time.Minute)
 	for time.Now().Before(deadline) {
-		detail, err := awscloud.GetLightsailInstanceDetail(context.Background(), credential, region, instanceName)
+		if err := waitContextOrDelay(ctx, 0); err != nil {
+			return nil, err
+		}
+		detail, err := awscloud.GetLightsailInstanceDetail(ctx, credential, region, instanceName)
 		if err == nil && detail != nil && strings.TrimSpace(detail.Instance.PublicIP) != "" {
 			return detail, nil
 		}
-		time.Sleep(5 * time.Second)
+		if err := waitContextOrDelay(ctx, 5*time.Second); err != nil {
+			return nil, err
+		}
 	}
-	return awscloud.GetLightsailInstanceDetail(context.Background(), credential, region, instanceName)
+	return awscloud.GetLightsailInstanceDetail(ctx, credential, region, instanceName)
 }
 
-func waitForDigitalOceanDroplet(client *digitalocean.Client, dropletID int) (*digitalocean.Droplet, error) {
+func waitForDigitalOceanDroplet(ctx context.Context, client *digitalocean.Client, dropletID int) (*digitalocean.Droplet, error) {
 	deadline := time.Now().Add(5 * time.Minute)
 	for time.Now().Before(deadline) {
-		droplets, err := client.ListDroplets(context.Background())
+		if err := waitContextOrDelay(ctx, 0); err != nil {
+			return nil, err
+		}
+		droplets, err := client.ListDroplets(ctx)
 		if err != nil {
 			return nil, err
 		}
@@ -2548,9 +2691,11 @@ func waitForDigitalOceanDroplet(client *digitalocean.Client, dropletID int) (*di
 				return &droplet, nil
 			}
 		}
-		time.Sleep(5 * time.Second)
+		if err := waitContextOrDelay(ctx, 5*time.Second); err != nil {
+			return nil, err
+		}
 	}
-	droplets, err := client.ListDroplets(context.Background())
+	droplets, err := client.ListDroplets(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -2562,16 +2707,21 @@ func waitForDigitalOceanDroplet(client *digitalocean.Client, dropletID int) (*di
 	return nil, fmt.Errorf("digitalocean droplet not found: %d", dropletID)
 }
 
-func waitForLinodeInstance(client *linodecloud.Client, instanceID int) (*linodecloud.Instance, error) {
+func waitForLinodeInstance(ctx context.Context, client *linodecloud.Client, instanceID int) (*linodecloud.Instance, error) {
 	deadline := time.Now().Add(5 * time.Minute)
 	for time.Now().Before(deadline) {
-		instance, err := client.GetInstance(context.Background(), instanceID)
+		if err := waitContextOrDelay(ctx, 0); err != nil {
+			return nil, err
+		}
+		instance, err := client.GetInstance(ctx, instanceID)
 		if err == nil && instance != nil && firstString(instance.IPv4) != "" {
 			return instance, nil
 		}
-		time.Sleep(5 * time.Second)
+		if err := waitContextOrDelay(ctx, 5*time.Second); err != nil {
+			return nil, err
+		}
 	}
-	return client.GetInstance(context.Background(), instanceID)
+	return client.GetInstance(ctx, instanceID)
 }
 
 func digitalOceanPublicIPv4(droplet *digitalocean.Droplet) string {

@@ -368,6 +368,81 @@ func GetExecutionByIDForUser(userUUID string, executionID uint) (*models.Failove
 	return &execution, nil
 }
 
+func stopExecutionForUserWithDB(db *gorm.DB, userUUID string, executionID uint, reason string) (*models.FailoverExecution, error) {
+	userUUID, err := normalizeFailoverUserID(userUUID)
+	if err != nil {
+		return nil, err
+	}
+	if executionID == 0 {
+		return nil, fmt.Errorf("execution id is required")
+	}
+
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		reason = "failover execution stopped by user"
+	}
+
+	var updated *models.FailoverExecution
+	err = db.Transaction(func(tx *gorm.DB) error {
+		var execution models.FailoverExecution
+		if err := tx.Model(&models.FailoverExecution{}).
+			Joins("JOIN failover_tasks ON failover_tasks.id = failover_executions.task_id").
+			Where("failover_tasks.user_id = ? AND failover_executions.id = ?", userUUID, executionID).
+			First(&execution).Error; err != nil {
+			return err
+		}
+		if !containsString(activeExecutionStatuses, execution.Status) {
+			return fmt.Errorf("failover execution %d is not active", executionID)
+		}
+
+		now := time.Now()
+		finishedAt := models.FromTime(now)
+		if err := tx.Model(&models.FailoverExecution{}).
+			Where("id = ?", execution.ID).
+			Updates(map[string]interface{}{
+				"status":        models.FailoverExecutionStatusFailed,
+				"error_message": reason,
+				"finished_at":   finishedAt,
+			}).Error; err != nil {
+			return err
+		}
+
+		if err := failRunningStepsWithDB(tx, []uint{execution.ID}, reason, now); err != nil {
+			return err
+		}
+
+		if err := tx.Model(&models.FailoverTask{}).
+			Where("id = ? AND last_execution_id = ?", execution.TaskID, execution.ID).
+			Updates(map[string]interface{}{
+				"last_status":    models.FailoverTaskStatusFailed,
+				"last_message":   reason,
+				"last_failed_at": finishedAt,
+			}).Error; err != nil {
+			return err
+		}
+
+		if err := tx.Model(&models.FailoverExecution{}).
+			Where("id = ?", execution.ID).
+			Preload("Steps", func(stepTx *gorm.DB) *gorm.DB {
+				return stepTx.Order("sort ASC").Order("id ASC")
+			}).
+			First(&execution).Error; err != nil {
+			return err
+		}
+
+		updated = &execution
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return updated, nil
+}
+
+func StopExecutionForUser(userUUID string, executionID uint, reason string) (*models.FailoverExecution, error) {
+	return stopExecutionForUserWithDB(dbcore.GetDBInstance(), userUUID, executionID, reason)
+}
+
 func ListExecutionsByIDs(executionIDs []uint) (map[uint]*models.FailoverExecution, error) {
 	normalized := make([]uint, 0, len(executionIDs))
 	seen := make(map[uint]struct{}, len(executionIDs))
@@ -536,6 +611,16 @@ func FailRunningStepsForExecution(executionID uint, message string) error {
 		return nil
 	}
 	return failRunningStepsWithDB(dbcore.GetDBInstance(), []uint{executionID}, message, time.Now())
+}
+
+func containsString(values []string, target string) bool {
+	target = strings.TrimSpace(target)
+	for _, value := range values {
+		if strings.TrimSpace(value) == target {
+			return true
+		}
+	}
+	return false
 }
 
 func CreateExecution(execution *models.FailoverExecution) (*models.FailoverExecution, error) {

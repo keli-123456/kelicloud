@@ -433,6 +433,7 @@ func RunServer() {
 			failoverGroup.POST("/tasks/:id/run", admin.RunFailoverTask)
 			failoverGroup.GET("/tasks/:id/executions", admin.GetFailoverExecutions)
 			failoverGroup.GET("/executions/:id", admin.GetFailoverExecution)
+			failoverGroup.POST("/executions/:id/stop", admin.StopFailoverExecution)
 		}
 
 	}
