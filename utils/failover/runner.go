@@ -567,7 +567,7 @@ func (r *executionRunner) executePlanActionWithProviderPool(plan models.Failover
 				goto nextCandidate
 			}
 			if strings.TrimSpace(selectedPlan.ActionType) == models.FailoverActionProvisionInstance {
-				if cleanupErr := r.attachCurrentOutletCleanup(outcome); cleanupErr != nil {
+				if cleanupErr := r.attachCurrentOutletCleanup(outcome, selectedPlan, candidate); cleanupErr != nil {
 					lease.Release(false)
 					finishOperation()
 					attemptDetail["status"] = "failed"
@@ -1279,17 +1279,18 @@ func (r *executionRunner) succeedExecution(outcome *actionOutcome) {
 	now := time.Now()
 	cleanupStatus := models.FailoverCleanupStatusSkipped
 	cleanupResult := map[string]interface{}{"message": "cleanup not requested"}
+	deleteStrategy := effectiveTaskDeleteStrategy(r.task)
 
-	if r.task.DeleteStrategy != models.FailoverDeleteStrategyKeep && outcome != nil && outcome.Cleanup != nil {
+	if deleteStrategy != models.FailoverDeleteStrategyKeep && outcome != nil && outcome.Cleanup != nil {
 		cleanupStep := r.startStep("cleanup_old", "Cleanup Old Instance", map[string]interface{}{
-			"strategy": r.task.DeleteStrategy,
+			"strategy": deleteStrategy,
 			"label":    outcome.CleanupLabel,
 		})
 		_ = failoverdb.UpdateExecutionFields(r.execution.ID, map[string]interface{}{
 			"status": models.FailoverExecutionStatusCleaningOld,
 		})
 
-		if r.task.DeleteStrategy == models.FailoverDeleteStrategyDeleteAfterSuccessDelay && r.task.DeleteDelaySeconds > 0 {
+		if deleteStrategy == models.FailoverDeleteStrategyDeleteAfterSuccessDelay && r.task.DeleteDelaySeconds > 0 {
 			time.Sleep(time.Duration(r.task.DeleteDelaySeconds) * time.Second)
 		}
 
@@ -1454,7 +1455,19 @@ func sameAddress(target string, values ...string) bool {
 	return false
 }
 
-func (r *executionRunner) attachCurrentOutletCleanup(outcome *actionOutcome) error {
+func effectiveTaskDeleteStrategy(task models.FailoverTask) string {
+	for _, plan := range task.Plans {
+		if plan.Enabled && strings.TrimSpace(plan.ActionType) == models.FailoverActionProvisionInstance {
+			if strings.TrimSpace(task.DeleteStrategy) == models.FailoverDeleteStrategyDeleteAfterSuccessDelay {
+				return models.FailoverDeleteStrategyDeleteAfterSuccessDelay
+			}
+			return models.FailoverDeleteStrategyDeleteAfterSuccess
+		}
+	}
+	return models.FailoverDeleteStrategyKeep
+}
+
+func (r *executionRunner) attachCurrentOutletCleanup(outcome *actionOutcome, plan models.FailoverPlan, candidate providerPoolCandidate) error {
 	if outcome == nil || outcome.Cleanup != nil {
 		return nil
 	}
@@ -1463,12 +1476,63 @@ func (r *executionRunner) attachCurrentOutletCleanup(outcome *actionOutcome) err
 		return err
 	}
 	if cleanup == nil {
+		address, addressErr := r.ensureCurrentOutletAddress()
+		if addressErr != nil {
+			return addressErr
+		}
+		if address != "" {
+			cleanup, err = r.resolveCurrentInstanceCleanupByAddress(plan, candidate)
+			if err != nil {
+				return err
+			}
+		}
+	}
+	if cleanup == nil {
 		return nil
+	}
+	if len(cleanup.Ref) > 0 {
+		rawRef := marshalJSON(cleanup.Ref)
+		r.task.CurrentInstanceRef = rawRef
+		_ = failoverdb.UpdateTaskFields(r.task.ID, map[string]interface{}{
+			"current_instance_ref": rawRef,
+		})
 	}
 	outcome.OldInstanceRef = cloneJSONMap(cleanup.Ref)
 	outcome.CleanupLabel = cleanup.Label
 	outcome.Cleanup = cleanup.Cleanup
 	return nil
+}
+
+func (r *executionRunner) ensureCurrentOutletAddress() (string, error) {
+	address := strings.TrimSpace(r.task.CurrentAddress)
+	if address != "" {
+		return address, nil
+	}
+
+	clientUUID := strings.TrimSpace(r.task.WatchClientUUID)
+	userUUID := strings.TrimSpace(r.task.UserID)
+	if clientUUID == "" || userUUID == "" {
+		return "", nil
+	}
+
+	client, err := clientdb.GetClientByUUIDForUser(clientUUID, userUUID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return "", nil
+		}
+		return "", err
+	}
+
+	address = strings.TrimSpace(firstNonEmpty(client.IPv4, client.IPv6))
+	if address == "" {
+		return "", nil
+	}
+
+	r.task.CurrentAddress = address
+	_ = failoverdb.UpdateTaskFields(r.task.ID, map[string]interface{}{
+		"current_address": address,
+	})
+	return address, nil
 }
 
 func (r *executionRunner) recycleCurrentOutletForCandidate(plan models.FailoverPlan, candidate providerPoolCandidate) (map[string]interface{}, error) {

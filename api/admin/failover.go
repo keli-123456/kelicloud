@@ -122,6 +122,33 @@ type failoverProbeView struct {
 	Stale               bool              `json:"stale"`
 }
 
+func planRequiresOldInstanceCleanup(plan models.FailoverPlan) bool {
+	return plan.Enabled && strings.TrimSpace(plan.ActionType) == models.FailoverActionProvisionInstance
+}
+
+func normalizeFailoverDeleteStrategy(deleteStrategy string, plans []models.FailoverPlan) string {
+	hasProvisionPlan := false
+	for _, plan := range plans {
+		if planRequiresOldInstanceCleanup(plan) {
+			hasProvisionPlan = true
+			break
+		}
+	}
+	if !hasProvisionPlan {
+		return models.FailoverDeleteStrategyKeep
+	}
+
+	normalized := strings.ToLower(strings.TrimSpace(deleteStrategy))
+	switch normalized {
+	case models.FailoverDeleteStrategyDeleteAfterSuccessDelay:
+		return models.FailoverDeleteStrategyDeleteAfterSuccessDelay
+	case models.FailoverDeleteStrategyDeleteAfterSuccess:
+		return models.FailoverDeleteStrategyDeleteAfterSuccess
+	default:
+		return models.FailoverDeleteStrategyDeleteAfterSuccess
+	}
+}
+
 type failoverExecutionSummaryView struct {
 	ID                    uint              `json:"id"`
 	Status                string            `json:"status"`
@@ -696,16 +723,19 @@ func validateFailoverTaskRequest(scope ownerScope, req *failoverTaskRequest) (*m
 	}
 
 	currentClientUUID := strings.TrimSpace(req.CurrentClientUUID)
+	currentClientAddress := ""
 	if currentClientUUID == "" {
 		currentClientUUID = strings.TrimSpace(req.WatchClientUUID)
 	}
 	if currentClientUUID != "" {
-		if _, err := clientdb.GetClientByUUIDForUser(currentClientUUID, scope.UserUUID); err != nil {
+		client, err := clientdb.GetClientByUUIDForUser(currentClientUUID, scope.UserUUID)
+		if err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				return nil, nil, fmt.Errorf("current client not found")
 			}
 			return nil, nil, err
 		}
+		currentClientAddress = strings.TrimSpace(firstNonEmpty(client.IPv4, client.IPv6))
 	}
 
 	dnsProvider := strings.ToLower(strings.TrimSpace(req.DNSProvider))
@@ -837,6 +867,12 @@ func validateFailoverTaskRequest(scope ownerScope, req *failoverTaskRequest) (*m
 		})
 	}
 
+	deleteStrategy = normalizeFailoverDeleteStrategy(deleteStrategy, plans)
+	deleteDelaySeconds := req.DeleteDelaySeconds
+	if deleteStrategy != models.FailoverDeleteStrategyDeleteAfterSuccessDelay {
+		deleteDelaySeconds = 0
+	}
+
 	sort.SliceStable(plans, func(i, j int) bool {
 		if plans[i].Priority == plans[j].Priority {
 			return i < j
@@ -868,6 +904,7 @@ func validateFailoverTaskRequest(scope ownerScope, req *failoverTaskRequest) (*m
 		Name:               name,
 		Enabled:            enabled,
 		WatchClientUUID:    currentClientUUID,
+		CurrentAddress:     currentClientAddress,
 		TriggerSource:      models.FailoverTriggerSourceCNConnectivity,
 		FailureThreshold:   failureThreshold,
 		StaleAfterSeconds:  staleAfterSeconds,
@@ -876,7 +913,7 @@ func validateFailoverTaskRequest(scope ownerScope, req *failoverTaskRequest) (*m
 		DNSEntryID:         dnsEntryID,
 		DNSPayload:         dnsPayload,
 		DeleteStrategy:     deleteStrategy,
-		DeleteDelaySeconds: req.DeleteDelaySeconds,
+		DeleteDelaySeconds: deleteDelaySeconds,
 	}, plans, nil
 }
 

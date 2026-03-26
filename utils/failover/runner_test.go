@@ -154,3 +154,35 @@ func TestEnsureCommandResultReturnsEmptyResultForNil(t *testing.T) {
 		t.Fatalf("expected zero-value command result, got %+v", result)
 	}
 }
+
+func TestEffectiveTaskDeleteStrategyForProvisionPlans(t *testing.T) {
+	task := models.FailoverTask{
+		DeleteStrategy: models.FailoverDeleteStrategyKeep,
+		Plans: []models.FailoverPlan{
+			{
+				Enabled:    true,
+				ActionType: models.FailoverActionProvisionInstance,
+			},
+		},
+	}
+
+	if got := effectiveTaskDeleteStrategy(task); got != models.FailoverDeleteStrategyDeleteAfterSuccess {
+		t.Fatalf("expected provision plan to force delete_after_success, got %q", got)
+	}
+}
+
+func TestEffectiveTaskDeleteStrategyKeepsRebindPlans(t *testing.T) {
+	task := models.FailoverTask{
+		DeleteStrategy: models.FailoverDeleteStrategyDeleteAfterSuccess,
+		Plans: []models.FailoverPlan{
+			{
+				Enabled:    true,
+				ActionType: models.FailoverActionRebindPublicIP,
+			},
+		},
+	}
+
+	if got := effectiveTaskDeleteStrategy(task); got != models.FailoverDeleteStrategyKeep {
+		t.Fatalf("expected rebind-only plans to keep old instance, got %q", got)
+	}
+}
