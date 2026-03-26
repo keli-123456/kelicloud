@@ -35,7 +35,7 @@ type createAWSInstancePayload struct {
 }
 
 type createAWSLightsailInstancePayload struct {
-	Name             string         `json:"name" binding:"required"`
+	Name             string         `json:"name"`
 	AvailabilityZone string         `json:"availability_zone" binding:"required"`
 	BlueprintID      string         `json:"blueprint_id" binding:"required"`
 	BundleID         string         `json:"bundle_id" binding:"required"`
@@ -655,8 +655,13 @@ func CreateAWSInstance(c *gin.Context) {
 		}
 	}
 
+	name := strings.TrimSpace(payload.Name)
+	if name == "" {
+		name = fmt.Sprintf("komari-ec2-%d", time.Now().Unix())
+	}
+
 	request := awscloud.CreateInstanceRequest{
-		Name:             strings.TrimSpace(payload.Name),
+		Name:             name,
 		ImageID:          strings.TrimSpace(payload.ImageID),
 		InstanceType:     strings.TrimSpace(payload.InstanceType),
 		KeyName:          strings.TrimSpace(payload.KeyName),
@@ -719,8 +724,13 @@ func CreateAWSLightsailInstance(c *gin.Context) {
 		}
 	}
 
+	name := strings.TrimSpace(payload.Name)
+	if name == "" {
+		name = fmt.Sprintf("komari-lightsail-%d", time.Now().Unix())
+	}
+
 	request := awscloud.CreateLightsailInstanceRequest{
-		Name:             strings.TrimSpace(payload.Name),
+		Name:             name,
 		AvailabilityZone: strings.TrimSpace(payload.AvailabilityZone),
 		BlueprintID:      strings.TrimSpace(payload.BlueprintID),
 		BundleID:         strings.TrimSpace(payload.BundleID),

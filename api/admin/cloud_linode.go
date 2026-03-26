@@ -21,7 +21,7 @@ import (
 const linodeProviderName = "linode"
 
 type createLinodeInstancePayload struct {
-	Label            string   `json:"label" binding:"required"`
+	Label            string   `json:"label"`
 	Region           string   `json:"region" binding:"required"`
 	Type             string   `json:"type" binding:"required"`
 	Image            string   `json:"image" binding:"required"`
@@ -621,6 +621,10 @@ func CreateLinodeInstance(c *gin.Context) {
 			api.RespondError(c, http.StatusBadRequest, err.Error())
 			return
 		}
+	}
+
+	if payload.Label == "" {
+		payload.Label = fmt.Sprintf("komari-linode-%d", time.Now().Unix())
 	}
 
 	request := linodecloud.CreateInstanceRequest{

@@ -61,7 +61,7 @@ func ensureCloudProviderFeatureAllowed(c *gin.Context, providerName string) bool
 }
 
 type createDigitalOceanDropletPayload struct {
-	Name             string   `json:"name" binding:"required"`
+	Name             string   `json:"name"`
 	Region           string   `json:"region" binding:"required"`
 	Size             string   `json:"size" binding:"required"`
 	Image            string   `json:"image" binding:"required"`
@@ -708,6 +708,10 @@ func CreateDigitalOceanDroplet(c *gin.Context) {
 			api.RespondError(c, http.StatusBadRequest, err.Error())
 			return
 		}
+	}
+
+	if payload.Name == "" {
+		payload.Name = fmt.Sprintf("komari-do-%d", time.Now().Unix())
 	}
 
 	request := digitalocean.CreateDropletRequest{

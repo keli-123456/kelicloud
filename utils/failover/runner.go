@@ -158,10 +158,6 @@ type awsRebindPayload struct {
 	StaticIPName string `json:"static_ip_name,omitempty"`
 }
 
-func ReloadSchedule() error {
-	return nil
-}
-
 func RunScheduledWork() error {
 	taskList, err := failoverdb.ListEnabledTasks()
 	if err != nil {

@@ -102,6 +102,8 @@ type failoverTaskView struct {
 	Probe               failoverProbeView             `json:"probe"`
 	CooldownRemaining   int64                         `json:"cooldown_remaining_seconds"`
 	NextEligibleAt      *models.LocalTime             `json:"next_eligible_at"`
+	NextScheduledAt     *models.LocalTime             `json:"next_scheduled_check_at"`
+	NextScheduledIn     int64                         `json:"next_scheduled_check_remaining_seconds"`
 	LatestExecution     *failoverExecutionSummaryView `json:"latest_execution,omitempty"`
 	HasActiveExecution  bool                          `json:"has_active_execution"`
 	Plans               []failoverPlanView            `json:"plans"`
@@ -349,6 +351,8 @@ func buildFailoverTaskView(task *models.FailoverTask, latestExecution *models.Fa
 
 	var cooldownRemaining int64
 	var nextEligibleAt *models.LocalTime
+	var nextScheduledAt *models.LocalTime
+	var nextScheduledIn int64
 	if task.CooldownSeconds > 0 && task.LastTriggeredAt != nil {
 		next := task.LastTriggeredAt.ToTime().Add(time.Duration(task.CooldownSeconds) * time.Second)
 		if next.After(now) {
@@ -358,6 +362,25 @@ func buildFailoverTaskView(task *models.FailoverTask, latestExecution *models.Fa
 			}
 			value := models.FromTime(next)
 			nextEligibleAt = &value
+		}
+	}
+
+	hasActiveExecution := latestExecution != nil && isFailoverExecutionActive(latestExecution.Status)
+	if task.Enabled && !hasActiveExecution {
+		nextCheckTarget := now
+		if nextEligibleAt != nil && nextEligibleAt.ToTime().After(nextCheckTarget) {
+			nextCheckTarget = nextEligibleAt.ToTime()
+		}
+		if next, ok := failoversvc.NextScheduledRunAtOrAfter(nextCheckTarget); ok {
+			if next.Before(now) {
+				next = now
+			}
+			nextScheduledIn = int64(next.Sub(now).Seconds())
+			if nextScheduledIn < 0 {
+				nextScheduledIn = 0
+			}
+			value := models.FromTime(next)
+			nextScheduledAt = &value
 		}
 	}
 
@@ -388,8 +411,10 @@ func buildFailoverTaskView(task *models.FailoverTask, latestExecution *models.Fa
 		Probe:               probe,
 		CooldownRemaining:   cooldownRemaining,
 		NextEligibleAt:      nextEligibleAt,
+		NextScheduledAt:     nextScheduledAt,
+		NextScheduledIn:     nextScheduledIn,
 		LatestExecution:     buildFailoverExecutionSummaryView(latestExecution),
-		HasActiveExecution:  latestExecution != nil && isFailoverExecutionActive(latestExecution.Status),
+		HasActiveExecution:  hasActiveExecution,
 		Plans:               plans,
 		CreatedAt:           task.CreatedAt,
 		UpdatedAt:           task.UpdatedAt,
