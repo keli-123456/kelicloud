@@ -46,27 +46,33 @@ func LoadSettings() (*Settings, error) {
 
 func NewHTTPClient(timeout time.Duration) *http.Client {
 	directTransport := newBaseTransport()
+	applyAttemptTimeout(directTransport, timeout)
 	transport, err := NewTransport()
 	if err != nil {
 		slog.Warn("failed to build outbound proxy transport", "error", err)
 		return &http.Client{
-			Timeout:   timeout,
 			Transport: directTransport,
 		}
 	}
 	if transport == nil {
 		return &http.Client{
-			Timeout:   timeout,
 			Transport: directTransport,
 		}
 	}
+	applyAttemptTimeout(transport, timeout)
 	return &http.Client{
-		Timeout: timeout,
 		Transport: &fallbackRoundTripper{
 			proxied: transport,
 			direct:  directTransport,
 		},
 	}
+}
+
+func applyAttemptTimeout(transport *http.Transport, timeout time.Duration) {
+	if transport == nil || timeout <= 0 {
+		return
+	}
+	transport.ResponseHeaderTimeout = timeout
 }
 
 func NewTransport() (*http.Transport, error) {

@@ -888,7 +888,7 @@ func getDigitalOceanActiveTokenClient(c *gin.Context, scope ownerScope) (*digita
 		return nil, nil, nil, nil, nil, err
 	}
 
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 60*time.Second)
 	return client, addition, activeToken, ctx, cancel, nil
 }
 

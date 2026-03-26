@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 )
 
 type stubRoundTripper func(*http.Request) (*http.Response, error)
@@ -174,6 +175,16 @@ func TestNewProxyTransportUsesDedicatedSocks5Dialer(t *testing.T) {
 	}
 	if transport.DialTLSContext == nil {
 		t.Fatal("expected socks5 transport to install a custom TLS dialer")
+	}
+}
+
+func TestApplyAttemptTimeoutSetsResponseHeaderTimeout(t *testing.T) {
+	transport := newBaseTransport()
+
+	applyAttemptTimeout(transport, 20*time.Second)
+
+	if transport.ResponseHeaderTimeout != 20*time.Second {
+		t.Fatalf("expected response header timeout to be 20s, got %s", transport.ResponseHeaderTimeout)
 	}
 }
 
