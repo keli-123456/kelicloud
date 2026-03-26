@@ -410,6 +410,82 @@ var activeExecutionStatuses = []string{
 	models.FailoverExecutionStatusCleaningOld,
 }
 
+func recoverInterruptedExecutionsWithDB(db *gorm.DB, taskID uint, reason string, now time.Time) (int64, error) {
+	if db == nil {
+		return 0, fmt.Errorf("db is required")
+	}
+
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		reason = "failover execution was interrupted before completion"
+	}
+
+	query := db.Model(&models.FailoverExecution{}).
+		Where("status IN ?", activeExecutionStatuses)
+	if taskID > 0 {
+		query = query.Where("task_id = ?", taskID)
+	}
+
+	var executions []models.FailoverExecution
+	if err := query.Find(&executions).Error; err != nil {
+		return 0, err
+	}
+	if len(executions) == 0 {
+		return 0, nil
+	}
+
+	executionIDs := make([]uint, 0, len(executions))
+	for _, execution := range executions {
+		executionIDs = append(executionIDs, execution.ID)
+	}
+
+	finishedAt := models.FromTime(now)
+	if err := db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&models.FailoverExecution{}).
+			Where("id IN ?", executionIDs).
+			Updates(map[string]interface{}{
+				"status":        models.FailoverExecutionStatusFailed,
+				"error_message": reason,
+				"finished_at":   finishedAt,
+			}).Error; err != nil {
+			return err
+		}
+
+		if err := failRunningStepsWithDB(tx, executionIDs, reason, now); err != nil {
+			return err
+		}
+
+		for _, execution := range executions {
+			if err := tx.Model(&models.FailoverTask{}).
+				Where("id = ? AND last_execution_id = ?", execution.TaskID, execution.ID).
+				Updates(map[string]interface{}{
+					"last_status":    models.FailoverTaskStatusFailed,
+					"last_message":   reason,
+					"last_failed_at": finishedAt,
+				}).Error; err != nil {
+				return err
+			}
+		}
+
+		return nil
+	}); err != nil {
+		return 0, err
+	}
+
+	return int64(len(executions)), nil
+}
+
+func RecoverInterruptedExecutions(reason string) (int64, error) {
+	return recoverInterruptedExecutionsWithDB(dbcore.GetDBInstance(), 0, reason, time.Now())
+}
+
+func RecoverInterruptedExecutionsForTask(taskID uint, reason string) (int64, error) {
+	if taskID == 0 {
+		return 0, nil
+	}
+	return recoverInterruptedExecutionsWithDB(dbcore.GetDBInstance(), taskID, reason, time.Now())
+}
+
 func ListEnabledTasks() ([]models.FailoverTask, error) {
 	db := dbcore.GetDBInstance()
 	var taskList []models.FailoverTask
@@ -431,6 +507,35 @@ func HasActiveExecution(taskID uint) (bool, error) {
 		return false, err
 	}
 	return total > 0, nil
+}
+
+func failRunningStepsWithDB(db *gorm.DB, executionIDs []uint, message string, now time.Time) error {
+	if db == nil {
+		return fmt.Errorf("db is required")
+	}
+	if len(executionIDs) == 0 {
+		return nil
+	}
+
+	message = strings.TrimSpace(message)
+	if message == "" {
+		message = "failover execution failed"
+	}
+
+	return db.Model(&models.FailoverExecutionStep{}).
+		Where("execution_id IN ? AND status = ?", executionIDs, models.FailoverStepStatusRunning).
+		Updates(map[string]interface{}{
+			"status":      models.FailoverStepStatusFailed,
+			"message":     message,
+			"finished_at": models.FromTime(now),
+		}).Error
+}
+
+func FailRunningStepsForExecution(executionID uint, message string) error {
+	if executionID == 0 {
+		return nil
+	}
+	return failRunningStepsWithDB(dbcore.GetDBInstance(), []uint{executionID}, message, time.Now())
 }
 
 func CreateExecution(execution *models.FailoverExecution) (*models.FailoverExecution, error) {

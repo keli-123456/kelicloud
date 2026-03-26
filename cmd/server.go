@@ -491,6 +491,9 @@ func InitDatabase() {
 func DoScheduledWork() {
 	tasks.ReloadPingSchedule()
 	failover.ReloadSchedule()
+	if err := failover.RecoverInterruptedExecutions(); err != nil {
+		log.Printf("failover: failed to recover interrupted executions: %v", err)
+	}
 	d_notification.ReloadLoadNotificationSchedule()
 	ticker := time.NewTicker(time.Minute * 30)
 	minute := time.NewTicker(60 * time.Second)

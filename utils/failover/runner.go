@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -31,6 +32,8 @@ var (
 	runningTasksMu sync.Mutex
 	runningTasks   = map[uint]struct{}{}
 )
+
+const interruptedExecutionMessage = "failover execution was interrupted before completion"
 
 type executionRunner struct {
 	task      models.FailoverTask
@@ -186,6 +189,17 @@ func RunScheduledWork() error {
 	return nil
 }
 
+func RecoverInterruptedExecutions() error {
+	recovered, err := failoverdb.RecoverInterruptedExecutions(interruptedExecutionMessage)
+	if err != nil {
+		return err
+	}
+	if recovered > 0 {
+		log.Printf("failover: recovered %d interrupted execution(s)", recovered)
+	}
+	return nil
+}
+
 func RunTaskNowForUser(userUUID string, taskID uint) (*models.FailoverExecution, error) {
 	task, err := failoverdb.GetTaskByIDForUser(userUUID, taskID)
 	if err != nil {
@@ -277,8 +291,16 @@ func queueExecution(task *models.FailoverTask, report *common.Report, reason str
 		return nil, err
 	}
 	if active {
-		releaseTaskRun(task.ID)
-		return nil, fmt.Errorf("failover task %d already has an active execution", task.ID)
+		recovered, recoverErr := failoverdb.RecoverInterruptedExecutionsForTask(task.ID, interruptedExecutionMessage)
+		if recoverErr != nil {
+			releaseTaskRun(task.ID)
+			return nil, recoverErr
+		}
+		if recovered == 0 {
+			releaseTaskRun(task.ID)
+			return nil, fmt.Errorf("failover task %d already has an active execution", task.ID)
+		}
+		log.Printf("failover: recovered %d interrupted execution(s) for task %d while queueing", recovered, task.ID)
 	}
 
 	now := time.Now()
@@ -324,6 +346,20 @@ func queueExecution(task *models.FailoverTask, report *common.Report, reason str
 }
 
 func (r *executionRunner) run(report *common.Report) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			message := fmt.Sprintf("failover execution panicked: %v", recovered)
+			log.Printf("failover: execution %d panicked: %v\n%s", r.execution.ID, recovered, debug.Stack())
+			r.failExecution(message)
+		}
+	}()
+
+	if err := failoverdb.UpdateExecutionFields(r.execution.ID, map[string]interface{}{
+		"status": models.FailoverExecutionStatusDetecting,
+	}); err != nil {
+		log.Printf("failover: failed to mark execution %d detecting: %v", r.execution.ID, err)
+	}
+
 	detectStep := r.startStep("detect", "Detect Trigger", map[string]interface{}{
 		"reason": strings.TrimSpace(r.execution.TriggerReason),
 	})
@@ -1237,6 +1273,9 @@ func (r *executionRunner) succeedExecution(outcome *actionOutcome) {
 
 func (r *executionRunner) failExecution(message string) {
 	now := time.Now()
+	if err := failoverdb.FailRunningStepsForExecution(r.execution.ID, message); err != nil {
+		log.Printf("failover: failed to mark running steps failed for execution %d: %v", r.execution.ID, err)
+	}
 	_ = failoverdb.UpdateExecutionFields(r.execution.ID, map[string]interface{}{
 		"status":        models.FailoverExecutionStatusFailed,
 		"error_message": strings.TrimSpace(message),
