@@ -1,8 +1,11 @@
 package client
 
 import (
+	"errors"
 	"net"
+	"strings"
 
+	mysqlDriver "github.com/go-sql-driver/mysql"
 	"github.com/komari-monitor/komari/config"
 	"github.com/komari-monitor/komari/database/clients"
 	"github.com/komari-monitor/komari/utils/geoip"
@@ -45,6 +48,68 @@ func populateBasicInfoFallbackIP(cbi map[string]interface{}, clientIP string) {
 	}
 }
 
+func normalizeRegionCode(isoCode string) string {
+	isoCode = strings.ToUpper(strings.TrimSpace(isoCode))
+	if len(isoCode) != 2 {
+		return ""
+	}
+	for _, r := range isoCode {
+		if r < 'A' || r > 'Z' {
+			return ""
+		}
+	}
+	return isoCode
+}
+
+func setRegionFromGeoInfo(cbi map[string]interface{}, info *geoip.GeoInfo) string {
+	if info == nil {
+		return ""
+	}
+
+	regionCode := normalizeRegionCode(info.ISOCode)
+	if regionCode == "" {
+		return ""
+	}
+
+	if emoji := geoip.GetRegionUnicodeEmoji(regionCode); emoji != "" {
+		cbi["region"] = emoji
+	} else {
+		cbi["region"] = regionCode
+	}
+	return regionCode
+}
+
+func populateBasicInfoRegion(cbi map[string]interface{}) string {
+	if ipv4, ok := cbi["ipv4"].(string); ok && ipv4 != "" {
+		ip4 := net.ParseIP(ipv4)
+		ip4Record, _ := geoip.GetGeoInfo(ip4)
+		if regionCode := setRegionFromGeoInfo(cbi, ip4Record); regionCode != "" {
+			return regionCode
+		}
+	} else if ipv6, ok := cbi["ipv6"].(string); ok && ipv6 != "" {
+		ip6 := net.ParseIP(ipv6)
+		ip6Record, _ := geoip.GetGeoInfo(ip6)
+		if regionCode := setRegionFromGeoInfo(cbi, ip6Record); regionCode != "" {
+			return regionCode
+		}
+	}
+
+	return ""
+}
+
+func shouldFallbackRegionToCode(err error) bool {
+	var mysqlErr *mysqlDriver.MySQLError
+	if !errors.As(err, &mysqlErr) {
+		return false
+	}
+	if mysqlErr.Number != 1366 {
+		return false
+	}
+
+	message := strings.ToLower(mysqlErr.Message)
+	return strings.Contains(message, "column 'region'") || strings.Contains(message, "column `region`")
+}
+
 func UploadBasicInfo(c *gin.Context) {
 	var cbi = map[string]interface{}{}
 	if err := c.ShouldBindJSON(&cbi); err != nil {
@@ -63,23 +128,21 @@ func UploadBasicInfo(c *gin.Context) {
 
 	populateBasicInfoFallbackIP(cbi, c.ClientIP())
 
+	regionCode := ""
 	if cfg, err := config.GetAs[bool](config.GeoIpEnabledKey); err == nil && cfg {
-		if ipv4, ok := cbi["ipv4"].(string); ok && ipv4 != "" {
-			ip4 := net.ParseIP(ipv4)
-			ip4_record, _ := geoip.GetGeoInfo(ip4)
-			if ip4_record != nil {
-				cbi["region"] = geoip.GetRegionUnicodeEmoji(ip4_record.ISOCode)
-			}
-		} else if ipv6, ok := cbi["ipv6"].(string); ok && ipv6 != "" {
-			ip6 := net.ParseIP(ipv6)
-			ip6_record, _ := geoip.GetGeoInfo(ip6)
-			if ip6_record != nil {
-				cbi["region"] = geoip.GetRegionUnicodeEmoji(ip6_record.ISOCode)
-			}
-		}
+		regionCode = populateBasicInfoRegion(cbi)
 	}
 
 	if err := clients.SaveClientInfo(cbi); err != nil {
+		if regionCode != "" && shouldFallbackRegionToCode(err) {
+			cbi["region"] = regionCode
+			if retryErr := clients.SaveClientInfo(cbi); retryErr == nil {
+				c.JSON(200, gin.H{"status": "success"})
+				return
+			} else {
+				err = retryErr
+			}
+		}
 		c.JSON(500, gin.H{"status": "error", "error": err})
 		return
 	}

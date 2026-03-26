@@ -375,6 +375,7 @@ func prepareMySQLSchemaCompatibility(db *gorm.DB) {
 
 	prepareMySQLOfflineNotificationCompatibility(db)
 	prepareMySQLLogSchemaCompatibility(db)
+	prepareMySQLClientRegionSchemaCompatibility(db)
 }
 
 func prepareMySQLOfflineNotificationCompatibility(db *gorm.DB) {
@@ -488,6 +489,38 @@ func prepareMySQLLogSchemaCompatibility(db *gorm.DB) {
 	}
 	if err := db.Exec("ALTER TABLE `logs` MODIFY COLUMN `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT").Error; err != nil {
 		log.Printf("Failed to restore MySQL log id auto increment: %v", err)
+	}
+}
+
+func prepareMySQLClientRegionSchemaCompatibility(db *gorm.DB) {
+	migrator := db.Migrator()
+	if !migrator.HasTable(&models.Client{}) || !migrator.HasColumn(&models.Client{}, "region") {
+		return
+	}
+
+	var columnInfo struct {
+		CharacterSetName string `gorm:"column:character_set_name"`
+		CollationName    string `gorm:"column:collation_name"`
+	}
+	if err := db.Raw(
+		`SELECT COALESCE(character_set_name, '') AS character_set_name, COALESCE(collation_name, '') AS collation_name
+		FROM information_schema.columns
+		WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ?`,
+		"clients",
+		"region",
+	).Scan(&columnInfo).Error; err != nil {
+		log.Printf("Failed to inspect MySQL clients.region charset: %v", err)
+		return
+	}
+
+	if strings.EqualFold(columnInfo.CharacterSetName, "utf8mb4") && strings.HasPrefix(strings.ToLower(columnInfo.CollationName), "utf8mb4_") {
+		return
+	}
+
+	if err := db.Exec(
+		"ALTER TABLE `clients` MODIFY COLUMN `region` VARCHAR(100) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NULL",
+	).Error; err != nil {
+		log.Printf("Failed to normalize MySQL clients.region charset: %v", err)
 	}
 }
 
