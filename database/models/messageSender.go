@@ -8,6 +8,7 @@ type MessageSenderProvider struct {
 }
 
 type EventMessage struct {
+	UserID  string    `json:"user_id,omitempty"`
 	Event   string    `json:"event"`
 	Clients []Client  `json:"clients"`
 	Time    time.Time `json:"time"`

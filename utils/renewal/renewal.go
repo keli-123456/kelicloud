@@ -106,6 +106,7 @@ func CheckAndAutoRenewal(client models.Client) {
 				client.Name, newExpireTime.Format("2006-01-02")))
 
 			messageSender.SendEvent(models.EventMessage{
+				UserID:  client.UserID,
 				Event:   messageevent.Renew,
 				Clients: []models.Client{client},
 				Time:    time.Now(),

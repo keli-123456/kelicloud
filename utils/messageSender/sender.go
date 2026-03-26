@@ -92,9 +92,6 @@ func SendTextMessage(message string, title string) error {
 	return err
 }
 func SendEvent(event models.EventMessage) error {
-	if CurrentProvider() == nil {
-		return fmt.Errorf("message sender provider is not initialized")
-	}
 	var err error
 	cfg, err := config.GetMany(map[string]any{
 		config.NotificationEnabledKey:  false,
@@ -107,8 +104,14 @@ func SendEvent(event models.EventMessage) error {
 		return nil
 	}
 
+	provider, cleanup, err := resolveProviderForUser(resolveEventUserUUID(event))
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
 	// 检查提供者是否实现了 IEventMessageSender 接口
-	if eventSender, ok := CurrentProvider().(factory.IEventMessageSender); ok {
+	if eventSender, ok := provider.(factory.IEventMessageSender); ok {
 		// 如果实现了,直接调用 SendEvent
 		for i := 0; i < 3; i++ {
 			err = eventSender.SendEvent(event)
@@ -127,7 +130,7 @@ func SendEvent(event models.EventMessage) error {
 	messageTemplate = parseTemplate(messageTemplate, event)
 
 	for i := 0; i < 3; i++ {
-		err = CurrentProvider().SendTextMessage(messageTemplate, event.Event)
+		err = provider.SendTextMessage(messageTemplate, event.Event)
 		if err == nil || err.Error() == "short response: \x00\x00\x00\x1a\x00\x00\x00" { // QQ 会返回这个错误，但实际上消息是发送成功的
 			auditlog.Log("", "", "Event message sent: "+event.Event, "info")
 			return nil

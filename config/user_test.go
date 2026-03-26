@@ -174,8 +174,21 @@ func TestUserPolicyDefaultsAndPersistence(t *testing.T) {
 	if policy.ServerQuota != 3 {
 		t.Fatalf("expected server quota 3, got %d", policy.ServerQuota)
 	}
-	if len(policy.AllowedFeatures) != 2 || policy.AllowedFeatures[0] != UserFeatureClients || policy.AllowedFeatures[1] != UserFeatureCloud {
+	expectedFeatures := []string{
+		UserFeatureClients,
+		UserFeatureCloudAWS,
+		UserFeatureCloudDigitalOcean,
+		UserFeatureCloudDNS,
+		UserFeatureCloudFailover,
+		UserFeatureCloudLinode,
+	}
+	if len(policy.AllowedFeatures) != len(expectedFeatures) {
 		t.Fatalf("unexpected normalized features: %+v", policy.AllowedFeatures)
+	}
+	for index, feature := range expectedFeatures {
+		if policy.AllowedFeatures[index] != feature {
+			t.Fatalf("unexpected normalized features: %+v", policy.AllowedFeatures)
+		}
 	}
 
 	allowed, err = IsUserFeatureAllowed("user-a", UserFeatureCloud)

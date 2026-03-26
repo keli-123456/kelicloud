@@ -15,26 +15,35 @@ const (
 )
 
 const (
-	UserFeatureClients        = "clients"
-	UserFeatureRecords        = "records"
-	UserFeatureTasks          = "tasks"
-	UserFeaturePing           = "ping"
-	UserFeatureNotifications  = "notifications"
-	UserFeatureCloud          = "cloud"
-	UserFeatureClipboard      = "clipboard"
-	UserFeatureLogs           = "logs"
-	UserFeatureCNConnectivity = "cn_connectivity"
+	UserFeatureClients           = "clients"
+	UserFeatureRecords           = "records"
+	UserFeatureTasks             = "tasks"
+	UserFeaturePing              = "ping"
+	UserFeatureNotifications     = "notifications"
+	UserFeatureCloud             = "cloud"
+	UserFeatureCloudDigitalOcean = "cloud_digitalocean"
+	UserFeatureCloudLinode       = "cloud_linode"
+	UserFeatureCloudAWS          = "cloud_aws"
+	UserFeatureCloudDNS          = "cloud_dns"
+	UserFeatureCloudFailover     = "cloud_failover"
+	UserFeatureClipboard         = "clipboard"
+	UserFeatureLogs              = "logs"
+	UserFeatureCNConnectivity    = "cn_connectivity"
 )
 
 var userFeatureDefaultAllowSet = map[string]struct{}{
-	UserFeatureClients:       {},
-	UserFeatureRecords:       {},
-	UserFeatureTasks:         {},
-	UserFeaturePing:          {},
-	UserFeatureNotifications: {},
-	UserFeatureCloud:         {},
-	UserFeatureClipboard:     {},
-	UserFeatureLogs:          {},
+	UserFeatureClients:           {},
+	UserFeatureRecords:           {},
+	UserFeatureTasks:             {},
+	UserFeaturePing:              {},
+	UserFeatureNotifications:     {},
+	UserFeatureCloudDigitalOcean: {},
+	UserFeatureCloudLinode:       {},
+	UserFeatureCloudAWS:          {},
+	UserFeatureCloudDNS:          {},
+	UserFeatureCloudFailover:     {},
+	UserFeatureClipboard:         {},
+	UserFeatureLogs:              {},
 }
 
 var userFeatureExplicitGrantSet = map[string]struct{}{
@@ -42,15 +51,46 @@ var userFeatureExplicitGrantSet = map[string]struct{}{
 }
 
 var userFeatureSet = map[string]struct{}{
-	UserFeatureClients:        {},
-	UserFeatureRecords:        {},
-	UserFeatureTasks:          {},
-	UserFeaturePing:           {},
-	UserFeatureNotifications:  {},
-	UserFeatureCloud:          {},
-	UserFeatureClipboard:      {},
-	UserFeatureLogs:           {},
-	UserFeatureCNConnectivity: {},
+	UserFeatureClients:           {},
+	UserFeatureRecords:           {},
+	UserFeatureTasks:             {},
+	UserFeaturePing:              {},
+	UserFeatureNotifications:     {},
+	UserFeatureCloud:             {},
+	UserFeatureCloudDigitalOcean: {},
+	UserFeatureCloudLinode:       {},
+	UserFeatureCloudAWS:          {},
+	UserFeatureCloudDNS:          {},
+	UserFeatureCloudFailover:     {},
+	UserFeatureClipboard:         {},
+	UserFeatureLogs:              {},
+	UserFeatureCNConnectivity:    {},
+}
+
+var userVisibleFeatureSet = map[string]struct{}{
+	UserFeatureClients:           {},
+	UserFeatureRecords:           {},
+	UserFeatureTasks:             {},
+	UserFeaturePing:              {},
+	UserFeatureNotifications:     {},
+	UserFeatureCloudDigitalOcean: {},
+	UserFeatureCloudLinode:       {},
+	UserFeatureCloudAWS:          {},
+	UserFeatureCloudDNS:          {},
+	UserFeatureCloudFailover:     {},
+	UserFeatureClipboard:         {},
+	UserFeatureLogs:              {},
+	UserFeatureCNConnectivity:    {},
+}
+
+var legacyFeatureAliases = map[string][]string{
+	UserFeatureCloud: {
+		UserFeatureCloudDigitalOcean,
+		UserFeatureCloudLinode,
+		UserFeatureCloudAWS,
+		UserFeatureCloudDNS,
+		UserFeatureCloudFailover,
+	},
 }
 
 type UserPolicy struct {
@@ -59,8 +99,8 @@ type UserPolicy struct {
 }
 
 func UserAvailableFeatures() []string {
-	features := make([]string, 0, len(userFeatureSet))
-	for feature := range userFeatureSet {
+	features := make([]string, 0, len(userVisibleFeatureSet))
+	for feature := range userVisibleFeatureSet {
 		features = append(features, feature)
 	}
 	sort.Strings(features)
@@ -82,6 +122,17 @@ func NormalizeAllowedFeatures(features []string) []string {
 	seen := make(map[string]struct{}, len(features))
 	for _, feature := range features {
 		value := strings.ToLower(strings.TrimSpace(feature))
+		expanded, ok := legacyFeatureAliases[value]
+		if ok {
+			for _, alias := range expanded {
+				if _, exists := seen[alias]; exists {
+					continue
+				}
+				seen[alias] = struct{}{}
+				normalized = append(normalized, alias)
+			}
+			continue
+		}
 		if value == "" {
 			continue
 		}
@@ -185,10 +236,28 @@ func IsUserFeatureAllowed(userUUID, feature string) (bool, error) {
 		return false, err
 	}
 	if len(policy.AllowedFeatures) == 0 {
+		if value == UserFeatureCloud {
+			for _, alias := range legacyFeatureAliases[UserFeatureCloud] {
+				if _, ok := userFeatureDefaultAllowSet[alias]; ok {
+					return true, nil
+				}
+			}
+		}
 		if IsExplicitGrantUserFeature(value) {
 			return false, nil
 		}
-		return true, nil
+		_, ok := userFeatureDefaultAllowSet[value]
+		return ok, nil
+	}
+	if value == UserFeatureCloud {
+		for _, allowed := range policy.AllowedFeatures {
+			for _, alias := range legacyFeatureAliases[UserFeatureCloud] {
+				if allowed == alias {
+					return true, nil
+				}
+			}
+		}
+		return false, nil
 	}
 	for _, allowed := range policy.AllowedFeatures {
 		if allowed == value {

@@ -254,7 +254,16 @@ func RunServer() {
 			settingsGroup.POST("/message-sender", admin.RequirePlatformAdminMiddleware(), admin.SetMessageSenderProvider)
 			settingsGroup.GET("/message-sender", admin.RequirePlatformAdminMiddleware(), admin.GetMessageSenderProvider)
 		}
-		cloudGroup := adminAuthrized.Group("/cloud", admin.RequireUserFeatureMiddleware(config.UserFeatureCloud))
+		cloudGroup := adminAuthrized.Group(
+			"/cloud",
+			admin.RequireAnyUserFeatureMiddleware(
+				config.UserFeatureCloudDigitalOcean,
+				config.UserFeatureCloudLinode,
+				config.UserFeatureCloudAWS,
+				config.UserFeatureCloudDNS,
+				config.UserFeatureCloudFailover,
+			),
+		)
 		{
 			cloudGroup.GET("/providers", admin.GetCloudProviders)
 			cloudGroup.GET("/providers/:provider", admin.GetCloudProvider)
@@ -263,7 +272,7 @@ func RunServer() {
 			cloudGroup.POST("/shares/:provider/:resource_type/:resource_id", admin.UpsertCloudInstanceShare)
 			cloudGroup.DELETE("/shares/:provider/:resource_type/:resource_id", admin.DeleteCloudInstanceShare)
 
-			digitalOceanGroup := cloudGroup.Group("/digitalocean")
+			digitalOceanGroup := cloudGroup.Group("/digitalocean", admin.RequireUserFeatureMiddleware(config.UserFeatureCloudDigitalOcean))
 			{
 				digitalOceanGroup.GET("/tokens", admin.GetDigitalOceanTokens)
 				digitalOceanGroup.POST("/tokens", admin.SaveDigitalOceanTokens)
@@ -280,7 +289,7 @@ func RunServer() {
 				digitalOceanGroup.DELETE("/droplets/:id", admin.DeleteDigitalOceanDroplet)
 				digitalOceanGroup.POST("/droplets/:id/actions", admin.PostDigitalOceanDropletAction)
 			}
-			linodeGroup := cloudGroup.Group("/linode")
+			linodeGroup := cloudGroup.Group("/linode", admin.RequireUserFeatureMiddleware(config.UserFeatureCloudLinode))
 			{
 				linodeGroup.GET("/tokens", admin.GetLinodeTokens)
 				linodeGroup.POST("/tokens", admin.SaveLinodeTokens)
@@ -297,7 +306,7 @@ func RunServer() {
 				linodeGroup.DELETE("/instances/:id", admin.DeleteLinodeInstance)
 				linodeGroup.POST("/instances/:id/actions", admin.PostLinodeInstanceAction)
 			}
-			awsGroup := cloudGroup.Group("/aws")
+			awsGroup := cloudGroup.Group("/aws", admin.RequireUserFeatureMiddleware(config.UserFeatureCloudAWS))
 			{
 				awsGroup.GET("/credentials", admin.GetAWSCredentials)
 				awsGroup.POST("/credentials", admin.SaveAWSCredentials)
@@ -408,7 +417,7 @@ func RunServer() {
 
 		failoverGroup := adminAuthrized.Group(
 			"/failover",
-			admin.RequireUserFeatureMiddleware(config.UserFeatureCloud),
+			admin.RequireUserFeatureMiddleware(config.UserFeatureCloudFailover),
 			admin.RequireUserFeatureMiddleware(config.UserFeatureCNConnectivity),
 		)
 		{

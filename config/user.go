@@ -24,14 +24,18 @@ func (UserConfigItem) TableName() string {
 }
 
 var userScopedKeys = map[string]struct{}{
-	AutoDiscoveryKeyKey:       {},
-	ScriptDomainKey:           {},
-	BaseScriptsURLKey:         {},
-	SendIpAddrToGuestKey:      {},
-	TempShareTokenKey:         {},
-	TempShareTokenExpireAtKey: {},
-	UserServerQuotaKey:        {},
-	UserAllowedFeaturesKey:    {},
+	AutoDiscoveryKeyKey:                    {},
+	ScriptDomainKey:                        {},
+	BaseScriptsURLKey:                      {},
+	SendIpAddrToGuestKey:                   {},
+	TempShareTokenKey:                      {},
+	TempShareTokenExpireAtKey:              {},
+	UserServerQuotaKey:                     {},
+	UserAllowedFeaturesKey:                 {},
+	NotificationTelegramChatIDKey:          {},
+	NotificationTelegramMessageThreadIDKey: {},
+	NotificationBarkDeviceKeyKey:           {},
+	NotificationWebhookURLKey:              {},
 }
 
 func IsUserScopedKey(key string) bool {

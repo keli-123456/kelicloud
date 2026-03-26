@@ -37,6 +37,9 @@ func GetCloudInstanceShare(c *gin.Context) {
 		respondCloudShareError(c, err)
 		return
 	}
+	if !ensureCloudProviderFeatureAllowed(c, provider) {
+		return
+	}
 
 	state, err := resolveCloudResourceForScope(scope, provider, resourceType, resourceID)
 	if err != nil {
@@ -70,6 +73,9 @@ func UpsertCloudInstanceShare(c *gin.Context) {
 	)
 	if err != nil {
 		respondCloudShareError(c, err)
+		return
+	}
+	if !ensureCloudProviderFeatureAllowed(c, provider) {
 		return
 	}
 
@@ -143,6 +149,9 @@ func DeleteCloudInstanceShare(c *gin.Context) {
 	)
 	if err != nil {
 		respondCloudShareError(c, err)
+		return
+	}
+	if !ensureCloudProviderFeatureAllowed(c, provider) {
 		return
 	}
 

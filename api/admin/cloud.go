@@ -14,6 +14,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/api"
+	"github.com/komari-monitor/komari/config"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/utils/cloudprovider/digitalocean"
 	"github.com/komari-monitor/komari/utils/cloudprovider/factory"
@@ -21,6 +22,43 @@ import (
 )
 
 const digitalOceanProviderName = "digitalocean"
+
+func cloudProviderRequiredFeature(providerName string) string {
+	switch strings.ToLower(strings.TrimSpace(providerName)) {
+	case "digitalocean":
+		return config.UserFeatureCloudDigitalOcean
+	case "linode":
+		return config.UserFeatureCloudLinode
+	case "aws", "ec2", "lightsail":
+		return config.UserFeatureCloudAWS
+	case "cloudflare", "aliyun", "alidns", "alicloud":
+		return config.UserFeatureCloudDNS
+	default:
+		return ""
+	}
+}
+
+func isCloudProviderFeatureAllowed(c *gin.Context, providerName string) (bool, error) {
+	feature := cloudProviderRequiredFeature(providerName)
+	if feature == "" {
+		return true, nil
+	}
+
+	return IsCurrentUserFeatureAllowed(c, feature)
+}
+
+func ensureCloudProviderFeatureAllowed(c *gin.Context, providerName string) bool {
+	allowed, err := isCloudProviderFeatureAllowed(c, providerName)
+	if err != nil {
+		api.RespondError(c, http.StatusInternalServerError, "Failed to resolve cloud provider access: "+err.Error())
+		return false
+	}
+	if !allowed {
+		api.RespondError(c, http.StatusForbidden, "Cloud provider is disabled for this user")
+		return false
+	}
+	return true
+}
 
 type createDigitalOceanDropletPayload struct {
 	Name             string   `json:"name" binding:"required"`
@@ -54,7 +92,20 @@ type createDigitalOceanDropletResponse struct {
 }
 
 func GetCloudProviders(c *gin.Context) {
-	api.RespondSuccess(c, factory.GetProviderConfigs())
+	providers := factory.GetProviderConfigs()
+	filtered := make(map[string]interface{}, len(providers))
+	for providerName, fields := range providers {
+		allowed, err := isCloudProviderFeatureAllowed(c, providerName)
+		if err != nil {
+			api.RespondError(c, http.StatusInternalServerError, "Failed to resolve cloud provider access: "+err.Error())
+			return
+		}
+		if !allowed {
+			continue
+		}
+		filtered[providerName] = fields
+	}
+	api.RespondSuccess(c, filtered)
 }
 
 func GetCloudProvider(c *gin.Context) {
@@ -66,6 +117,9 @@ func GetCloudProvider(c *gin.Context) {
 	providerName := strings.TrimSpace(c.Param("provider"))
 	if _, exists := factory.GetConstructor(providerName); !exists {
 		api.RespondError(c, http.StatusNotFound, "Cloud provider not found: "+providerName)
+		return
+	}
+	if !ensureCloudProviderFeatureAllowed(c, providerName) {
 		return
 	}
 
@@ -102,6 +156,9 @@ func SetCloudProvider(c *gin.Context) {
 	providerName := strings.TrimSpace(c.Param("provider"))
 	if _, exists := factory.GetConstructor(providerName); !exists {
 		api.RespondError(c, http.StatusNotFound, "Cloud provider not found: "+providerName)
+		return
+	}
+	if !ensureCloudProviderFeatureAllowed(c, providerName) {
 		return
 	}
 

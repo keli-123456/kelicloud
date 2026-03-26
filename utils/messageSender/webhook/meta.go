@@ -5,7 +5,7 @@ import (
 )
 
 type Addition struct {
-	URL         string `json:"url" required:"true"`
+	URL         string `json:"url" required:"false" help:"Optional default webhook URL. User-scoped notification bindings can override this field."`
 	Method      string `json:"method" default:"GET" type:"option" options:"POST,GET"`
 	ContentType string `json:"content_type" default:"application/json"`
 	Headers     string `json:"headers" help:"HTTP headers in JSON format"`

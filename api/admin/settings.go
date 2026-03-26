@@ -48,6 +48,8 @@ var readableSystemSettingKeys = map[string]struct{}{
 	config.CNConnectivityEnabledKey:  {},
 	config.CNConnectivityTargetKey:   {},
 	config.CNConnectivityIntervalKey: {},
+	config.NotificationEnabledKey:    {},
+	config.NotificationMethodKey:     {},
 }
 
 var delegatedSystemSettingFeatures = map[string]string{

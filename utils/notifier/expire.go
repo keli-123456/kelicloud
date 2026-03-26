@@ -49,7 +49,8 @@ func CheckExpireScheduledWork() {
 				DaysLeft int
 			}
 
-			var clientLeadToExpire []clientToExpireInfo
+			clientLeadToExpire := make(map[string][]clientToExpireInfo)
+			clientSamples := make(map[string][]models.Client)
 
 			for _, client := range clients_all {
 				clientExpireTime := client.ExpiredAt.ToTime()
@@ -64,20 +65,23 @@ func CheckExpireScheduledWork() {
 					remainingDuration := clientExpireTime.Sub(checkTime)
 					daysLeft := int(math.Ceil(remainingDuration.Hours() / 24))
 
-					clientLeadToExpire = append(clientLeadToExpire, clientToExpireInfo{
+					clientLeadToExpire[client.UserID] = append(clientLeadToExpire[client.UserID], clientToExpireInfo{
 						Name:     client.Name,
 						DaysLeft: daysLeft,
 					})
+					clientSamples[client.UserID] = append(clientSamples[client.UserID], client)
 				}
 			}
 
-			if len(clientLeadToExpire) > 0 {
+			for userUUID, expiringClients := range clientLeadToExpire {
 				message := ""
-				for _, clientInfo := range clientLeadToExpire {
+				for _, clientInfo := range expiringClients {
 					message += fmt.Sprintf("• %s (%dd)\n", clientInfo.Name, clientInfo.DaysLeft)
 				}
 				messageSender.SendEvent(models.EventMessage{
+					UserID:  userUUID,
 					Event:   messageevent.Expire,
+					Clients: clientSamples[userUUID],
 					Time:    time.Now(),
 					Message: message,
 					Emoji:   "⏳",

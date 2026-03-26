@@ -7,20 +7,31 @@ import (
 	"github.com/komari-monitor/komari/utils/messageSender/factory"
 )
 
-func LoadProvider(name string, addition string) error {
-	mu.Lock()
-	defer mu.Unlock()
+func buildProvider(name string, addition string) (factory.IMessageSender, error) {
 	constructor, exists := factory.GetConstructor(name)
 	if !exists {
-		return fmt.Errorf("message sender provider not found: %s", name)
+		return nil, fmt.Errorf("message sender provider not found: %s", name)
 	}
 
 	provider := constructor()
 	err := json.Unmarshal([]byte(addition), provider.GetConfiguration())
 	if err != nil {
-		return fmt.Errorf("failed to load config for provider %s: %w", name, err)
+		return nil, fmt.Errorf("failed to load config for provider %s: %w", name, err)
 	}
-	provider.Init()
+	if err := provider.Init(); err != nil {
+		return nil, err
+	}
+
+	return provider, nil
+}
+
+func LoadProvider(name string, addition string) error {
+	mu.Lock()
+	defer mu.Unlock()
+	provider, err := buildProvider(name, addition)
+	if err != nil {
+		return err
+	}
 	if currentProvider != nil {
 		currentProvider.Destroy()
 	}
