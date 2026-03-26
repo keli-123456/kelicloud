@@ -684,6 +684,16 @@ func clearProviderEntryCooldown(userUUID, provider, entryID string) {
 	state.cooldownReason = ""
 }
 
+func invalidateProviderEntrySnapshot(userUUID, provider, entryID string) {
+	key := providerEntryStateKey(userUUID, provider, entryID)
+	state := failoverProviderEntryScheduler.stateFor(key)
+	state.mu.Lock()
+	defer state.mu.Unlock()
+
+	state.snapshot = nil
+	state.provisionedDelta = 0
+}
+
 func applyProviderEntryFailure(userUUID, provider, entryID string, decision providerFailureDecision, err error) {
 	if decision.Cooldown <= 0 {
 		return

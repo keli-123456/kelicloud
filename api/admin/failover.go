@@ -76,35 +76,37 @@ type failoverPlanView struct {
 }
 
 type failoverTaskView struct {
-	ID                 uint                          `json:"id"`
-	Name               string                        `json:"name"`
-	Enabled            bool                          `json:"enabled"`
-	CurrentClientUUID  string                        `json:"current_client_uuid"`
-	CurrentAddress     string                        `json:"current_address"`
-	WatchClientUUID    string                        `json:"watch_client_uuid"`
-	TriggerSource      string                        `json:"trigger_source"`
-	FailureThreshold   int                           `json:"failure_threshold"`
-	StaleAfterSeconds  int                           `json:"stale_after_seconds"`
-	CooldownSeconds    int                           `json:"cooldown_seconds"`
-	DNSProvider        string                        `json:"dns_provider"`
-	DNSEntryID         string                        `json:"dns_entry_id"`
-	DNSPayload         json.RawMessage               `json:"dns_payload"`
-	DeleteStrategy     string                        `json:"delete_strategy"`
-	DeleteDelaySeconds int                           `json:"delete_delay_seconds"`
-	LastExecutionID    *uint                         `json:"last_execution_id,omitempty"`
-	LastStatus         string                        `json:"last_status"`
-	LastMessage        string                        `json:"last_message"`
-	LastTriggeredAt    *models.LocalTime             `json:"last_triggered_at"`
-	LastSucceededAt    *models.LocalTime             `json:"last_succeeded_at"`
-	LastFailedAt       *models.LocalTime             `json:"last_failed_at"`
-	Probe              failoverProbeView             `json:"probe"`
-	CooldownRemaining  int64                         `json:"cooldown_remaining_seconds"`
-	NextEligibleAt     *models.LocalTime             `json:"next_eligible_at"`
-	LatestExecution    *failoverExecutionSummaryView `json:"latest_execution,omitempty"`
-	HasActiveExecution bool                          `json:"has_active_execution"`
-	Plans              []failoverPlanView            `json:"plans"`
-	CreatedAt          models.LocalTime              `json:"created_at"`
-	UpdatedAt          models.LocalTime              `json:"updated_at"`
+	ID                  uint                          `json:"id"`
+	Name                string                        `json:"name"`
+	Enabled             bool                          `json:"enabled"`
+	CurrentClientUUID   string                        `json:"current_client_uuid"`
+	CurrentAddress      string                        `json:"current_address"`
+	CurrentInstanceRef  json.RawMessage               `json:"current_instance_ref"`
+	TriggerFailureCount int                           `json:"trigger_failure_count"`
+	WatchClientUUID     string                        `json:"watch_client_uuid"`
+	TriggerSource       string                        `json:"trigger_source"`
+	FailureThreshold    int                           `json:"failure_threshold"`
+	StaleAfterSeconds   int                           `json:"stale_after_seconds"`
+	CooldownSeconds     int                           `json:"cooldown_seconds"`
+	DNSProvider         string                        `json:"dns_provider"`
+	DNSEntryID          string                        `json:"dns_entry_id"`
+	DNSPayload          json.RawMessage               `json:"dns_payload"`
+	DeleteStrategy      string                        `json:"delete_strategy"`
+	DeleteDelaySeconds  int                           `json:"delete_delay_seconds"`
+	LastExecutionID     *uint                         `json:"last_execution_id,omitempty"`
+	LastStatus          string                        `json:"last_status"`
+	LastMessage         string                        `json:"last_message"`
+	LastTriggeredAt     *models.LocalTime             `json:"last_triggered_at"`
+	LastSucceededAt     *models.LocalTime             `json:"last_succeeded_at"`
+	LastFailedAt        *models.LocalTime             `json:"last_failed_at"`
+	Probe               failoverProbeView             `json:"probe"`
+	CooldownRemaining   int64                         `json:"cooldown_remaining_seconds"`
+	NextEligibleAt      *models.LocalTime             `json:"next_eligible_at"`
+	LatestExecution     *failoverExecutionSummaryView `json:"latest_execution,omitempty"`
+	HasActiveExecution  bool                          `json:"has_active_execution"`
+	Plans               []failoverPlanView            `json:"plans"`
+	CreatedAt           models.LocalTime              `json:"created_at"`
+	UpdatedAt           models.LocalTime              `json:"updated_at"`
 }
 
 type failoverProbeView struct {
@@ -360,35 +362,37 @@ func buildFailoverTaskView(task *models.FailoverTask, latestExecution *models.Fa
 	}
 
 	return failoverTaskView{
-		ID:                 task.ID,
-		Name:               task.Name,
-		Enabled:            task.Enabled,
-		CurrentClientUUID:  task.WatchClientUUID,
-		CurrentAddress:     task.CurrentAddress,
-		WatchClientUUID:    task.WatchClientUUID,
-		TriggerSource:      task.TriggerSource,
-		FailureThreshold:   task.FailureThreshold,
-		StaleAfterSeconds:  task.StaleAfterSeconds,
-		CooldownSeconds:    task.CooldownSeconds,
-		DNSProvider:        task.DNSProvider,
-		DNSEntryID:         task.DNSEntryID,
-		DNSPayload:         rawJSONOrNull(task.DNSPayload),
-		DeleteStrategy:     task.DeleteStrategy,
-		DeleteDelaySeconds: task.DeleteDelaySeconds,
-		LastExecutionID:    task.LastExecutionID,
-		LastStatus:         task.LastStatus,
-		LastMessage:        task.LastMessage,
-		LastTriggeredAt:    task.LastTriggeredAt,
-		LastSucceededAt:    task.LastSucceededAt,
-		LastFailedAt:       task.LastFailedAt,
-		Probe:              probe,
-		CooldownRemaining:  cooldownRemaining,
-		NextEligibleAt:     nextEligibleAt,
-		LatestExecution:    buildFailoverExecutionSummaryView(latestExecution),
-		HasActiveExecution: latestExecution != nil && isFailoverExecutionActive(latestExecution.Status),
-		Plans:              plans,
-		CreatedAt:          task.CreatedAt,
-		UpdatedAt:          task.UpdatedAt,
+		ID:                  task.ID,
+		Name:                task.Name,
+		Enabled:             task.Enabled,
+		CurrentClientUUID:   task.WatchClientUUID,
+		CurrentAddress:      task.CurrentAddress,
+		CurrentInstanceRef:  rawJSONOrNull(task.CurrentInstanceRef),
+		TriggerFailureCount: task.TriggerFailureCount,
+		WatchClientUUID:     task.WatchClientUUID,
+		TriggerSource:       task.TriggerSource,
+		FailureThreshold:    task.FailureThreshold,
+		StaleAfterSeconds:   task.StaleAfterSeconds,
+		CooldownSeconds:     task.CooldownSeconds,
+		DNSProvider:         task.DNSProvider,
+		DNSEntryID:          task.DNSEntryID,
+		DNSPayload:          rawJSONOrNull(task.DNSPayload),
+		DeleteStrategy:      task.DeleteStrategy,
+		DeleteDelaySeconds:  task.DeleteDelaySeconds,
+		LastExecutionID:     task.LastExecutionID,
+		LastStatus:          task.LastStatus,
+		LastMessage:         task.LastMessage,
+		LastTriggeredAt:     task.LastTriggeredAt,
+		LastSucceededAt:     task.LastSucceededAt,
+		LastFailedAt:        task.LastFailedAt,
+		Probe:               probe,
+		CooldownRemaining:   cooldownRemaining,
+		NextEligibleAt:      nextEligibleAt,
+		LatestExecution:     buildFailoverExecutionSummaryView(latestExecution),
+		HasActiveExecution:  latestExecution != nil && isFailoverExecutionActive(latestExecution.Status),
+		Plans:               plans,
+		CreatedAt:           task.CreatedAt,
+		UpdatedAt:           task.UpdatedAt,
 	}
 }
 

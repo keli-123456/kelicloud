@@ -56,6 +56,13 @@ type actionOutcome struct {
 	Rollback         func() error
 }
 
+type currentInstanceCleanup struct {
+	Ref       map[string]interface{}
+	Addresses map[string]interface{}
+	Label     string
+	Cleanup   func() error
+}
+
 type blockedOutletError struct {
 	ClientUUID string
 	Status     string
@@ -210,13 +217,12 @@ func evaluateTaskHealth(task *models.FailoverTask, report *common.Report, now ti
 	if strings.TrimSpace(task.WatchClientUUID) == "" {
 		fields["last_status"] = models.FailoverTaskStatusUnknown
 		fields["last_message"] = "task is not initialized"
+		fields["trigger_failure_count"] = 0
 		return false, fields, ""
 	}
 
 	if report == nil || report.CNConnectivity == nil {
-		fields["last_status"] = models.FailoverTaskStatusUnknown
-		fields["last_message"] = "cn_connectivity report is unavailable"
-		return false, fields, ""
+		return evaluateMissingReportHealth(task, fields, "cn_connectivity report is unavailable")
 	}
 
 	reportTime := report.UpdatedAt
@@ -224,10 +230,10 @@ func evaluateTaskHealth(task *models.FailoverTask, report *common.Report, now ti
 		reportTime = report.CNConnectivity.CheckedAt
 	}
 	if reportTime.IsZero() || now.Sub(reportTime) > time.Duration(task.StaleAfterSeconds)*time.Second {
-		fields["last_status"] = models.FailoverTaskStatusUnknown
-		fields["last_message"] = "latest report is stale"
-		return false, fields, ""
+		return evaluateMissingReportHealth(task, fields, "latest report is stale")
 	}
+
+	fields["trigger_failure_count"] = 0
 
 	if report.CNConnectivity.Status == "blocked_suspected" && report.CNConnectivity.ConsecutiveFailures >= task.FailureThreshold {
 		fields["last_status"] = models.FailoverTaskStatusTriggered
@@ -237,6 +243,26 @@ func evaluateTaskHealth(task *models.FailoverTask, report *common.Report, now ti
 
 	fields["last_status"] = models.FailoverTaskStatusHealthy
 	fields["last_message"] = report.CNConnectivity.Status
+	return false, fields, ""
+}
+
+func evaluateMissingReportHealth(task *models.FailoverTask, fields map[string]interface{}, baseMessage string) (bool, map[string]interface{}, string) {
+	if fields == nil {
+		fields = map[string]interface{}{}
+	}
+	threshold := task.FailureThreshold
+	if threshold <= 0 {
+		threshold = 2
+	}
+	failures := task.TriggerFailureCount + 1
+	fields["trigger_failure_count"] = failures
+	if failures >= threshold {
+		fields["last_status"] = models.FailoverTaskStatusTriggered
+		fields["last_message"] = fmt.Sprintf("%s (%d/%d)", strings.TrimSpace(baseMessage), failures, threshold)
+		return true, fields, fields["last_message"].(string)
+	}
+	fields["last_status"] = models.FailoverTaskStatusUnknown
+	fields["last_message"] = fmt.Sprintf("%s (%d/%d)", strings.TrimSpace(baseMessage), failures, threshold)
 	return false, fields, ""
 }
 
@@ -269,6 +295,8 @@ func queueExecution(task *models.FailoverTask, report *common.Report, reason str
 		TriggerSnapshot: snapshot,
 		DNSProvider:     task.DNSProvider,
 		OldClientUUID:   task.WatchClientUUID,
+		OldInstanceRef:  strings.TrimSpace(task.CurrentInstanceRef),
+		OldAddresses:    marshalJSON(map[string]interface{}{"current_address": strings.TrimSpace(task.CurrentAddress)}),
 		StartedAt:       models.FromTime(now),
 	})
 	if err != nil {
@@ -405,6 +433,19 @@ func (r *executionRunner) executePlanActionWithProviderPool(plan models.Failover
 		if len(availability) > 0 {
 			candidateDetail["availability"] = availability
 		}
+		if reserveErr != nil && strings.TrimSpace(plan.ActionType) == models.FailoverActionProvisionInstance && strings.TrimSpace(stringMapValue(availability, "status")) == "full" {
+			recycledDetail, recycleErr := r.recycleCurrentOutletForCandidate(plan, candidate)
+			if recycleErr != nil {
+				candidateDetail["recycle_error"] = recycleErr.Error()
+			} else if len(recycledDetail) > 0 {
+				candidateDetail["recycled_current_instance"] = recycledDetail
+				invalidateProviderEntrySnapshot(r.task.UserID, plan.Provider, candidate.EntryID)
+				lease, availability, reserveErr = acquireProviderEntryLease(r.task.UserID, plan, candidate)
+				if len(availability) > 0 {
+					candidateDetail["availability"] = availability
+				}
+			}
+		}
 		if reserveErr != nil {
 			candidateDetail["status"] = "skipped"
 			candidateDetail["error"] = reserveErr.Error()
@@ -446,6 +487,17 @@ func (r *executionRunner) executePlanActionWithProviderPool(plan models.Failover
 				attemptDetail["failure_class"] = decision.Class
 				entryAttempts = append(entryAttempts, attemptDetail)
 				goto nextCandidate
+			}
+			if strings.TrimSpace(selectedPlan.ActionType) == models.FailoverActionProvisionInstance {
+				if cleanupErr := r.attachCurrentOutletCleanup(outcome); cleanupErr != nil {
+					lease.Release(false)
+					finishOperation()
+					attemptDetail["status"] = "failed"
+					attemptDetail["error"] = cleanupErr.Error()
+					attemptDetail["failure_class"] = "post_provision_error"
+					entryAttempts = append(entryAttempts, attemptDetail)
+					goto nextCandidate
+				}
 			}
 
 			finalizeErr := r.finalizePlan(selectedPlan, outcome)
@@ -1141,6 +1193,11 @@ func (r *executionRunner) succeedExecution(outcome *actionOutcome) {
 			cleanupResult = map[string]interface{}{"error": err.Error()}
 			r.finishStep(cleanupStep, models.FailoverStepStatusFailed, err.Error(), cleanupResult)
 		} else {
+			oldProvider := strings.TrimSpace(stringMapValue(outcome.OldInstanceRef, "provider"))
+			oldEntryID := strings.TrimSpace(providerEntryIDFromRef(outcome.OldInstanceRef))
+			if oldProvider != "" && oldEntryID != "" {
+				invalidateProviderEntrySnapshot(r.task.UserID, oldProvider, oldEntryID)
+			}
 			cleanupStatus = models.FailoverCleanupStatusSuccess
 			cleanupResult = map[string]interface{}{"message": "old instance deleted"}
 			r.finishStep(cleanupStep, models.FailoverStepStatusSuccess, "old instance deleted", cleanupResult)
@@ -1162,9 +1219,10 @@ func (r *executionRunner) succeedExecution(outcome *actionOutcome) {
 	_ = failoverdb.UpdateExecutionFields(r.execution.ID, fields)
 
 	taskUpdates := map[string]interface{}{
-		"last_status":       models.FailoverTaskStatusCooldown,
-		"last_message":      "failover completed",
-		"last_succeeded_at": models.FromTime(now),
+		"last_status":           models.FailoverTaskStatusCooldown,
+		"last_message":          "failover completed",
+		"last_succeeded_at":     models.FromTime(now),
+		"trigger_failure_count": 0,
 	}
 	if outcome != nil {
 		if nextClientUUID := strings.TrimSpace(firstNonEmpty(outcome.NewClientUUID, outcome.TargetClientUUID)); nextClientUUID != "" {
@@ -1172,6 +1230,9 @@ func (r *executionRunner) succeedExecution(outcome *actionOutcome) {
 		}
 		if nextAddress := primaryOutcomeAddress(outcome); nextAddress != "" {
 			taskUpdates["current_address"] = nextAddress
+		}
+		if nextRef := effectiveCurrentInstanceRef(outcome); len(nextRef) > 0 {
+			taskUpdates["current_instance_ref"] = marshalJSON(nextRef)
 		}
 	}
 	_ = failoverdb.UpdateTaskFields(r.task.ID, taskUpdates)
@@ -1222,6 +1283,411 @@ func (r *executionRunner) finishStep(step *models.FailoverExecutionStep, status,
 	}
 	if err := failoverdb.UpdateExecutionStepFields(step.ID, fields); err != nil {
 		log.Printf("failover: failed to update step %d: %v", step.ID, err)
+	}
+}
+
+func effectiveCurrentInstanceRef(outcome *actionOutcome) map[string]interface{} {
+	if outcome == nil {
+		return nil
+	}
+	if len(outcome.NewInstanceRef) > 0 {
+		return outcome.NewInstanceRef
+	}
+	if len(outcome.OldInstanceRef) > 0 {
+		return outcome.OldInstanceRef
+	}
+	return nil
+}
+
+func parseJSONMap(raw string) map[string]interface{} {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	var decoded map[string]interface{}
+	if err := json.Unmarshal([]byte(raw), &decoded); err != nil {
+		return nil
+	}
+	if len(decoded) == 0 {
+		return nil
+	}
+	return decoded
+}
+
+func cloneJSONMap(source map[string]interface{}) map[string]interface{} {
+	if len(source) == 0 {
+		return nil
+	}
+	cloned := make(map[string]interface{}, len(source))
+	for key, value := range source {
+		cloned[key] = value
+	}
+	return cloned
+}
+
+func providerEntryIDFromRef(ref map[string]interface{}) string {
+	return firstNonEmpty(stringMapValue(ref, "provider_entry_id"), stringMapValue(ref, "entry_id"))
+}
+
+func providerEntryNameFromRef(ref map[string]interface{}) string {
+	return firstNonEmpty(stringMapValue(ref, "provider_entry_name"), stringMapValue(ref, "entry_name"))
+}
+
+func sameAddress(target string, values ...string) bool {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return false
+	}
+	for _, value := range values {
+		if strings.TrimSpace(value) == target {
+			return true
+		}
+	}
+	return false
+}
+
+func (r *executionRunner) attachCurrentOutletCleanup(outcome *actionOutcome) error {
+	if outcome == nil || outcome.Cleanup != nil {
+		return nil
+	}
+	cleanup, err := resolveCurrentInstanceCleanupFromRef(r.task.UserID, parseJSONMap(r.task.CurrentInstanceRef))
+	if err != nil {
+		return err
+	}
+	if cleanup == nil {
+		return nil
+	}
+	outcome.OldInstanceRef = cloneJSONMap(cleanup.Ref)
+	outcome.CleanupLabel = cleanup.Label
+	outcome.Cleanup = cleanup.Cleanup
+	return nil
+}
+
+func (r *executionRunner) recycleCurrentOutletForCandidate(plan models.FailoverPlan, candidate providerPoolCandidate) (map[string]interface{}, error) {
+	cleanup, err := resolveCurrentInstanceCleanupFromRef(r.task.UserID, parseJSONMap(r.task.CurrentInstanceRef))
+	if err != nil {
+		return nil, err
+	}
+	if cleanup != nil && (strings.ToLower(strings.TrimSpace(stringMapValue(cleanup.Ref, "provider"))) != strings.ToLower(strings.TrimSpace(plan.Provider)) ||
+		strings.TrimSpace(providerEntryIDFromRef(cleanup.Ref)) != strings.TrimSpace(candidate.EntryID)) {
+		cleanup = nil
+	}
+	if cleanup == nil {
+		cleanup, err = r.resolveCurrentInstanceCleanupByAddress(plan, candidate)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if cleanup == nil || cleanup.Cleanup == nil {
+		return nil, nil
+	}
+
+	reclaimStep := r.startStep("reclaim_current", "Reclaim Current Outlet Capacity", map[string]interface{}{
+		"provider": plan.Provider,
+		"entry_id": candidate.EntryID,
+		"ref":      cleanup.Ref,
+	})
+	if err := cleanup.Cleanup(); err != nil {
+		r.finishStep(reclaimStep, models.FailoverStepStatusFailed, err.Error(), map[string]interface{}{
+			"label": cleanup.Label,
+			"ref":   cleanup.Ref,
+		})
+		return nil, err
+	}
+
+	detail := map[string]interface{}{
+		"label": cleanup.Label,
+		"ref":   cleanup.Ref,
+	}
+	if len(cleanup.Addresses) > 0 {
+		detail["addresses"] = cleanup.Addresses
+	}
+	r.finishStep(reclaimStep, models.FailoverStepStatusSuccess, "current failed outlet deleted to free capacity", detail)
+	return detail, nil
+}
+
+func (r *executionRunner) resolveCurrentInstanceCleanupByAddress(plan models.FailoverPlan, candidate providerPoolCandidate) (*currentInstanceCleanup, error) {
+	address := strings.TrimSpace(r.task.CurrentAddress)
+	if address == "" {
+		return nil, nil
+	}
+
+	switch strings.ToLower(strings.TrimSpace(plan.Provider)) {
+	case "digitalocean":
+		addition, token, err := loadDigitalOceanToken(r.task.UserID, candidate.EntryID)
+		if err != nil {
+			return nil, err
+		}
+		client, err := digitalocean.NewClientFromToken(token.Token)
+		if err != nil {
+			return nil, err
+		}
+		droplets, err := client.ListDroplets(context.Background())
+		if err != nil {
+			return nil, err
+		}
+		for _, droplet := range droplets {
+			if !sameAddress(address, digitalOceanPublicIPv4(&droplet), digitalOceanPublicIPv6(&droplet)) {
+				continue
+			}
+			ref := map[string]interface{}{
+				"provider":            "digitalocean",
+				"provider_entry_id":   candidate.EntryID,
+				"provider_entry_name": candidate.EntryName,
+				"droplet_id":          droplet.ID,
+				"name":                droplet.Name,
+				"region":              strings.TrimSpace(droplet.Region.Slug),
+			}
+			return &currentInstanceCleanup{
+				Ref: ref,
+				Addresses: map[string]interface{}{
+					"ipv4": droplet.Networks.V4,
+					"ipv6": droplet.Networks.V6,
+				},
+				Label: fmt.Sprintf("delete digitalocean droplet %d", droplet.ID),
+				Cleanup: func() error {
+					if err := client.DeleteDroplet(context.Background(), droplet.ID); err != nil {
+						return err
+					}
+					removeSavedDigitalOceanRootPassword(r.task.UserID, addition, token, droplet.ID)
+					return nil
+				},
+			}, nil
+		}
+		return nil, nil
+	case "linode":
+		addition, token, err := loadLinodeToken(r.task.UserID, candidate.EntryID)
+		if err != nil {
+			return nil, err
+		}
+		client, err := linodecloud.NewClientFromToken(token.Token)
+		if err != nil {
+			return nil, err
+		}
+		instances, err := client.ListInstances(context.Background())
+		if err != nil {
+			return nil, err
+		}
+		for _, instance := range instances {
+			if !sameAddress(address, append(append([]string(nil), instance.IPv4...), strings.TrimSpace(instance.IPv6))...) {
+				continue
+			}
+			ref := map[string]interface{}{
+				"provider":            "linode",
+				"provider_entry_id":   candidate.EntryID,
+				"provider_entry_name": candidate.EntryName,
+				"instance_id":         instance.ID,
+				"label":               instance.Label,
+				"region":              instance.Region,
+			}
+			return &currentInstanceCleanup{
+				Ref: ref,
+				Addresses: map[string]interface{}{
+					"ipv4": instance.IPv4,
+					"ipv6": instance.IPv6,
+				},
+				Label: fmt.Sprintf("delete linode instance %d", instance.ID),
+				Cleanup: func() error {
+					if err := client.DeleteInstance(context.Background(), instance.ID); err != nil {
+						return err
+					}
+					removeSavedLinodeRootPassword(r.task.UserID, addition, token, instance.ID)
+					return nil
+				},
+			}, nil
+		}
+		return nil, nil
+	case "aws":
+		addition, credential, err := loadAWSCredential(r.task.UserID, candidate.EntryID)
+		if err != nil {
+			return nil, err
+		}
+		region := resolveAWSPlanRegion(plan, addition, credential)
+		service := resolveAWSPlanService(plan)
+		if service == "lightsail" {
+			instances, err := awscloud.ListLightsailInstances(context.Background(), credential, region)
+			if err != nil {
+				return nil, err
+			}
+			for _, instance := range instances {
+				if !sameAddress(address, append([]string{strings.TrimSpace(instance.PublicIP), strings.TrimSpace(instance.PrivateIP)}, instance.IPv6Addresses...)...) {
+					continue
+				}
+				ref := map[string]interface{}{
+					"provider":            "aws",
+					"service":             "lightsail",
+					"provider_entry_id":   candidate.EntryID,
+					"provider_entry_name": candidate.EntryName,
+					"region":              region,
+					"instance_name":       instance.Name,
+				}
+				return &currentInstanceCleanup{
+					Ref: ref,
+					Addresses: map[string]interface{}{
+						"public_ip":      instance.PublicIP,
+						"private_ip":     instance.PrivateIP,
+						"ipv6_addresses": instance.IPv6Addresses,
+					},
+					Label: "delete aws lightsail instance " + instance.Name,
+					Cleanup: func() error {
+						return awscloud.DeleteLightsailInstance(context.Background(), credential, region, instance.Name)
+					},
+				}, nil
+			}
+			return nil, nil
+		}
+		instances, err := awscloud.ListInstances(context.Background(), credential, region)
+		if err != nil {
+			return nil, err
+		}
+		for _, instance := range instances {
+			if !sameAddress(address, instance.PublicIP, instance.PrivateIP) {
+				continue
+			}
+			ref := map[string]interface{}{
+				"provider":            "aws",
+				"service":             "ec2",
+				"provider_entry_id":   candidate.EntryID,
+				"provider_entry_name": candidate.EntryName,
+				"region":              region,
+				"instance_id":         instance.InstanceID,
+				"name":                instance.Name,
+			}
+			return &currentInstanceCleanup{
+				Ref: ref,
+				Addresses: map[string]interface{}{
+					"public_ip":  instance.PublicIP,
+					"private_ip": instance.PrivateIP,
+				},
+				Label: "terminate aws ec2 instance " + instance.InstanceID,
+				Cleanup: func() error {
+					return awscloud.TerminateInstance(context.Background(), credential, region, instance.InstanceID)
+				},
+			}, nil
+		}
+		return nil, nil
+	default:
+		return nil, nil
+	}
+}
+
+func resolveCurrentInstanceCleanupFromRef(userUUID string, ref map[string]interface{}) (*currentInstanceCleanup, error) {
+	if len(ref) == 0 {
+		return nil, nil
+	}
+
+	provider := strings.ToLower(strings.TrimSpace(stringMapValue(ref, "provider")))
+	entryID := strings.TrimSpace(providerEntryIDFromRef(ref))
+	if provider == "" || entryID == "" {
+		return nil, nil
+	}
+
+	switch provider {
+	case "digitalocean":
+		dropletID := intMapValue(ref, "droplet_id")
+		if dropletID <= 0 {
+			return nil, nil
+		}
+		addition, token, err := loadDigitalOceanToken(userUUID, entryID)
+		if err != nil {
+			return nil, err
+		}
+		client, err := digitalocean.NewClientFromToken(token.Token)
+		if err != nil {
+			return nil, err
+		}
+		resolvedRef := cloneJSONMap(ref)
+		resolvedRef["provider"] = "digitalocean"
+		resolvedRef["provider_entry_id"] = entryID
+		if name := providerEntryNameFromRef(ref); name != "" {
+			resolvedRef["provider_entry_name"] = name
+		}
+		return &currentInstanceCleanup{
+			Ref:   resolvedRef,
+			Label: fmt.Sprintf("delete digitalocean droplet %d", dropletID),
+			Cleanup: func() error {
+				if err := client.DeleteDroplet(context.Background(), dropletID); err != nil {
+					return err
+				}
+				removeSavedDigitalOceanRootPassword(userUUID, addition, token, dropletID)
+				return nil
+			},
+		}, nil
+	case "linode":
+		instanceID := intMapValue(ref, "instance_id")
+		if instanceID <= 0 {
+			return nil, nil
+		}
+		addition, token, err := loadLinodeToken(userUUID, entryID)
+		if err != nil {
+			return nil, err
+		}
+		client, err := linodecloud.NewClientFromToken(token.Token)
+		if err != nil {
+			return nil, err
+		}
+		resolvedRef := cloneJSONMap(ref)
+		resolvedRef["provider"] = "linode"
+		resolvedRef["provider_entry_id"] = entryID
+		if name := providerEntryNameFromRef(ref); name != "" {
+			resolvedRef["provider_entry_name"] = name
+		}
+		return &currentInstanceCleanup{
+			Ref:   resolvedRef,
+			Label: fmt.Sprintf("delete linode instance %d", instanceID),
+			Cleanup: func() error {
+				if err := client.DeleteInstance(context.Background(), instanceID); err != nil {
+					return err
+				}
+				removeSavedLinodeRootPassword(userUUID, addition, token, instanceID)
+				return nil
+			},
+		}, nil
+	case "aws":
+		service := strings.ToLower(strings.TrimSpace(firstNonEmpty(stringMapValue(ref, "service"), "ec2")))
+		region := strings.TrimSpace(stringMapValue(ref, "region"))
+		if region == "" {
+			return nil, nil
+		}
+		_, credential, err := loadAWSCredential(userUUID, entryID)
+		if err != nil {
+			return nil, err
+		}
+		resolvedRef := cloneJSONMap(ref)
+		resolvedRef["provider"] = "aws"
+		resolvedRef["provider_entry_id"] = entryID
+		if name := providerEntryNameFromRef(ref); name != "" {
+			resolvedRef["provider_entry_name"] = name
+		}
+		switch service {
+		case "lightsail":
+			instanceName := strings.TrimSpace(stringMapValue(ref, "instance_name"))
+			if instanceName == "" {
+				return nil, nil
+			}
+			return &currentInstanceCleanup{
+				Ref:   resolvedRef,
+				Label: "delete aws lightsail instance " + instanceName,
+				Cleanup: func() error {
+					return awscloud.DeleteLightsailInstance(context.Background(), credential, region, instanceName)
+				},
+			}, nil
+		default:
+			instanceID := strings.TrimSpace(stringMapValue(ref, "instance_id"))
+			if instanceID == "" {
+				return nil, nil
+			}
+			resolvedRef["service"] = "ec2"
+			return &currentInstanceCleanup{
+				Ref:   resolvedRef,
+				Label: "terminate aws ec2 instance " + instanceID,
+				Cleanup: func() error {
+					return awscloud.TerminateInstance(context.Background(), credential, region, instanceID)
+				},
+			}, nil
+		}
+	default:
+		return nil, nil
 	}
 }
 
@@ -1510,11 +1976,13 @@ func provisionAWSInstance(userUUID string, plan models.FailoverPlan) (*actionOut
 			TargetClientUUID: "",
 			AutoConnectGroup: autoConnectGroup,
 			NewInstanceRef: map[string]interface{}{
-				"provider":    "aws",
-				"service":     "ec2",
-				"region":      region,
-				"instance_id": instance.InstanceID,
-				"name":        instance.Name,
+				"provider":            "aws",
+				"service":             "ec2",
+				"provider_entry_id":   credential.ID,
+				"provider_entry_name": credential.Name,
+				"region":              region,
+				"instance_id":         instance.InstanceID,
+				"name":                instance.Name,
 			},
 			NewAddresses: map[string]interface{}{
 				"public_ip":  instance.PublicIP,
@@ -1528,10 +1996,12 @@ func provisionAWSInstance(userUUID string, plan models.FailoverPlan) (*actionOut
 		}
 		if cleanupInstanceID := strings.TrimSpace(payload.CleanupInstanceID); cleanupInstanceID != "" {
 			outcome.OldInstanceRef = map[string]interface{}{
-				"provider":    "aws",
-				"service":     "ec2",
-				"region":      region,
-				"instance_id": cleanupInstanceID,
+				"provider":            "aws",
+				"service":             "ec2",
+				"provider_entry_id":   credential.ID,
+				"provider_entry_name": credential.Name,
+				"region":              region,
+				"instance_id":         cleanupInstanceID,
 			}
 			outcome.CleanupLabel = "terminate aws ec2 instance " + cleanupInstanceID
 			outcome.Cleanup = func() error {
@@ -1580,10 +2050,12 @@ func provisionAWSInstance(userUUID string, plan models.FailoverPlan) (*actionOut
 			IPv6:             firstString(detail.Instance.IPv6Addresses),
 			AutoConnectGroup: autoConnectGroup,
 			NewInstanceRef: map[string]interface{}{
-				"provider":      "aws",
-				"service":       "lightsail",
-				"region":        region,
-				"instance_name": name,
+				"provider":            "aws",
+				"service":             "lightsail",
+				"provider_entry_id":   credential.ID,
+				"provider_entry_name": credential.Name,
+				"region":              region,
+				"instance_name":       name,
 			},
 			NewAddresses: map[string]interface{}{
 				"public_ip":      detail.Instance.PublicIP,
@@ -1597,10 +2069,12 @@ func provisionAWSInstance(userUUID string, plan models.FailoverPlan) (*actionOut
 		}
 		if cleanupName := strings.TrimSpace(payload.CleanupInstanceName); cleanupName != "" {
 			outcome.OldInstanceRef = map[string]interface{}{
-				"provider":      "aws",
-				"service":       "lightsail",
-				"region":        region,
-				"instance_name": cleanupName,
+				"provider":            "aws",
+				"service":             "lightsail",
+				"provider_entry_id":   credential.ID,
+				"provider_entry_name": credential.Name,
+				"region":              region,
+				"instance_name":       cleanupName,
 			}
 			outcome.CleanupLabel = "delete aws lightsail instance " + cleanupName
 			outcome.Cleanup = func() error {
@@ -1696,9 +2170,12 @@ func provisionDigitalOceanDroplet(userUUID string, plan models.FailoverPlan) (*a
 	}
 	passwordSaveErr := persistDigitalOceanRootPassword(userUUID, addition, token, droplet.ID, droplet.Name, passwordMode, rootPassword)
 	newInstanceRef := map[string]interface{}{
-		"provider":   "digitalocean",
-		"droplet_id": droplet.ID,
-		"name":       droplet.Name,
+		"provider":            "digitalocean",
+		"provider_entry_id":   token.ID,
+		"provider_entry_name": token.Name,
+		"region":              strings.TrimSpace(payload.Region),
+		"droplet_id":          droplet.ID,
+		"name":                droplet.Name,
 	}
 	if rootPassword != "" {
 		newInstanceRef["root_password_mode"] = passwordMode
@@ -1727,8 +2204,10 @@ func provisionDigitalOceanDroplet(userUUID string, plan models.FailoverPlan) (*a
 	}
 	if payload.CleanupDropletID > 0 {
 		outcome.OldInstanceRef = map[string]interface{}{
-			"provider":   "digitalocean",
-			"droplet_id": payload.CleanupDropletID,
+			"provider":            "digitalocean",
+			"provider_entry_id":   token.ID,
+			"provider_entry_name": token.Name,
+			"droplet_id":          payload.CleanupDropletID,
 		}
 		outcome.CleanupLabel = fmt.Sprintf("delete digitalocean droplet %d", payload.CleanupDropletID)
 		outcome.Cleanup = func() error {
@@ -1831,9 +2310,12 @@ func provisionLinodeInstance(userUUID string, plan models.FailoverPlan) (*action
 		rootPassword,
 	)
 	newInstanceRef := map[string]interface{}{
-		"provider":    "linode",
-		"instance_id": instance.ID,
-		"label":       instance.Label,
+		"provider":            "linode",
+		"provider_entry_id":   token.ID,
+		"provider_entry_name": token.Name,
+		"region":              instance.Region,
+		"instance_id":         instance.ID,
+		"label":               instance.Label,
 	}
 	if rootPassword != "" {
 		newInstanceRef["root_password_mode"] = passwordMode
@@ -1862,8 +2344,10 @@ func provisionLinodeInstance(userUUID string, plan models.FailoverPlan) (*action
 	}
 	if payload.CleanupInstanceID > 0 {
 		outcome.OldInstanceRef = map[string]interface{}{
-			"provider":    "linode",
-			"instance_id": payload.CleanupInstanceID,
+			"provider":            "linode",
+			"provider_entry_id":   token.ID,
+			"provider_entry_name": token.Name,
+			"instance_id":         payload.CleanupInstanceID,
 		}
 		outcome.CleanupLabel = fmt.Sprintf("delete linode instance %d", payload.CleanupInstanceID)
 		outcome.Cleanup = func() error {
@@ -1922,10 +2406,12 @@ func rebindAWSIPAddress(task models.FailoverTask, plan models.FailoverPlan) (*ac
 			TargetClientUUID: task.WatchClientUUID,
 			NewClientUUID:    task.WatchClientUUID,
 			OldInstanceRef: map[string]interface{}{
-				"provider":    "aws",
-				"service":     "ec2",
-				"region":      region,
-				"instance_id": instanceID,
+				"provider":            "aws",
+				"service":             "ec2",
+				"provider_entry_id":   credential.ID,
+				"provider_entry_name": credential.Name,
+				"region":              region,
+				"instance_id":         instanceID,
 			},
 			NewAddresses: map[string]interface{}{
 				"allocation_id":  address.AllocationID,
@@ -1964,10 +2450,12 @@ func rebindAWSIPAddress(task models.FailoverTask, plan models.FailoverPlan) (*ac
 			TargetClientUUID: task.WatchClientUUID,
 			NewClientUUID:    task.WatchClientUUID,
 			OldInstanceRef: map[string]interface{}{
-				"provider":      "aws",
-				"service":       "lightsail",
-				"region":        region,
-				"instance_name": instanceName,
+				"provider":            "aws",
+				"service":             "lightsail",
+				"provider_entry_id":   credential.ID,
+				"provider_entry_name": credential.Name,
+				"region":              region,
+				"instance_name":       instanceName,
 			},
 			NewAddresses: map[string]interface{}{
 				"static_ip_name": staticIPName,
