@@ -51,8 +51,7 @@ func ProbeWithSettings(ctx context.Context, settings *Settings) (*ProbeResult, e
 
 	if settings == nil || !settings.Enabled {
 		ipv4, ipv4URL, ipv6, ipv6URL, err := fetchExitIPsFunc(ctx, &http.Client{
-			Timeout:   10 * time.Second,
-			Transport: newBaseTransport(),
+			Transport: newDirectTransport(10 * time.Second),
 		})
 		if err != nil {
 			return nil, err
@@ -86,8 +85,7 @@ func ProbeWithSettings(ctx context.Context, settings *Settings) (*ProbeResult, e
 	}
 
 	directIPv4, directIPv4URL, directIPv6, directIPv6URL, directErr := fetchExitIPsFunc(ctx, &http.Client{
-		Timeout:   10 * time.Second,
-		Transport: newBaseTransport(),
+		Transport: newDirectTransport(10 * time.Second),
 	})
 	if directErr != nil {
 		return nil, fmt.Errorf("proxy probe failed: %w; direct probe failed: %w", proxyErr, directErr)

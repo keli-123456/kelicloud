@@ -188,6 +188,21 @@ func TestApplyAttemptTimeoutSetsResponseHeaderTimeout(t *testing.T) {
 	}
 }
 
+func TestNewDirectHTTPClientUsesDirectTransport(t *testing.T) {
+	client := NewDirectHTTPClient(15 * time.Second)
+
+	transport, ok := client.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("expected direct http transport, got %T", client.Transport)
+	}
+	if transport.Proxy != nil {
+		t.Fatal("expected direct client to avoid proxy hook")
+	}
+	if transport.ResponseHeaderTimeout != 15*time.Second {
+		t.Fatalf("expected response header timeout to be 15s, got %s", transport.ResponseHeaderTimeout)
+	}
+}
+
 func TestLoadSettingsParsesCredentialLine(t *testing.T) {
 	settings := &Settings{
 		Host: "prem.country.iprocket.io:9595:com94499845-res-any:RqT26IE0U72JxLy",

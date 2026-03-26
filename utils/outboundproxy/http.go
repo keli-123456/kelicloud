@@ -45,8 +45,7 @@ func LoadSettings() (*Settings, error) {
 }
 
 func NewHTTPClient(timeout time.Duration) *http.Client {
-	directTransport := newBaseTransport()
-	applyAttemptTimeout(directTransport, timeout)
+	directTransport := newDirectTransport(timeout)
 	transport, err := NewTransport()
 	if err != nil {
 		slog.Warn("failed to build outbound proxy transport", "error", err)
@@ -65,6 +64,13 @@ func NewHTTPClient(timeout time.Duration) *http.Client {
 			proxied: transport,
 			direct:  directTransport,
 		},
+	}
+}
+
+func NewDirectHTTPClient(timeout time.Duration) *http.Client {
+	directTransport := newDirectTransport(timeout)
+	return &http.Client{
+		Transport: directTransport,
 	}
 }
 
@@ -256,6 +262,13 @@ func newSocks5Transport(settings *Settings) (*http.Transport, error) {
 
 func newBaseTransport() *http.Transport {
 	return http.DefaultTransport.(*http.Transport).Clone()
+}
+
+func newDirectTransport(timeout time.Duration) *http.Transport {
+	transport := newBaseTransport()
+	transport.Proxy = nil
+	applyAttemptTimeout(transport, timeout)
+	return transport
 }
 
 func (s *Settings) ProxyURL() (*url.URL, error) {

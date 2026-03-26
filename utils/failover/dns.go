@@ -615,7 +615,7 @@ type cloudflareDNSRecord struct {
 func newCloudflareDNSClient(token string) *cloudflareDNSClient {
 	return &cloudflareDNSClient{
 		token:      strings.TrimSpace(token),
-		httpClient: outboundproxy.NewHTTPClient(20 * time.Second),
+		httpClient: outboundproxy.NewDirectHTTPClient(20 * time.Second),
 	}
 }
 
@@ -790,7 +790,7 @@ func newAliyunDNSClient(accessKeyID, accessKeySecret, regionID string) *aliyunDN
 		accessKeyID:     strings.TrimSpace(accessKeyID),
 		accessKeySecret: strings.TrimSpace(accessKeySecret),
 		endpoint:        endpoint,
-		httpClient:      outboundproxy.NewHTTPClient(20 * time.Second),
+		httpClient:      outboundproxy.NewDirectHTTPClient(20 * time.Second),
 	}
 }
 
