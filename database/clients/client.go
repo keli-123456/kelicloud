@@ -259,8 +259,7 @@ func saveClientForUserWithDB(db *gorm.DB, userUUID string, updates map[string]in
 	}
 	return nil
 }
-func SaveClientInfo(update map[string]interface{}) error {
-	db := dbcore.GetDBInstance()
+func saveClientInfoWithDB(db *gorm.DB, update map[string]interface{}) error {
 	clientUUID, ok := update["uuid"].(string)
 	if !ok || clientUUID == "" {
 		return fmt.Errorf("invalid client UUID")
@@ -272,6 +271,7 @@ func SaveClientInfo(update map[string]interface{}) error {
 	}
 
 	update["updated_at"] = time.Now()
+	update["latest_online"] = time.Now()
 
 	checkInt64 := func(name string, val float64) error {
 		if val < 0 {
@@ -306,6 +306,32 @@ func SaveClientInfo(update map[string]interface{}) error {
 	err := db.Model(&models.Client{}).Where("uuid = ?", clientUUID).Updates(update).Error
 	if err != nil {
 		return err
+	}
+	return nil
+}
+
+func SaveClientInfo(update map[string]interface{}) error {
+	return saveClientInfoWithDB(dbcore.GetDBInstance(), update)
+}
+
+func UpdateClientLatestOnline(clientUUID string, observedAt time.Time) error {
+	db := dbcore.GetDBInstance()
+	clientUUID = strings.TrimSpace(clientUUID)
+	if clientUUID == "" {
+		return fmt.Errorf("invalid client UUID")
+	}
+	if observedAt.IsZero() {
+		observedAt = time.Now()
+	}
+
+	result := db.Model(&models.Client{}).
+		Where("uuid = ?", clientUUID).
+		Update("latest_online", models.FromTime(observedAt))
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return gorm.ErrRecordNotFound
 	}
 	return nil
 }

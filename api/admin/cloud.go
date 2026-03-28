@@ -91,6 +91,48 @@ type createDigitalOceanDropletResponse struct {
 	PasswordSaveError string                                  `json:"password_save_error,omitempty"`
 }
 
+func persistDigitalOceanDropletPassword(scope ownerScope, addition *digitalocean.Addition, token *digitalocean.TokenRecord, dropletID int, dropletName, passwordMode, rootPassword string) (*digitalocean.Addition, error) {
+	if addition == nil || token == nil || dropletID <= 0 || strings.TrimSpace(rootPassword) == "" {
+		return nil, errors.New("root password persistence requires a droplet and an active token")
+	}
+
+	if err := token.SaveDropletPassword(dropletID, dropletName, passwordMode, rootPassword, time.Now()); err != nil {
+		return nil, err
+	}
+
+	verifyPersistedPassword := func() (*digitalocean.Addition, error) {
+		_, persistedAddition, err := loadDigitalOceanAddition(scope, false)
+		if err != nil {
+			return nil, err
+		}
+		if !persistedAddition.HasSavedDropletPassword(dropletID) {
+			return nil, errors.New("saved root password was not found after persistence")
+		}
+		return persistedAddition, nil
+	}
+
+	if err := saveDigitalOceanAdditionPreservingSecrets(scope, addition); err != nil {
+		token.RemoveSavedDropletPassword(dropletID)
+		return nil, fmt.Errorf("Failed to save root password: %w", err)
+	}
+
+	if persistedAddition, err := verifyPersistedPassword(); err == nil {
+		return persistedAddition, nil
+	}
+
+	if err := saveDigitalOceanAddition(scope, addition); err != nil {
+		token.RemoveSavedDropletPassword(dropletID)
+		return nil, fmt.Errorf("Failed to save root password: %w", err)
+	}
+
+	persistedAddition, err := verifyPersistedPassword()
+	if err != nil {
+		token.RemoveSavedDropletPassword(dropletID)
+		return nil, fmt.Errorf("Failed to verify saved root password: %w", err)
+	}
+	return persistedAddition, nil
+}
+
 func GetCloudProviders(c *gin.Context) {
 	providers := factory.GetProviderConfigs()
 	filtered := make(map[string]interface{}, len(providers))
@@ -768,14 +810,15 @@ func CreateDigitalOceanDroplet(c *gin.Context) {
 
 	passwordSaved := false
 	passwordSaveError := ""
+	responseAddition := addition
 	if droplet != nil && rootPassword != "" && activeToken != nil {
-		if saveErr := activeToken.SaveDropletPassword(droplet.ID, droplet.Name, passwordMode, rootPassword, time.Now()); saveErr != nil {
+		persistedAddition, saveErr := persistDigitalOceanDropletPassword(scope, addition, activeToken, droplet.ID, droplet.Name, passwordMode, rootPassword)
+		if saveErr != nil {
 			passwordSaveError = saveErr.Error()
-		} else if saveErr := saveDigitalOceanAdditionPreservingSecrets(scope, addition); saveErr != nil {
-			activeToken.RemoveSavedDropletPassword(droplet.ID)
-			passwordSaveError = "Failed to save root password: " + saveErr.Error()
+			responseAddition = nil
 		} else {
 			passwordSaved = true
+			responseAddition = persistedAddition
 		}
 	}
 
@@ -786,7 +829,7 @@ func CreateDigitalOceanDroplet(c *gin.Context) {
 	logMessage += ")"
 	logCloudAudit(c, logMessage)
 	api.RespondSuccess(c, createDigitalOceanDropletResponse{
-		Droplet:           buildDigitalOceanDropletView(droplet, addition),
+		Droplet:           buildDigitalOceanDropletView(droplet, responseAddition),
 		GeneratedPassword: generatedPassword,
 		ManagedSSHKey:     managedSSHKey,
 		PasswordSaved:     passwordSaved,

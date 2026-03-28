@@ -160,6 +160,9 @@ CREATE TABLE configs (
   cn_connectivity_enabled TINYINT(1) DEFAULT 0,
   cn_connectivity_target VARCHAR(255) DEFAULT '',
   cn_connectivity_interval INT DEFAULT 60,
+  cn_connectivity_retry_attempts INT DEFAULT 3,
+  cn_connectivity_retry_delay_seconds INT DEFAULT 1,
+  cn_connectivity_timeout_seconds INT DEFAULT 5,
   send_ip_addr_to_guest TINYINT(1) DEFAULT 0,
   eula_accepted TINYINT(1) DEFAULT 0,
   base_scripts_url VARCHAR(255) DEFAULT '',
@@ -192,6 +195,7 @@ CREATE TABLE configs (
 INSERT INTO configs (
   sitename, description, allow_cors, api_key, auto_discovery_key, script_domain,
   cn_connectivity_enabled, cn_connectivity_target, cn_connectivity_interval,
+  cn_connectivity_retry_attempts, cn_connectivity_retry_delay_seconds, cn_connectivity_timeout_seconds,
   send_ip_addr_to_guest, eula_accepted, base_scripts_url, geo_ip_enabled,
   geo_ip_provider, nezha_compat_enabled, nezha_compat_listen, o_auth_enabled,
   o_auth_provider, disable_password_login, custom_head, custom_body,
@@ -201,7 +205,7 @@ INSERT INTO configs (
   ping_record_preserve_time, theme, private_site, created_at, updated_at
 ) VALUES (
   'Legacy Komari', 'legacy config migration check', 1, 'legacy-api-key', 'legacy-discovery-key', 'https://legacy-scripts.example.com',
-  1, '223.5.5.5', 90,
+  1, '223.5.5.5', 90, 4, 2, 8,
   1, 1, 'https://mirror.example.com/scripts', 1,
   'geojs', 1, '0.0.0.0:5555', 1,
   'github', 0, '<meta name="legacy" content="1">', '<script>window.__legacy=true</script>',

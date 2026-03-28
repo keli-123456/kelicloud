@@ -12,6 +12,9 @@ type Config struct {
 	CNConnectivityEnabled  bool   `json:"cn_connectivity_enabled" gorm:"default:false"`               // 是否启用国内连通性探测
 	CNConnectivityTarget   string `json:"cn_connectivity_target" gorm:"type:varchar(255);default:''"` // 国内连通性探测目标
 	CNConnectivityInterval int    `json:"cn_connectivity_interval" gorm:"default:60"`                 // 国内连通性探测间隔，单位秒
+	CNConnectivityRetry    int    `json:"cn_connectivity_retry_attempts" gorm:"default:3"`            // 国内连通性探测单目标重试次数
+	CNConnectivityRetryGap int    `json:"cn_connectivity_retry_delay_seconds" gorm:"default:1"`       // 国内连通性探测单目标重试间隔，单位秒
+	CNConnectivityTimeout  int    `json:"cn_connectivity_timeout_seconds" gorm:"default:5"`           // 国内连通性探测单次超时时间，单位秒
 	SendIpAddrToGuest      bool   `json:"send_ip_addr_to_guest" gorm:"default:false"`                 // 是否向访客页面发送 IP 地址，默认 false
 	EulaAccepted           bool   `json:"eula_accepted" gorm:"default:false"`
 	// GeoIP 配置

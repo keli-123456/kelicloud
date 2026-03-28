@@ -15,6 +15,7 @@ import (
 	"github.com/komari-monitor/komari/common"
 	"github.com/komari-monitor/komari/config"
 	"github.com/komari-monitor/komari/database/auditlog"
+	"github.com/komari-monitor/komari/database/clients"
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/utils/geoip"
@@ -25,6 +26,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/metadata"
+	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
 
@@ -193,6 +195,7 @@ func (s *nezhaCompatServer) ReportSystemState(stream proto.NezhaService_ReportSy
 		ws.SetPresence(uuid, connID, false)
 		notifier.OfflineNotification(uuid, connID)
 	}()
+	lastPersistedOnlineAt := time.Time{}
 	for {
 		st, err := stream.Recv()
 		if err == io.EOF {
@@ -203,6 +206,14 @@ func (s *nezhaCompatServer) ReportSystemState(stream proto.NezhaService_ReportSy
 		}
 		// refresh presence TTL on every frame
 		ws.KeepAlivePresence(uuid, connID, 30*time.Second)
+		now := time.Now()
+		if lastPersistedOnlineAt.IsZero() || now.Sub(lastPersistedOnlineAt) >= time.Minute {
+			if err := clients.UpdateClientLatestOnline(uuid, now); err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+				log.Printf("Nezha update latest online error: %v", err)
+			} else if err == nil {
+				lastPersistedOnlineAt = now
+			}
+		}
 		if err := ingestState(uuid, st); err != nil {
 			// still ack to avoid client stuck; log error
 			log.Printf("Nezha ingest state error: %v", err)

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/komari-monitor/komari/api"
@@ -12,6 +13,7 @@ import (
 	"github.com/komari-monitor/komari/database/accounts"
 	"github.com/komari-monitor/komari/database/records"
 	"github.com/komari-monitor/komari/database/tasks"
+	"github.com/komari-monitor/komari/utils/offlinecleanup"
 	"github.com/komari-monitor/komari/utils/outboundproxy"
 
 	"github.com/gin-gonic/gin"
@@ -19,53 +21,66 @@ import (
 )
 
 var systemSettingKeys = map[string]struct{}{
-	config.SitenameKey:                   {},
-	config.DescriptionKey:                {},
-	config.AllowCorsKey:                  {},
-	config.ApiKeyKey:                     {},
-	config.CustomHeadKey:                 {},
-	config.CustomBodyKey:                 {},
-	config.CNConnectivityEnabledKey:      {},
-	config.CNConnectivityTargetKey:       {},
-	config.CNConnectivityIntervalKey:     {},
-	config.OutboundProxyEnabledKey:       {},
-	config.OutboundProxyProtocolKey:      {},
-	config.OutboundProxyHostKey:          {},
-	config.OutboundProxyPortKey:          {},
-	config.OutboundProxyUsernameKey:      {},
-	config.OutboundProxyPasswordKey:      {},
-	config.EulaAcceptedKey:               {},
-	config.GeoIpEnabledKey:               {},
-	config.GeoIpProviderKey:              {},
-	config.NezhaCompatEnabledKey:         {},
-	config.NezhaCompatListenKey:          {},
-	config.OAuthEnabledKey:               {},
-	config.OAuthProviderKey:              {},
-	config.DisablePasswordLoginKey:       {},
-	config.NotificationEnabledKey:        {},
-	config.NotificationMethodKey:         {},
-	config.NotificationTemplateKey:       {},
-	config.ExpireNotificationEnabledKey:  {},
-	config.ExpireNotificationLeadDaysKey: {},
-	config.LoginNotificationKey:          {},
-	config.TrafficLimitPercentageKey:     {},
-	config.RecordEnabledKey:              {},
-	config.RecordPreserveTimeKey:         {},
-	config.PingRecordPreserveTimeKey:     {},
+	config.SitenameKey:                        {},
+	config.DescriptionKey:                     {},
+	config.AllowCorsKey:                       {},
+	config.ApiKeyKey:                          {},
+	config.CustomHeadKey:                      {},
+	config.CustomBodyKey:                      {},
+	config.CNConnectivityEnabledKey:           {},
+	config.CNConnectivityTargetKey:            {},
+	config.CNConnectivityIntervalKey:          {},
+	config.CNConnectivityRetryAttemptsKey:     {},
+	config.CNConnectivityRetryDelaySecondsKey: {},
+	config.CNConnectivityTimeoutSecondsKey:    {},
+	config.OutboundProxyEnabledKey:            {},
+	config.OutboundProxyProtocolKey:           {},
+	config.OutboundProxyHostKey:               {},
+	config.OutboundProxyPortKey:               {},
+	config.OutboundProxyUsernameKey:           {},
+	config.OutboundProxyPasswordKey:           {},
+	config.EulaAcceptedKey:                    {},
+	config.GeoIpEnabledKey:                    {},
+	config.GeoIpProviderKey:                   {},
+	config.NezhaCompatEnabledKey:              {},
+	config.NezhaCompatListenKey:               {},
+	config.OAuthEnabledKey:                    {},
+	config.OAuthProviderKey:                   {},
+	config.DisablePasswordLoginKey:            {},
+	config.NotificationEnabledKey:             {},
+	config.NotificationMethodKey:              {},
+	config.NotificationTemplateKey:            {},
+	config.ExpireNotificationEnabledKey:       {},
+	config.ExpireNotificationLeadDaysKey:      {},
+	config.LoginNotificationKey:               {},
+	config.TrafficLimitPercentageKey:          {},
+	config.RecordEnabledKey:                   {},
+	config.RecordPreserveTimeKey:              {},
+	config.PingRecordPreserveTimeKey:          {},
+	config.OfflineCleanupEnabledKey:           {},
+	config.OfflineCleanupTimeKey:              {},
+	config.OfflineCleanupGraceHoursKey:        {},
+	config.OfflineCleanupLastRunAtKey:         {},
 }
 
 var readableSystemSettingKeys = map[string]struct{}{
-	config.CNConnectivityEnabledKey:  {},
-	config.CNConnectivityTargetKey:   {},
-	config.CNConnectivityIntervalKey: {},
-	config.NotificationEnabledKey:    {},
-	config.NotificationMethodKey:     {},
+	config.CNConnectivityEnabledKey:           {},
+	config.CNConnectivityTargetKey:            {},
+	config.CNConnectivityIntervalKey:          {},
+	config.CNConnectivityRetryAttemptsKey:     {},
+	config.CNConnectivityRetryDelaySecondsKey: {},
+	config.CNConnectivityTimeoutSecondsKey:    {},
+	config.NotificationEnabledKey:             {},
+	config.NotificationMethodKey:              {},
 }
 
 var delegatedSystemSettingFeatures = map[string]string{
-	config.CNConnectivityEnabledKey:  config.UserFeatureCNConnectivity,
-	config.CNConnectivityTargetKey:   config.UserFeatureCNConnectivity,
-	config.CNConnectivityIntervalKey: config.UserFeatureCNConnectivity,
+	config.CNConnectivityEnabledKey:           config.UserFeatureCNConnectivity,
+	config.CNConnectivityTargetKey:            config.UserFeatureCNConnectivity,
+	config.CNConnectivityIntervalKey:          config.UserFeatureCNConnectivity,
+	config.CNConnectivityRetryAttemptsKey:     config.UserFeatureCNConnectivity,
+	config.CNConnectivityRetryDelaySecondsKey: config.UserFeatureCNConnectivity,
+	config.CNConnectivityTimeoutSecondsKey:    config.UserFeatureCNConnectivity,
 }
 
 func isSystemSettingKey(key string) bool {
@@ -338,6 +353,10 @@ func EditSettings(c *gin.Context) {
 			editableSystemValues[key] = value
 		}
 		if len(editableSystemValues) > 0 {
+			if err := validateSystemSettingUpdates(editableSystemValues); err != nil {
+				api.RespondError(c, 400, "Invalid system settings: "+err.Error())
+				return
+			}
 			if err := config.SetMany(editableSystemValues); err != nil {
 				api.RespondError(c, 500, "Failed to update system settings: "+err.Error())
 				return
@@ -386,6 +405,10 @@ func EditSystemSettings(c *gin.Context) {
 	}
 
 	filtered := filterSystemSettings(cfg)
+	if err := validateSystemSettingUpdates(filtered); err != nil {
+		api.RespondError(c, 400, "Invalid system settings: "+err.Error())
+		return
+	}
 	if err := config.SetMany(filtered); err != nil {
 		api.RespondError(c, 500, "Failed to update system settings: "+err.Error())
 		return
@@ -406,6 +429,69 @@ func EditSystemSettings(c *gin.Context) {
 		api.AuditLogForCurrentUser(c, uuid.(string), message, "info")
 	}
 	api.RespondSuccess(c, nil)
+}
+
+func validateSystemSettingUpdates(values map[string]any) error {
+	if rawTime, exists := values[config.OfflineCleanupTimeKey]; exists {
+		rawString, ok := rawTime.(string)
+		if !ok {
+			return fmt.Errorf("%s must be a string", config.OfflineCleanupTimeKey)
+		}
+		normalized, err := offlinecleanup.NormalizeDailyCleanupTime(rawString)
+		if err != nil {
+			return err
+		}
+		values[config.OfflineCleanupTimeKey] = normalized
+	}
+
+	if rawEnabled, exists := values[config.OfflineCleanupEnabledKey]; exists {
+		if _, ok := rawEnabled.(bool); !ok {
+			return fmt.Errorf("%s must be a boolean", config.OfflineCleanupEnabledKey)
+		}
+	}
+
+	for _, integerKey := range []string{
+		config.CNConnectivityIntervalKey,
+		config.CNConnectivityRetryAttemptsKey,
+		config.CNConnectivityRetryDelaySecondsKey,
+		config.CNConnectivityTimeoutSecondsKey,
+	} {
+		rawValue, exists := values[integerKey]
+		if !exists {
+			continue
+		}
+		switch value := rawValue.(type) {
+		case float64:
+			if value < 1 || value != float64(int(value)) {
+				return fmt.Errorf("%s must be an integer greater than 0", integerKey)
+			}
+			values[integerKey] = int(value)
+		case int:
+			if value < 1 {
+				return fmt.Errorf("%s must be greater than 0", integerKey)
+			}
+		default:
+			return fmt.Errorf("%s must be an integer", integerKey)
+		}
+	}
+
+	if rawGraceHours, exists := values[config.OfflineCleanupGraceHoursKey]; exists {
+		switch value := rawGraceHours.(type) {
+		case float64:
+			if value < 1 || value != float64(int(value)) {
+				return fmt.Errorf("%s must be an integer greater than 0", config.OfflineCleanupGraceHoursKey)
+			}
+			values[config.OfflineCleanupGraceHoursKey] = int(value)
+		case int:
+			if value < 1 {
+				return fmt.Errorf("%s must be greater than 0", config.OfflineCleanupGraceHoursKey)
+			}
+		default:
+			return fmt.Errorf("%s must be an integer", config.OfflineCleanupGraceHoursKey)
+		}
+	}
+
+	return nil
 }
 
 func ClearAllRecords(c *gin.Context) {

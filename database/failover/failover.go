@@ -85,6 +85,9 @@ func applyPlanDefaults(plan *models.FailoverPlan) {
 	plan.ProviderEntryID = strings.TrimSpace(plan.ProviderEntryID)
 	plan.ActionType = strings.TrimSpace(plan.ActionType)
 	plan.AutoConnectGroup = strings.TrimSpace(plan.AutoConnectGroup)
+	scriptClipboardIDs := models.NormalizeFailoverScriptClipboardIDs(plan.ScriptClipboardID, plan.ScriptClipboardIDs)
+	plan.ScriptClipboardID = models.FirstFailoverScriptClipboardID(scriptClipboardIDs)
+	plan.ScriptClipboardIDs = models.EncodeFailoverScriptClipboardIDs(scriptClipboardIDs)
 
 	if plan.Priority <= 0 {
 		plan.Priority = 1

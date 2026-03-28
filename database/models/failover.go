@@ -1,5 +1,10 @@
 package models
 
+import (
+	"encoding/json"
+	"strings"
+)
+
 const (
 	FailoverTriggerSourceCNConnectivity = "cn_connectivity"
 )
@@ -116,6 +121,7 @@ type FailoverPlan struct {
 	Payload             string    `json:"payload" gorm:"type:longtext"`
 	AutoConnectGroup    string    `json:"auto_connect_group" gorm:"type:varchar(100)"`
 	ScriptClipboardID   *int      `json:"script_clipboard_id,omitempty" gorm:"index"`
+	ScriptClipboardIDs  string    `json:"script_clipboard_ids,omitempty" gorm:"type:longtext"`
 	ScriptTimeoutSec    int       `json:"script_timeout_sec" gorm:"type:int;not null;default:600"`
 	WaitAgentTimeoutSec int       `json:"wait_agent_timeout_sec" gorm:"type:int;not null;default:600"`
 	CreatedAt           LocalTime `json:"created_at"`
@@ -138,6 +144,7 @@ type FailoverExecution struct {
 	NewInstanceRef        string                  `json:"new_instance_ref" gorm:"type:longtext"`
 	NewAddresses          string                  `json:"new_addresses" gorm:"type:longtext"`
 	ScriptClipboardID     *int                    `json:"script_clipboard_id,omitempty" gorm:"index"`
+	ScriptClipboardIDs    string                  `json:"script_clipboard_ids,omitempty" gorm:"type:longtext"`
 	ScriptNameSnapshot    string                  `json:"script_name_snapshot" gorm:"type:varchar(255)"`
 	ScriptTaskID          string                  `json:"script_task_id" gorm:"type:varchar(64);index"`
 	ScriptStatus          string                  `json:"script_status" gorm:"type:varchar(32);not null;default:'pending'"`
@@ -156,6 +163,76 @@ type FailoverExecution struct {
 	Steps                 []FailoverExecutionStep `json:"steps,omitempty" gorm:"foreignKey:ExecutionID;references:ID;constraint:OnDelete:CASCADE,OnUpdate:CASCADE"`
 	CreatedAt             LocalTime               `json:"created_at"`
 	UpdatedAt             LocalTime               `json:"updated_at"`
+}
+
+func NormalizeFailoverScriptClipboardIDs(primary *int, raw string) []int {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed != "" {
+		var parsed []int
+		if err := json.Unmarshal([]byte(trimmed), &parsed); err == nil {
+			return normalizeFailoverScriptClipboardIDList(parsed)
+		}
+	}
+
+	if primary == nil || *primary <= 0 {
+		return nil
+	}
+	return []int{*primary}
+}
+
+func EncodeFailoverScriptClipboardIDs(ids []int) string {
+	normalized := normalizeFailoverScriptClipboardIDList(ids)
+	if len(normalized) == 0 {
+		return ""
+	}
+
+	payload, err := json.Marshal(normalized)
+	if err != nil {
+		return ""
+	}
+	return string(payload)
+}
+
+func FirstFailoverScriptClipboardID(ids []int) *int {
+	normalized := normalizeFailoverScriptClipboardIDList(ids)
+	if len(normalized) == 0 {
+		return nil
+	}
+
+	id := normalized[0]
+	return &id
+}
+
+func (p FailoverPlan) EffectiveScriptClipboardIDs() []int {
+	return NormalizeFailoverScriptClipboardIDs(p.ScriptClipboardID, p.ScriptClipboardIDs)
+}
+
+func (e FailoverExecution) EffectiveScriptClipboardIDs() []int {
+	return NormalizeFailoverScriptClipboardIDs(e.ScriptClipboardID, e.ScriptClipboardIDs)
+}
+
+func normalizeFailoverScriptClipboardIDList(ids []int) []int {
+	if len(ids) == 0 {
+		return nil
+	}
+
+	normalized := make([]int, 0, len(ids))
+	seen := make(map[int]struct{}, len(ids))
+	for _, id := range ids {
+		if id <= 0 {
+			continue
+		}
+		if _, exists := seen[id]; exists {
+			continue
+		}
+		seen[id] = struct{}{}
+		normalized = append(normalized, id)
+	}
+
+	if len(normalized) == 0 {
+		return nil
+	}
+	return normalized
 }
 
 type FailoverExecutionStep struct {

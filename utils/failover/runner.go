@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gorilla/websocket"
 	"github.com/komari-monitor/komari/common"
@@ -498,32 +499,24 @@ func (r *executionRunner) executePlanActionWithProviderPool(plan models.Failover
 			candidateDetail["active"] = true
 		}
 
-		lease, availability, reserveErr := acquireProviderEntryLease(r.task.UserID, plan, candidate)
-		if len(availability) > 0 {
-			candidateDetail["availability"] = availability
-		}
-		if reserveErr != nil && strings.TrimSpace(plan.ActionType) == models.FailoverActionProvisionInstance && strings.TrimSpace(stringMapValue(availability, "status")) == "full" {
+		if strings.TrimSpace(plan.ActionType) == models.FailoverActionProvisionInstance {
 			recycledDetail, recycleErr := r.recycleCurrentOutletForCandidate(plan, candidate)
 			if recycleErr != nil {
-				candidateDetail["recycle_error"] = recycleErr.Error()
-			} else if len(recycledDetail) > 0 {
+				candidateDetail["status"] = "failed"
+				candidateDetail["error"] = recycleErr.Error()
+				candidateDetail["failure_class"] = "pre_reclaim_error"
+				entryAttempts = append(entryAttempts, candidateDetail)
+				continue
+			}
+			if len(recycledDetail) > 0 {
 				candidateDetail["recycled_current_instance"] = recycledDetail
 				invalidateProviderEntrySnapshot(r.task.UserID, plan.Provider, candidate.EntryID)
-				lease, availability, reserveErr = acquireProviderEntryLease(r.task.UserID, plan, candidate)
-				if len(availability) > 0 {
-					candidateDetail["availability"] = availability
-				}
 			}
-		}
-		if reserveErr != nil {
-			candidateDetail["status"] = "skipped"
-			candidateDetail["error"] = reserveErr.Error()
-			entryAttempts = append(entryAttempts, candidateDetail)
-			continue
 		}
 
 		selectedPlan := plan
 		selectedPlan.ProviderEntryID = candidate.EntryID
+		isProvisionPlan := strings.TrimSpace(selectedPlan.ActionType) == models.FailoverActionProvisionInstance
 		maxAttempts := providerEntryMaxAttempts(selectedPlan)
 		for attemptNumber := 1; attemptNumber <= maxAttempts; attemptNumber++ {
 			if err := r.checkStopped(); err != nil {
@@ -535,11 +528,45 @@ func (r *executionRunner) executePlanActionWithProviderPool(plan models.Failover
 			}
 			attemptDetail["attempt"] = attemptNumber
 
-			finishOperation := func() {}
+			lease, availability, reserveErr := acquireProviderEntryLease(r.task.UserID, selectedPlan, candidate)
+			if len(availability) > 0 {
+				attemptDetail["availability"] = availability
+			}
+			if reserveErr != nil && isProvisionPlan && strings.TrimSpace(stringMapValue(availability, "status")) == "full" {
+				recycledDetail, recycleErr := r.recycleCurrentOutletForCandidate(selectedPlan, candidate)
+				if recycleErr != nil {
+					attemptDetail["recycle_error"] = recycleErr.Error()
+				} else if len(recycledDetail) > 0 {
+					attemptDetail["recycled_current_instance"] = recycledDetail
+					invalidateProviderEntrySnapshot(r.task.UserID, plan.Provider, candidate.EntryID)
+					lease, availability, reserveErr = acquireProviderEntryLease(r.task.UserID, selectedPlan, candidate)
+					if len(availability) > 0 {
+						attemptDetail["availability"] = availability
+					}
+				}
+			}
+			if reserveErr != nil {
+				attemptDetail["status"] = "skipped"
+				attemptDetail["error"] = reserveErr.Error()
+				entryAttempts = append(entryAttempts, attemptDetail)
+				goto nextCandidate
+			}
+
+			var finishOperation func()
+			releaseProvisioningWindow := func(provisioned bool) {
+				if lease != nil {
+					lease.Release(provisioned)
+					lease = nil
+				}
+				if finishOperation != nil {
+					finishOperation()
+					finishOperation = nil
+				}
+			}
 			if shouldSerializeProviderOperation(selectedPlan) {
 				serialDone, serialErr := lease.BeginSerializedOperation(providerEntryOperationSpacing(selectedPlan))
 				if serialErr != nil {
-					lease.Release(false)
+					releaseProvisioningWindow(false)
 					attemptDetail["status"] = "skipped"
 					attemptDetail["error"] = serialErr.Error()
 					entryAttempts = append(entryAttempts, attemptDetail)
@@ -550,8 +577,7 @@ func (r *executionRunner) executePlanActionWithProviderPool(plan models.Failover
 
 			outcome, actionErr := r.executePlanAction(selectedPlan)
 			if actionErr != nil {
-				lease.Release(false)
-				finishOperation()
+				releaseProvisioningWindow(false)
 				if errors.Is(actionErr, errExecutionStopped) {
 					attemptDetail["status"] = "failed"
 					attemptDetail["error"] = actionErr.Error()
@@ -566,23 +592,24 @@ func (r *executionRunner) executePlanActionWithProviderPool(plan models.Failover
 				entryAttempts = append(entryAttempts, attemptDetail)
 				goto nextCandidate
 			}
-			if strings.TrimSpace(selectedPlan.ActionType) == models.FailoverActionProvisionInstance {
+			if isProvisionPlan {
 				if cleanupErr := r.attachCurrentOutletCleanup(outcome, selectedPlan, candidate); cleanupErr != nil {
-					lease.Release(false)
-					finishOperation()
+					releaseProvisioningWindow(false)
 					attemptDetail["status"] = "failed"
 					attemptDetail["error"] = cleanupErr.Error()
 					attemptDetail["failure_class"] = "post_provision_error"
 					entryAttempts = append(entryAttempts, attemptDetail)
 					goto nextCandidate
 				}
+
+				// Only the create-instance phase should occupy the provider queue.
+				releaseProvisioningWindow(true)
 			}
 
 			finalizeErr := r.finalizePlan(selectedPlan, outcome)
 			if finalizeErr != nil {
-				finishOperation()
 				if errors.Is(finalizeErr, errExecutionStopped) {
-					lease.Release(false)
+					releaseProvisioningWindow(false)
 					attemptDetail["status"] = "failed"
 					attemptDetail["error"] = finalizeErr.Error()
 					entryAttempts = append(entryAttempts, attemptDetail)
@@ -602,15 +629,14 @@ func (r *executionRunner) executePlanActionWithProviderPool(plan models.Failover
 						Cooldown: executionDecision.Cooldown,
 					}, finalizeErr)
 				}
-				lease.Release(false)
+				releaseProvisioningWindow(false)
 				attemptDetail["status"] = "failed"
 				entryAttempts = append(entryAttempts, attemptDetail)
 				goto nextCandidate
 			}
 
-			lease.Release(strings.TrimSpace(plan.ActionType) == models.FailoverActionProvisionInstance)
+			releaseProvisioningWindow(isProvisionPlan)
 			clearProviderEntryCooldown(r.task.UserID, plan.Provider, candidate.EntryID)
-			finishOperation()
 			attemptDetail["status"] = "success"
 			entryAttempts = append(entryAttempts, attemptDetail)
 			return outcome, candidate.EntryID, entryAttempts, nil
@@ -916,23 +942,26 @@ func (r *executionRunner) finalizePlan(plan models.FailoverPlan, outcome *action
 		return validationErr
 	}
 
-	if plan.ScriptClipboardID != nil {
+	scriptClipboardIDs := plan.EffectiveScriptClipboardIDs()
+	if len(scriptClipboardIDs) > 0 {
 		if targetClientUUID == "" {
 			return errors.New("script execution requires a target client but none became available")
 		}
 
-		scriptStep := r.startStep("run_script", "Run Script", map[string]interface{}{
-			"clipboard_id": *plan.ScriptClipboardID,
-			"client_uuid":  targetClientUUID,
+		scriptStep := r.startStep("run_scripts", "Run Scripts", map[string]interface{}{
+			"clipboard_ids": scriptClipboardIDs,
+			"client_uuid":   targetClientUUID,
 		})
 		_ = failoverdb.UpdateExecutionFields(r.execution.ID, map[string]interface{}{
 			"status": models.FailoverExecutionStatusRunningScript,
 		})
-		if err := r.runScript(plan, targetClientUUID); err != nil {
+		if err := r.runScripts(plan, targetClientUUID); err != nil {
 			r.finishStep(scriptStep, models.FailoverStepStatusFailed, err.Error(), nil)
 			return err
 		}
-		r.finishStep(scriptStep, models.FailoverStepStatusSuccess, "script finished successfully", nil)
+		r.finishStep(scriptStep, models.FailoverStepStatusSuccess, "scripts finished successfully", map[string]interface{}{
+			"count": len(scriptClipboardIDs),
+		})
 	}
 
 	if strings.TrimSpace(r.task.DNSProvider) == "" || strings.TrimSpace(r.task.DNSEntryID) == "" {
@@ -971,6 +1000,84 @@ func (r *executionRunner) finalizePlan(plan models.FailoverPlan, outcome *action
 	})
 	r.finishStep(dnsStep, models.FailoverStepStatusSuccess, "dns updated", dnsResult)
 	return nil
+}
+
+func planHasScripts(plan models.FailoverPlan) bool {
+	return len(plan.EffectiveScriptClipboardIDs()) > 0
+}
+
+func joinScriptSnapshotNames(names []string) string {
+	filtered := make([]string, 0, len(names))
+	for _, name := range names {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		filtered = append(filtered, name)
+	}
+	return truncateUTF8String(strings.Join(filtered, ", "), 255)
+}
+
+func latestScriptTaskID(taskIDs []string) string {
+	for index := len(taskIDs) - 1; index >= 0; index-- {
+		taskID := strings.TrimSpace(taskIDs[index])
+		if taskID != "" {
+			return taskID
+		}
+	}
+	return ""
+}
+
+func joinScriptOutputs(names, outputs []string) string {
+	if len(outputs) == 0 {
+		return ""
+	}
+	if len(outputs) == 1 {
+		return outputs[0]
+	}
+
+	var builder strings.Builder
+	for index, output := range outputs {
+		if index > 0 {
+			builder.WriteString("\n\n")
+		}
+
+		name := strings.TrimSpace(fmt.Sprintf("Script %d", index+1))
+		if index < len(names) && strings.TrimSpace(names[index]) != "" {
+			name = strings.TrimSpace(names[index])
+		}
+		builder.WriteString("==> ")
+		builder.WriteString(name)
+		builder.WriteString(" <==")
+		if output != "" {
+			builder.WriteByte('\n')
+			builder.WriteString(output)
+		}
+	}
+	return builder.String()
+}
+
+func truncateUTF8String(value string, limit int) string {
+	if limit <= 0 || len(value) <= limit {
+		return value
+	}
+	if limit <= 3 {
+		return value[:limit]
+	}
+
+	var builder strings.Builder
+	remaining := limit - 3
+	used := 0
+	for _, r := range value {
+		runeLen := utf8.RuneLen(r)
+		if runeLen < 0 || used+runeLen > remaining {
+			break
+		}
+		builder.WriteRune(r)
+		used += runeLen
+	}
+	builder.WriteString("...")
+	return builder.String()
 }
 
 func (r *executionRunner) validateProvisionedOutlet(plan models.FailoverPlan, outcome *actionOutcome, targetClientUUID string) error {
@@ -1152,8 +1259,23 @@ func (r *executionRunner) rollbackOutcome(outcome *actionOutcome, originalErr er
 	detail := map[string]interface{}{
 		"label": outcome.RollbackLabel,
 	}
+	r.invalidateProvisionedEntrySnapshot(outcome)
 	r.finishStep(rollbackStep, models.FailoverStepStatusSuccess, "failed new instance deleted", detail)
 	return originalErr
+}
+
+func (r *executionRunner) invalidateProvisionedEntrySnapshot(outcome *actionOutcome) {
+	if outcome == nil || strings.TrimSpace(r.task.UserID) == "" {
+		return
+	}
+
+	provider := strings.TrimSpace(stringMapValue(outcome.NewInstanceRef, "provider"))
+	entryID := strings.TrimSpace(providerEntryIDFromRef(outcome.NewInstanceRef))
+	if provider == "" || entryID == "" {
+		return
+	}
+
+	invalidateProviderEntrySnapshot(r.task.UserID, provider, entryID)
 }
 
 func (r *executionRunner) executeProvisionPlan(plan models.FailoverPlan) (*actionOutcome, error) {
@@ -1222,55 +1344,133 @@ func (r *executionRunner) executeRebindPlan(plan models.FailoverPlan) (*actionOu
 	return outcome, nil
 }
 
-func (r *executionRunner) runScript(plan models.FailoverPlan, clientUUID string) error {
-	clipboard, err := clipboarddb.GetClipboardByIDForUser(*plan.ScriptClipboardID, r.task.UserID)
-	if err != nil {
-		return err
+func (r *executionRunner) runScripts(plan models.FailoverPlan, clientUUID string) error {
+	scriptClipboardIDs := plan.EffectiveScriptClipboardIDs()
+	if len(scriptClipboardIDs) == 0 {
+		return nil
 	}
 
-	result, err := dispatchScriptToClient(r.task.UserID, clientUUID, clipboard.Text, time.Duration(plan.ScriptTimeoutSec)*time.Second)
-	result = ensureCommandResult(result)
-	if err != nil {
-		status := models.FailoverScriptStatusFailed
-		if errors.Is(err, context.DeadlineExceeded) {
-			status = models.FailoverScriptStatusTimeout
+	primaryScriptClipboardID := models.FirstFailoverScriptClipboardID(scriptClipboardIDs)
+	encodedScriptClipboardIDs := models.EncodeFailoverScriptClipboardIDs(scriptClipboardIDs)
+	var primaryScriptClipboardValue interface{}
+	if primaryScriptClipboardID != nil {
+		primaryScriptClipboardValue = *primaryScriptClipboardID
+	}
+	scriptNames := make([]string, 0, len(scriptClipboardIDs))
+	scriptTaskIDs := make([]string, 0, len(scriptClipboardIDs))
+	scriptOutputs := make([]string, 0, len(scriptClipboardIDs))
+	scriptOutputTruncated := false
+	var lastExitCode *int
+	var lastFinishedAt *models.LocalTime
+
+	for index, scriptClipboardID := range scriptClipboardIDs {
+		clipboard, err := clipboarddb.GetClipboardByIDForUser(scriptClipboardID, r.task.UserID)
+		if err != nil {
+			return err
 		}
-		_ = failoverdb.UpdateExecutionFields(r.execution.ID, map[string]interface{}{
-			"script_clipboard_id":     clipboard.Id,
-			"script_name_snapshot":    clipboard.Name,
-			"script_task_id":          result.TaskID,
-			"script_status":           status,
-			"script_exit_code":        result.ExitCode,
-			"script_finished_at":      result.FinishedAt,
-			"script_output":           result.Output,
-			"script_output_truncated": result.Truncated,
-		})
-		return err
-	}
 
-	if execErr := commandResultExecutionError(result); execErr != nil {
+		scriptNames = append(scriptNames, clipboard.Name)
+		step := r.startStep(
+			fmt.Sprintf("run_script:%d:%d", clipboard.Id, index+1),
+			fmt.Sprintf("Run Script %d", index+1),
+			map[string]interface{}{
+				"clipboard_id": clipboard.Id,
+				"script_name":  clipboard.Name,
+				"client_uuid":  clientUUID,
+				"index":        index + 1,
+				"total":        len(scriptClipboardIDs),
+			},
+		)
 		_ = failoverdb.UpdateExecutionFields(r.execution.ID, map[string]interface{}{
-			"script_clipboard_id":     clipboard.Id,
-			"script_name_snapshot":    clipboard.Name,
-			"script_task_id":          result.TaskID,
-			"script_status":           models.FailoverScriptStatusFailed,
-			"script_exit_code":        result.ExitCode,
-			"script_finished_at":      result.FinishedAt,
-			"script_output":           result.Output,
-			"script_output_truncated": result.Truncated,
+			"script_clipboard_id":     primaryScriptClipboardValue,
+			"script_clipboard_ids":    encodedScriptClipboardIDs,
+			"script_name_snapshot":    joinScriptSnapshotNames(scriptNames),
+			"script_status":           models.FailoverScriptStatusRunning,
+			"script_task_id":          latestScriptTaskID(scriptTaskIDs),
+			"script_exit_code":        nil,
+			"script_finished_at":      nil,
+			"script_output":           joinScriptOutputs(scriptNames[:len(scriptOutputs)], scriptOutputs),
+			"script_output_truncated": scriptOutputTruncated,
 		})
-		return execErr
+
+		result, err := dispatchScriptToClient(r.task.UserID, clientUUID, clipboard.Text, time.Duration(plan.ScriptTimeoutSec)*time.Second)
+		result = ensureCommandResult(result)
+		scriptTaskIDs = append(scriptTaskIDs, result.TaskID)
+		scriptOutputs = append(scriptOutputs, result.Output)
+		scriptOutputTruncated = scriptOutputTruncated || result.Truncated
+		lastExitCode = result.ExitCode
+		lastFinishedAt = result.FinishedAt
+
+		if err != nil {
+			status := models.FailoverScriptStatusFailed
+			if errors.Is(err, context.DeadlineExceeded) {
+				status = models.FailoverScriptStatusTimeout
+			}
+			_ = failoverdb.UpdateExecutionFields(r.execution.ID, map[string]interface{}{
+				"script_clipboard_id":     primaryScriptClipboardValue,
+				"script_clipboard_ids":    encodedScriptClipboardIDs,
+				"script_name_snapshot":    joinScriptSnapshotNames(scriptNames),
+				"script_task_id":          latestScriptTaskID(scriptTaskIDs),
+				"script_status":           status,
+				"script_exit_code":        lastExitCode,
+				"script_finished_at":      lastFinishedAt,
+				"script_output":           joinScriptOutputs(scriptNames, scriptOutputs),
+				"script_output_truncated": scriptOutputTruncated,
+			})
+			r.finishStep(step, models.FailoverStepStatusFailed, err.Error(), map[string]interface{}{
+				"clipboard_id":            clipboard.Id,
+				"script_name":             clipboard.Name,
+				"task_id":                 result.TaskID,
+				"exit_code":               result.ExitCode,
+				"output_truncated":        result.Truncated,
+				"script_output_available": strings.TrimSpace(result.Output) != "",
+			})
+			return err
+		}
+
+		if execErr := commandResultExecutionError(result); execErr != nil {
+			_ = failoverdb.UpdateExecutionFields(r.execution.ID, map[string]interface{}{
+				"script_clipboard_id":     primaryScriptClipboardValue,
+				"script_clipboard_ids":    encodedScriptClipboardIDs,
+				"script_name_snapshot":    joinScriptSnapshotNames(scriptNames),
+				"script_task_id":          latestScriptTaskID(scriptTaskIDs),
+				"script_status":           models.FailoverScriptStatusFailed,
+				"script_exit_code":        lastExitCode,
+				"script_finished_at":      lastFinishedAt,
+				"script_output":           joinScriptOutputs(scriptNames, scriptOutputs),
+				"script_output_truncated": scriptOutputTruncated,
+			})
+			r.finishStep(step, models.FailoverStepStatusFailed, execErr.Error(), map[string]interface{}{
+				"clipboard_id":            clipboard.Id,
+				"script_name":             clipboard.Name,
+				"task_id":                 result.TaskID,
+				"exit_code":               result.ExitCode,
+				"output_truncated":        result.Truncated,
+				"script_output_available": strings.TrimSpace(result.Output) != "",
+			})
+			return execErr
+		}
+
+		r.finishStep(step, models.FailoverStepStatusSuccess, "script finished successfully", map[string]interface{}{
+			"clipboard_id":            clipboard.Id,
+			"script_name":             clipboard.Name,
+			"task_id":                 result.TaskID,
+			"exit_code":               result.ExitCode,
+			"output_truncated":        result.Truncated,
+			"script_output_available": strings.TrimSpace(result.Output) != "",
+		})
 	}
 
 	_ = failoverdb.UpdateExecutionFields(r.execution.ID, map[string]interface{}{
-		"script_clipboard_id":     clipboard.Id,
-		"script_name_snapshot":    clipboard.Name,
-		"script_task_id":          result.TaskID,
+		"script_clipboard_id":     primaryScriptClipboardValue,
+		"script_clipboard_ids":    encodedScriptClipboardIDs,
+		"script_name_snapshot":    joinScriptSnapshotNames(scriptNames),
+		"script_task_id":          latestScriptTaskID(scriptTaskIDs),
 		"script_status":           models.FailoverScriptStatusSuccess,
-		"script_exit_code":        result.ExitCode,
-		"script_finished_at":      result.FinishedAt,
-		"script_output":           result.Output,
-		"script_output_truncated": result.Truncated,
+		"script_exit_code":        lastExitCode,
+		"script_finished_at":      lastFinishedAt,
+		"script_output":           joinScriptOutputs(scriptNames, scriptOutputs),
+		"script_output_truncated": scriptOutputTruncated,
 	})
 	return nil
 }
@@ -1574,8 +1774,100 @@ func (r *executionRunner) recycleCurrentOutletForCandidate(plan models.FailoverP
 	if len(cleanup.Addresses) > 0 {
 		detail["addresses"] = cleanup.Addresses
 	}
+	r.task.CurrentInstanceRef = ""
+	r.task.CurrentAddress = ""
+	_ = failoverdb.UpdateTaskFields(r.task.ID, map[string]interface{}{
+		"current_instance_ref": "",
+		"current_address":      "",
+	})
 	r.finishStep(reclaimStep, models.FailoverStepStatusSuccess, "current failed outlet deleted to free capacity", detail)
 	return detail, nil
+}
+
+func resolveDigitalOceanCurrentInstanceCleanupForToken(userUUID, address string, tokenAddition *digitalocean.Addition, token *digitalocean.TokenRecord, entryID, entryName string) (*currentInstanceCleanup, error) {
+	if tokenAddition == nil || token == nil {
+		return nil, nil
+	}
+	client, err := digitalocean.NewClientFromToken(token.Token)
+	if err != nil {
+		return nil, err
+	}
+	droplets, err := client.ListDroplets(context.Background())
+	if err != nil {
+		return nil, err
+	}
+	for _, droplet := range droplets {
+		if !sameAddress(address, digitalOceanPublicIPv4(&droplet), digitalOceanPublicIPv6(&droplet)) {
+			continue
+		}
+		ref := map[string]interface{}{
+			"provider":            "digitalocean",
+			"provider_entry_id":   strings.TrimSpace(entryID),
+			"provider_entry_name": firstNonEmpty(strings.TrimSpace(entryName), strings.TrimSpace(token.Name)),
+			"droplet_id":          droplet.ID,
+			"name":                droplet.Name,
+			"region":              strings.TrimSpace(droplet.Region.Slug),
+		}
+		return &currentInstanceCleanup{
+			Ref: ref,
+			Addresses: map[string]interface{}{
+				"ipv4": droplet.Networks.V4,
+				"ipv6": droplet.Networks.V6,
+			},
+			Label: fmt.Sprintf("delete digitalocean droplet %d", droplet.ID),
+			Cleanup: func() error {
+				if err := client.DeleteDroplet(context.Background(), droplet.ID); err != nil {
+					return err
+				}
+				removeSavedDigitalOceanRootPassword(userUUID, tokenAddition, token, droplet.ID)
+				return nil
+			},
+		}, nil
+	}
+	return nil, nil
+}
+
+func resolveLinodeCurrentInstanceCleanupForToken(userUUID, address string, tokenAddition *linodecloud.Addition, token *linodecloud.TokenRecord, entryID, entryName string) (*currentInstanceCleanup, error) {
+	if tokenAddition == nil || token == nil {
+		return nil, nil
+	}
+	client, err := linodecloud.NewClientFromToken(token.Token)
+	if err != nil {
+		return nil, err
+	}
+	instances, err := client.ListInstances(context.Background())
+	if err != nil {
+		return nil, err
+	}
+	for _, instance := range instances {
+		if !sameAddress(address, append(append([]string(nil), instance.IPv4...), strings.TrimSpace(instance.IPv6))...) {
+			continue
+		}
+		ref := map[string]interface{}{
+			"provider":            "linode",
+			"provider_entry_id":   strings.TrimSpace(entryID),
+			"provider_entry_name": firstNonEmpty(strings.TrimSpace(entryName), strings.TrimSpace(token.Name)),
+			"instance_id":         instance.ID,
+			"label":               instance.Label,
+			"region":              instance.Region,
+		}
+		return &currentInstanceCleanup{
+			Ref: ref,
+			Addresses: map[string]interface{}{
+				"ipv4": instance.IPv4,
+				"ipv6": instance.IPv6,
+			},
+			Label: fmt.Sprintf("delete linode instance %d", instance.ID),
+			Cleanup: func() error {
+				if err := client.DeleteInstance(context.Background(), instance.ID); err != nil {
+					return err
+				}
+				removeSavedLinodeRootPassword(userUUID, tokenAddition, token, instance.ID)
+				return nil
+			},
+		}, nil
+	}
+	return nil, nil
 }
 
 func (r *executionRunner) resolveCurrentInstanceCleanupByAddress(plan models.FailoverPlan, candidate providerPoolCandidate) (*currentInstanceCleanup, error) {
@@ -1590,41 +1882,12 @@ func (r *executionRunner) resolveCurrentInstanceCleanupByAddress(plan models.Fai
 		if err != nil {
 			return nil, err
 		}
-		client, err := digitalocean.NewClientFromToken(token.Token)
+		cleanup, err := resolveDigitalOceanCurrentInstanceCleanupForToken(r.task.UserID, address, addition, token, candidate.EntryID, candidate.EntryName)
 		if err != nil {
 			return nil, err
 		}
-		droplets, err := client.ListDroplets(context.Background())
-		if err != nil {
-			return nil, err
-		}
-		for _, droplet := range droplets {
-			if !sameAddress(address, digitalOceanPublicIPv4(&droplet), digitalOceanPublicIPv6(&droplet)) {
-				continue
-			}
-			ref := map[string]interface{}{
-				"provider":            "digitalocean",
-				"provider_entry_id":   candidate.EntryID,
-				"provider_entry_name": candidate.EntryName,
-				"droplet_id":          droplet.ID,
-				"name":                droplet.Name,
-				"region":              strings.TrimSpace(droplet.Region.Slug),
-			}
-			return &currentInstanceCleanup{
-				Ref: ref,
-				Addresses: map[string]interface{}{
-					"ipv4": droplet.Networks.V4,
-					"ipv6": droplet.Networks.V6,
-				},
-				Label: fmt.Sprintf("delete digitalocean droplet %d", droplet.ID),
-				Cleanup: func() error {
-					if err := client.DeleteDroplet(context.Background(), droplet.ID); err != nil {
-						return err
-					}
-					removeSavedDigitalOceanRootPassword(r.task.UserID, addition, token, droplet.ID)
-					return nil
-				},
-			}, nil
+		if cleanup != nil {
+			return cleanup, nil
 		}
 		return nil, nil
 	case "linode":
@@ -1632,41 +1895,12 @@ func (r *executionRunner) resolveCurrentInstanceCleanupByAddress(plan models.Fai
 		if err != nil {
 			return nil, err
 		}
-		client, err := linodecloud.NewClientFromToken(token.Token)
+		cleanup, err := resolveLinodeCurrentInstanceCleanupForToken(r.task.UserID, address, addition, token, candidate.EntryID, candidate.EntryName)
 		if err != nil {
 			return nil, err
 		}
-		instances, err := client.ListInstances(context.Background())
-		if err != nil {
-			return nil, err
-		}
-		for _, instance := range instances {
-			if !sameAddress(address, append(append([]string(nil), instance.IPv4...), strings.TrimSpace(instance.IPv6))...) {
-				continue
-			}
-			ref := map[string]interface{}{
-				"provider":            "linode",
-				"provider_entry_id":   candidate.EntryID,
-				"provider_entry_name": candidate.EntryName,
-				"instance_id":         instance.ID,
-				"label":               instance.Label,
-				"region":              instance.Region,
-			}
-			return &currentInstanceCleanup{
-				Ref: ref,
-				Addresses: map[string]interface{}{
-					"ipv4": instance.IPv4,
-					"ipv6": instance.IPv6,
-				},
-				Label: fmt.Sprintf("delete linode instance %d", instance.ID),
-				Cleanup: func() error {
-					if err := client.DeleteInstance(context.Background(), instance.ID); err != nil {
-						return err
-					}
-					removeSavedLinodeRootPassword(r.task.UserID, addition, token, instance.ID)
-					return nil
-				},
-			}, nil
+		if cleanup != nil {
+			return cleanup, nil
 		}
 		return nil, nil
 	case "aws":
@@ -2217,7 +2451,7 @@ func provisionAWSInstance(ctx context.Context, userUUID string, plan models.Fail
 		}
 		userData := strings.TrimSpace(payload.UserData)
 		autoConnectGroup := ""
-		if plan.AutoConnectGroup != "" || plan.ScriptClipboardID != nil {
+		if plan.AutoConnectGroup != "" || planHasScripts(plan) {
 			userData, autoConnectGroup, err = buildAutoConnectUserData(autoConnectOptions{
 				UserUUID:          userUUID,
 				UserData:          userData,
@@ -2293,7 +2527,7 @@ func provisionAWSInstance(ctx context.Context, userUUID string, plan models.Fail
 		}
 		userData := strings.TrimSpace(payload.UserData)
 		autoConnectGroup := ""
-		if plan.AutoConnectGroup != "" || plan.ScriptClipboardID != nil {
+		if plan.AutoConnectGroup != "" || planHasScripts(plan) {
 			userData, autoConnectGroup, err = buildAutoConnectUserData(autoConnectOptions{
 				UserUUID:          userUUID,
 				UserData:          userData,
@@ -2385,7 +2619,7 @@ func provisionDigitalOceanDroplet(ctx context.Context, userUUID string, plan mod
 	}
 	userData := strings.TrimSpace(payload.UserData)
 	autoConnectGroup := ""
-	if plan.AutoConnectGroup != "" || plan.ScriptClipboardID != nil {
+	if plan.AutoConnectGroup != "" || planHasScripts(plan) {
 		userData, autoConnectGroup, err = buildAutoConnectUserData(autoConnectOptions{
 			UserUUID:          userUUID,
 			UserData:          userData,
@@ -2519,7 +2753,7 @@ func provisionLinodeInstance(ctx context.Context, userUUID string, plan models.F
 	}
 	userData := strings.TrimSpace(payload.UserData)
 	autoConnectGroup := ""
-	if plan.AutoConnectGroup != "" || plan.ScriptClipboardID != nil {
+	if plan.AutoConnectGroup != "" || planHasScripts(plan) {
 		userData, autoConnectGroup, err = buildAutoConnectUserData(autoConnectOptions{
 			UserUUID:          userUUID,
 			UserData:          userData,

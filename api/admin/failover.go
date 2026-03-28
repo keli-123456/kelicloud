@@ -33,6 +33,7 @@ type failoverPlanRequest struct {
 	Payload             json.RawMessage `json:"payload"`
 	AutoConnectGroup    string          `json:"auto_connect_group"`
 	ScriptClipboardID   *int            `json:"script_clipboard_id"`
+	ScriptClipboardIDs  []int           `json:"script_clipboard_ids"`
 	ScriptTimeoutSec    int             `json:"script_timeout_sec"`
 	WaitAgentTimeoutSec int             `json:"wait_agent_timeout_sec"`
 }
@@ -69,6 +70,7 @@ type failoverPlanView struct {
 	Payload             json.RawMessage  `json:"payload"`
 	AutoConnectGroup    string           `json:"auto_connect_group"`
 	ScriptClipboardID   *int             `json:"script_clipboard_id,omitempty"`
+	ScriptClipboardIDs  []int            `json:"script_clipboard_ids,omitempty"`
 	ScriptTimeoutSec    int              `json:"script_timeout_sec"`
 	WaitAgentTimeoutSec int              `json:"wait_agent_timeout_sec"`
 	CreatedAt           models.LocalTime `json:"created_at"`
@@ -196,6 +198,7 @@ type failoverExecutionView struct {
 	NewInstanceRef        json.RawMessage             `json:"new_instance_ref"`
 	NewAddresses          json.RawMessage             `json:"new_addresses"`
 	ScriptClipboardID     *int                        `json:"script_clipboard_id,omitempty"`
+	ScriptClipboardIDs    []int                       `json:"script_clipboard_ids,omitempty"`
 	ScriptNameSnapshot    string                      `json:"script_name_snapshot"`
 	ScriptTaskID          string                      `json:"script_task_id"`
 	ScriptStatus          string                      `json:"script_status"`
@@ -274,7 +277,38 @@ func rawJSONOrNull(raw string) json.RawMessage {
 	return json.RawMessage(encoded)
 }
 
+func normalizeRequestedFailoverScriptClipboardIDs(primary *int, values []int) []int {
+	normalized := make([]int, 0, len(values)+1)
+	seen := make(map[int]struct{}, len(values)+1)
+	appendID := func(id int) {
+		if id <= 0 {
+			return
+		}
+		if _, exists := seen[id]; exists {
+			return
+		}
+		seen[id] = struct{}{}
+		normalized = append(normalized, id)
+	}
+
+	for _, id := range values {
+		appendID(id)
+	}
+	if len(normalized) > 0 {
+		return normalized
+	}
+
+	if primary != nil {
+		appendID(*primary)
+	}
+	if len(normalized) == 0 {
+		return nil
+	}
+	return normalized
+}
+
 func buildFailoverPlanView(plan models.FailoverPlan) failoverPlanView {
+	scriptClipboardIDs := plan.EffectiveScriptClipboardIDs()
 	return failoverPlanView{
 		ID:                  plan.ID,
 		TaskID:              plan.TaskID,
@@ -286,7 +320,8 @@ func buildFailoverPlanView(plan models.FailoverPlan) failoverPlanView {
 		ActionType:          plan.ActionType,
 		Payload:             rawJSONOrNull(plan.Payload),
 		AutoConnectGroup:    plan.AutoConnectGroup,
-		ScriptClipboardID:   plan.ScriptClipboardID,
+		ScriptClipboardID:   models.FirstFailoverScriptClipboardID(scriptClipboardIDs),
+		ScriptClipboardIDs:  scriptClipboardIDs,
 		ScriptTimeoutSec:    plan.ScriptTimeoutSec,
 		WaitAgentTimeoutSec: plan.WaitAgentTimeoutSec,
 		CreatedAt:           plan.CreatedAt,
@@ -449,6 +484,7 @@ func buildFailoverTaskView(task *models.FailoverTask, latestExecution *models.Fa
 }
 
 func buildFailoverExecutionView(execution *models.FailoverExecution, includeSteps bool) failoverExecutionView {
+	scriptClipboardIDs := execution.EffectiveScriptClipboardIDs()
 	view := failoverExecutionView{
 		ID:                    execution.ID,
 		TaskID:                execution.TaskID,
@@ -464,7 +500,8 @@ func buildFailoverExecutionView(execution *models.FailoverExecution, includeStep
 		NewClientUUID:         execution.NewClientUUID,
 		NewInstanceRef:        rawJSONOrNull(execution.NewInstanceRef),
 		NewAddresses:          rawJSONOrNull(execution.NewAddresses),
-		ScriptClipboardID:     execution.ScriptClipboardID,
+		ScriptClipboardID:     models.FirstFailoverScriptClipboardID(scriptClipboardIDs),
+		ScriptClipboardIDs:    scriptClipboardIDs,
 		ScriptNameSnapshot:    execution.ScriptNameSnapshot,
 		ScriptTaskID:          execution.ScriptTaskID,
 		ScriptStatus:          execution.ScriptStatus,
@@ -818,10 +855,11 @@ func validateFailoverTaskRequest(scope ownerScope, req *failoverTaskRequest) (*m
 			return nil, nil, fmt.Errorf("invalid payload for plan %d: %w", index+1, err)
 		}
 
-		if planReq.ScriptClipboardID != nil {
-			if _, err := clipboarddb.GetClipboardByIDForUser(*planReq.ScriptClipboardID, scope.UserUUID); err != nil {
+		scriptClipboardIDs := normalizeRequestedFailoverScriptClipboardIDs(planReq.ScriptClipboardID, planReq.ScriptClipboardIDs)
+		for _, scriptClipboardID := range scriptClipboardIDs {
+			if _, err := clipboarddb.GetClipboardByIDForUser(scriptClipboardID, scope.UserUUID); err != nil {
 				if errors.Is(err, gorm.ErrRecordNotFound) {
-					return nil, nil, fmt.Errorf("script clipboard %d was not found", *planReq.ScriptClipboardID)
+					return nil, nil, fmt.Errorf("script clipboard %d was not found", scriptClipboardID)
 				}
 				return nil, nil, err
 			}
@@ -852,6 +890,7 @@ func validateFailoverTaskRequest(scope ownerScope, req *failoverTaskRequest) (*m
 			waitAgentTimeout = 600
 		}
 
+		primaryScriptClipboardID := models.FirstFailoverScriptClipboardID(scriptClipboardIDs)
 		plans = append(plans, models.FailoverPlan{
 			Name:                planName,
 			Priority:            priority,
@@ -861,7 +900,8 @@ func validateFailoverTaskRequest(scope ownerScope, req *failoverTaskRequest) (*m
 			ActionType:          actionType,
 			Payload:             payload,
 			AutoConnectGroup:    strings.TrimSpace(planReq.AutoConnectGroup),
-			ScriptClipboardID:   planReq.ScriptClipboardID,
+			ScriptClipboardID:   primaryScriptClipboardID,
+			ScriptClipboardIDs:  models.EncodeFailoverScriptClipboardIDs(scriptClipboardIDs),
 			ScriptTimeoutSec:    scriptTimeout,
 			WaitAgentTimeoutSec: waitAgentTimeout,
 		})

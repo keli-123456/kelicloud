@@ -13,6 +13,9 @@ type Legacy struct {
 	CNConnectivityEnabled  bool   `json:"cn_connectivity_enabled" default:"false"`             // 是否启用国内连通性探测
 	CNConnectivityTarget   string `json:"cn_connectivity_target" default:""`                   // 国内连通性探测目标
 	CNConnectivityInterval int    `json:"cn_connectivity_interval" default:"60"`               // 国内连通性探测间隔，单位秒
+	CNConnectivityRetry    int    `json:"cn_connectivity_retry_attempts" default:"3"`          // 国内连通性探测单目标重试次数
+	CNConnectivityRetryGap int    `json:"cn_connectivity_retry_delay_seconds" default:"1"`     // 国内连通性探测单目标重试间隔，单位秒
+	CNConnectivityTimeout  int    `json:"cn_connectivity_timeout_seconds" default:"5"`         // 国内连通性探测单次超时时间，单位秒
 	OutboundProxyEnabled   bool   `json:"outbound_proxy_enabled" default:"false"`              // 是否启用全局出站代理
 	OutboundProxyProtocol  string `json:"outbound_proxy_protocol" default:"socks5"`            // 出站代理协议
 	OutboundProxyHost      string `json:"outbound_proxy_host" default:""`                      // 出站代理主机
@@ -44,10 +47,14 @@ type Legacy struct {
 	LoginNotification          bool    `json:"login_notification" default:"true"`          // 登录通知
 	TrafficLimitPercentage     float64 `json:"traffic_limit_percentage" default:"80.00"`   // 流量限制百分比，默认80.00%
 	// Record
-	RecordEnabled          bool `json:"record_enabled" default:"true"`          // 是否启用记录功能
-	RecordPreserveTime     int  `json:"record_preserve_time" default:"720"`     // 记录保留时间，单位小时，默认30天
-	PingRecordPreserveTime int  `json:"ping_record_preserve_time" default:"24"` // Ping 记录保留时间，单位小时，默认1天
-	UpdatedAt              time.Time
+	RecordEnabled            bool   `json:"record_enabled" default:"true"`            // 是否启用记录功能
+	RecordPreserveTime       int    `json:"record_preserve_time" default:"720"`       // 记录保留时间，单位小时，默认30天
+	PingRecordPreserveTime   int    `json:"ping_record_preserve_time" default:"24"`   // Ping 记录保留时间，单位小时，默认1天
+	OfflineCleanupEnabled    bool   `json:"offline_cleanup_enabled" default:"false"`  // 是否启用每日自动清理离线节点
+	OfflineCleanupTime       string `json:"offline_cleanup_time" default:"03:00"`     // 每日自动清理离线节点的执行时间，24小时制 HH:MM
+	OfflineCleanupGraceHours int    `json:"offline_cleanup_grace_hours" default:"24"` // 离线超过多少小时后才允许自动清理
+	OfflineCleanupLastRunAt  string `json:"offline_cleanup_last_run_at" default:""`   // 最近一次自动清理离线节点的执行时间（内部使用）
+	UpdatedAt                time.Time
 }
 
 const (
@@ -60,6 +67,9 @@ const (
 	CNConnectivityEnabledKey               = "cn_connectivity_enabled"
 	CNConnectivityTargetKey                = "cn_connectivity_target"
 	CNConnectivityIntervalKey              = "cn_connectivity_interval"
+	CNConnectivityRetryAttemptsKey         = "cn_connectivity_retry_attempts"
+	CNConnectivityRetryDelaySecondsKey     = "cn_connectivity_retry_delay_seconds"
+	CNConnectivityTimeoutSecondsKey        = "cn_connectivity_timeout_seconds"
 	OutboundProxyEnabledKey                = "outbound_proxy_enabled"
 	OutboundProxyProtocolKey               = "outbound_proxy_protocol"
 	OutboundProxyHostKey                   = "outbound_proxy_host"
@@ -92,6 +102,10 @@ const (
 	RecordEnabledKey                       = "record_enabled"
 	RecordPreserveTimeKey                  = "record_preserve_time"
 	PingRecordPreserveTimeKey              = "ping_record_preserve_time"
+	OfflineCleanupEnabledKey               = "offline_cleanup_enabled"
+	OfflineCleanupTimeKey                  = "offline_cleanup_time"
+	OfflineCleanupGraceHoursKey            = "offline_cleanup_grace_hours"
+	OfflineCleanupLastRunAtKey             = "offline_cleanup_last_run_at"
 	TempShareTokenKey                      = "tempory_share_token"
 	TempShareTokenExpireAtKey              = "tempory_share_token_expire_at"
 	UpdatedAtKey                           = "updated_at"

@@ -7,10 +7,9 @@ import (
 	"time"
 
 	"github.com/komari-monitor/komari/config"
+	"github.com/komari-monitor/komari/database/models"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
-
-	"github.com/komari-monitor/komari/database/models"
 )
 
 func openClientTestDB(t *testing.T) *gorm.DB {
@@ -212,5 +211,47 @@ func TestCreateClientWithUserWithDBHonorsQuota(t *testing.T) {
 	}
 	if _, _, err := createClientWithUserWithDB(db, "user-a", "Second", ""); err == nil {
 		t.Fatal("expected second client creation to be blocked by quota")
+	}
+}
+
+func TestSaveClientInfoUpdatesLatestOnline(t *testing.T) {
+	db := openClientTestDB(t)
+
+	if err := db.AutoMigrate(&models.Client{}); err != nil {
+		t.Fatalf("failed to migrate test schema: %v", err)
+	}
+
+	now := models.FromTime(time.Now().Add(-2 * time.Hour))
+	client := models.Client{
+		UUID:         "client-latest-online",
+		Token:        "token-latest-online",
+		Name:         "Latest Online Client",
+		LatestOnline: now,
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}
+	if err := db.Create(&client).Error; err != nil {
+		t.Fatalf("failed to seed client: %v", err)
+	}
+
+	if err := saveClientInfoWithDB(db, map[string]interface{}{
+		"uuid":       client.UUID,
+		"cpu_cores":  float64(2),
+		"mem_total":  float64(1024),
+		"swap_total": float64(0),
+		"disk_total": float64(2048),
+	}); err != nil {
+		t.Fatalf("saveClientInfoWithDB returned error: %v", err)
+	}
+
+	updated, err := getClientByUUIDWithDB(db, client.UUID)
+	if err != nil {
+		t.Fatalf("failed to reload client: %v", err)
+	}
+	if updated.LatestOnline.ToTime().IsZero() {
+		t.Fatal("expected latest_online to be updated")
+	}
+	if !updated.LatestOnline.ToTime().After(now.ToTime()) {
+		t.Fatalf("expected latest_online to advance beyond %v, got %v", now.ToTime(), updated.LatestOnline.ToTime())
 	}
 }

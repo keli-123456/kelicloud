@@ -45,6 +45,7 @@ import (
 	"github.com/komari-monitor/komari/utils/messageSender"
 	"github.com/komari-monitor/komari/utils/notifier"
 	"github.com/komari-monitor/komari/utils/oauth"
+	"github.com/komari-monitor/komari/utils/offlinecleanup"
 	"github.com/spf13/cobra"
 )
 
@@ -519,6 +520,7 @@ func DoScheduledWork() {
 			// 每分钟检查一次流量提醒
 			go notifier.CheckTraffic()
 			failover.RunScheduledWork()
+			offlinecleanup.RunScheduledWork()
 		}
 	}
 

@@ -12,13 +12,19 @@ type cnConnectivityProbeConfigMessage struct {
 	CNConnectivityEnabled  bool   `json:"cn_connectivity_enabled"`
 	CNConnectivityTarget   string `json:"cn_connectivity_target,omitempty"`
 	CNConnectivityInterval int    `json:"cn_connectivity_interval"`
+	CNConnectivityRetry    int    `json:"cn_connectivity_retry_attempts"`
+	CNConnectivityRetryGap int    `json:"cn_connectivity_retry_delay_seconds"`
+	CNConnectivityTimeout  int    `json:"cn_connectivity_timeout_seconds"`
 }
 
 func init() {
 	config.Subscribe(func(event config.ConfigEvent) {
 		if !event.IsChanged(config.CNConnectivityEnabledKey) &&
 			!event.IsChanged(config.CNConnectivityTargetKey) &&
-			!event.IsChanged(config.CNConnectivityIntervalKey) {
+			!event.IsChanged(config.CNConnectivityIntervalKey) &&
+			!event.IsChanged(config.CNConnectivityRetryAttemptsKey) &&
+			!event.IsChanged(config.CNConnectivityRetryDelaySecondsKey) &&
+			!event.IsChanged(config.CNConnectivityTimeoutSecondsKey) {
 			return
 		}
 
@@ -45,12 +51,39 @@ func currentCNConnectivityProbeConfigMessage() cnConnectivityProbeConfigMessage 
 	if interval <= 0 {
 		interval = 60
 	}
+	retryAttempts, err := config.GetAs[int](config.CNConnectivityRetryAttemptsKey, 3)
+	if err != nil {
+		slog.Warn("load cn connectivity retry attempts config failed", "error", err)
+		retryAttempts = 3
+	}
+	if retryAttempts <= 0 {
+		retryAttempts = 3
+	}
+	retryDelaySeconds, err := config.GetAs[int](config.CNConnectivityRetryDelaySecondsKey, 1)
+	if err != nil {
+		slog.Warn("load cn connectivity retry delay seconds config failed", "error", err)
+		retryDelaySeconds = 1
+	}
+	if retryDelaySeconds <= 0 {
+		retryDelaySeconds = 1
+	}
+	timeoutSeconds, err := config.GetAs[int](config.CNConnectivityTimeoutSecondsKey, 5)
+	if err != nil {
+		slog.Warn("load cn connectivity timeout seconds config failed", "error", err)
+		timeoutSeconds = 5
+	}
+	if timeoutSeconds <= 0 {
+		timeoutSeconds = 5
+	}
 
 	return cnConnectivityProbeConfigMessage{
 		Message:                "cn_connectivity_probe_config",
 		CNConnectivityEnabled:  enabled,
 		CNConnectivityTarget:   target,
 		CNConnectivityInterval: interval,
+		CNConnectivityRetry:    retryAttempts,
+		CNConnectivityRetryGap: retryDelaySeconds,
+		CNConnectivityTimeout:  timeoutSeconds,
 	}
 }
 

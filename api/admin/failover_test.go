@@ -61,3 +61,27 @@ func TestNormalizeFailoverDeleteStrategyIgnoresDisabledProvisionPlans(t *testing
 		t.Fatalf("expected disabled provision plans to be ignored, got %q", got)
 	}
 }
+
+func TestNormalizeRequestedFailoverScriptClipboardIDsPrefersArray(t *testing.T) {
+	legacyID := 5
+
+	got := normalizeRequestedFailoverScriptClipboardIDs(&legacyID, []int{9, 5, 9, 12})
+	expected := []int{9, 5, 12}
+	if len(got) != len(expected) {
+		t.Fatalf("expected %d ids, got %#v", len(expected), got)
+	}
+	for index := range expected {
+		if got[index] != expected[index] {
+			t.Fatalf("expected %#v, got %#v", expected, got)
+		}
+	}
+}
+
+func TestNormalizeRequestedFailoverScriptClipboardIDsFallsBackToLegacyField(t *testing.T) {
+	legacyID := 5
+
+	got := normalizeRequestedFailoverScriptClipboardIDs(&legacyID, nil)
+	if len(got) != 1 || got[0] != legacyID {
+		t.Fatalf("expected legacy clipboard id to be preserved, got %#v", got)
+	}
+}

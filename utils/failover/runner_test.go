@@ -186,3 +186,40 @@ func TestEffectiveTaskDeleteStrategyKeepsRebindPlans(t *testing.T) {
 		t.Fatalf("expected rebind-only plans to keep old instance, got %q", got)
 	}
 }
+
+func TestInvalidateProvisionedEntrySnapshotClearsTrackedCapacity(t *testing.T) {
+	originalScheduler := failoverProviderEntryScheduler
+	failoverProviderEntryScheduler = &providerEntryScheduler{
+		states: map[string]*providerEntryRuntimeState{},
+	}
+	defer func() {
+		failoverProviderEntryScheduler = originalScheduler
+	}()
+
+	state := failoverProviderEntryScheduler.stateFor(providerEntryStateKey("user-1", "digitalocean", "entry-1"))
+	state.snapshot = &providerEntryCapacitySnapshot{
+		Mode:  providerEntryCapacityModeQuota,
+		Limit: 5,
+		Used:  4,
+	}
+	state.provisionedDelta = 2
+
+	runner := &executionRunner{
+		task: models.FailoverTask{
+			UserID: "user-1",
+		},
+	}
+	runner.invalidateProvisionedEntrySnapshot(&actionOutcome{
+		NewInstanceRef: map[string]interface{}{
+			"provider":          "digitalocean",
+			"provider_entry_id": "entry-1",
+		},
+	})
+
+	if state.snapshot != nil {
+		t.Fatal("expected provider snapshot to be invalidated after rollback")
+	}
+	if state.provisionedDelta != 0 {
+		t.Fatalf("expected provisioned delta reset to 0, got %d", state.provisionedDelta)
+	}
+}

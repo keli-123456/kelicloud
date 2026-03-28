@@ -60,10 +60,10 @@ func saveProviderAddition(userUUID, providerName, addition string) error {
 	})
 }
 
-func loadAWSCredential(userUUID, entryID string) (*awscloud.Addition, *awscloud.CredentialRecord, error) {
+func loadAWSAddition(userUUID string) (*awscloud.Addition, error) {
 	raw, err := loadProviderAddition(userUUID, "aws")
 	if err != nil {
-		return nil, nil, fmt.Errorf("AWS provider is not configured")
+		return nil, fmt.Errorf("AWS provider is not configured")
 	}
 
 	addition := &awscloud.Addition{}
@@ -71,9 +71,17 @@ func loadAWSCredential(userUUID, entryID string) (*awscloud.Addition, *awscloud.
 		raw = "{}"
 	}
 	if err := json.Unmarshal([]byte(raw), addition); err != nil {
-		return nil, nil, fmt.Errorf("AWS configuration is invalid: %w", err)
+		return nil, fmt.Errorf("AWS configuration is invalid: %w", err)
 	}
 	addition.Normalize()
+	return addition, nil
+}
+
+func loadAWSCredential(userUUID, entryID string) (*awscloud.Addition, *awscloud.CredentialRecord, error) {
+	addition, err := loadAWSAddition(userUUID)
+	if err != nil {
+		return nil, nil, err
+	}
 
 	if strings.TrimSpace(entryID) == "" || strings.TrimSpace(entryID) == activeProviderEntryID {
 		credential := addition.ActiveCredential()
@@ -90,10 +98,10 @@ func loadAWSCredential(userUUID, entryID string) (*awscloud.Addition, *awscloud.
 	return addition, credential, nil
 }
 
-func loadDigitalOceanToken(userUUID, entryID string) (*digitalocean.Addition, *digitalocean.TokenRecord, error) {
+func loadDigitalOceanAddition(userUUID string) (*digitalocean.Addition, error) {
 	raw, err := loadProviderAddition(userUUID, "digitalocean")
 	if err != nil {
-		return nil, nil, fmt.Errorf("DigitalOcean provider is not configured")
+		return nil, fmt.Errorf("DigitalOcean provider is not configured")
 	}
 
 	addition := &digitalocean.Addition{}
@@ -101,9 +109,17 @@ func loadDigitalOceanToken(userUUID, entryID string) (*digitalocean.Addition, *d
 		raw = "{}"
 	}
 	if err := json.Unmarshal([]byte(raw), addition); err != nil {
-		return nil, nil, fmt.Errorf("DigitalOcean configuration is invalid: %w", err)
+		return nil, fmt.Errorf("DigitalOcean configuration is invalid: %w", err)
 	}
 	addition.Normalize()
+	return addition, nil
+}
+
+func loadDigitalOceanToken(userUUID, entryID string) (*digitalocean.Addition, *digitalocean.TokenRecord, error) {
+	addition, err := loadDigitalOceanAddition(userUUID)
+	if err != nil {
+		return nil, nil, err
+	}
 
 	if strings.TrimSpace(entryID) == "" || strings.TrimSpace(entryID) == activeProviderEntryID {
 		token := addition.ActiveToken()
@@ -133,10 +149,10 @@ func saveDigitalOceanAddition(userUUID string, addition *digitalocean.Addition) 
 	return saveProviderAddition(userUUID, "digitalocean", string(payload))
 }
 
-func loadLinodeToken(userUUID, entryID string) (*linode.Addition, *linode.TokenRecord, error) {
+func loadLinodeAddition(userUUID string) (*linode.Addition, error) {
 	raw, err := loadProviderAddition(userUUID, "linode")
 	if err != nil {
-		return nil, nil, fmt.Errorf("Linode provider is not configured")
+		return nil, fmt.Errorf("Linode provider is not configured")
 	}
 
 	addition := &linode.Addition{}
@@ -144,9 +160,17 @@ func loadLinodeToken(userUUID, entryID string) (*linode.Addition, *linode.TokenR
 		raw = "{}"
 	}
 	if err := json.Unmarshal([]byte(raw), addition); err != nil {
-		return nil, nil, fmt.Errorf("Linode configuration is invalid: %w", err)
+		return nil, fmt.Errorf("Linode configuration is invalid: %w", err)
 	}
 	addition.Normalize()
+	return addition, nil
+}
+
+func loadLinodeToken(userUUID, entryID string) (*linode.Addition, *linode.TokenRecord, error) {
+	addition, err := loadLinodeAddition(userUUID)
+	if err != nil {
+		return nil, nil, err
+	}
 
 	if strings.TrimSpace(entryID) == "" || strings.TrimSpace(entryID) == activeProviderEntryID {
 		token := addition.ActiveToken()

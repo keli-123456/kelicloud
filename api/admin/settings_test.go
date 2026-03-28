@@ -63,9 +63,12 @@ func TestGetSettingsShowsPerUserAutoDiscoveryAndReadableCNProbeConfig(t *testing
 	setupAdminSettingsTestDB(t)
 
 	if err := config.SetMany(map[string]any{
-		config.CNConnectivityEnabledKey:  true,
-		config.CNConnectivityTargetKey:   "223.5.5.5",
-		config.CNConnectivityIntervalKey: 90,
+		config.CNConnectivityEnabledKey:           true,
+		config.CNConnectivityTargetKey:            "223.5.5.5",
+		config.CNConnectivityIntervalKey:          90,
+		config.CNConnectivityRetryAttemptsKey:     4,
+		config.CNConnectivityRetryDelaySecondsKey: 2,
+		config.CNConnectivityTimeoutSecondsKey:    7,
 	}); err != nil {
 		t.Fatalf("failed to seed cn connectivity settings: %v", err)
 	}
@@ -86,6 +89,15 @@ func TestGetSettingsShowsPerUserAutoDiscoveryAndReadableCNProbeConfig(t *testing
 	}
 	if firstResp.Data[config.CNConnectivityTargetKey] != "223.5.5.5" {
 		t.Fatalf("expected CN connectivity target to be readable, got %#v", firstResp.Data[config.CNConnectivityTargetKey])
+	}
+	if firstResp.Data[config.CNConnectivityRetryAttemptsKey] != float64(4) {
+		t.Fatalf("expected CN connectivity retry attempts to be readable, got %#v", firstResp.Data[config.CNConnectivityRetryAttemptsKey])
+	}
+	if firstResp.Data[config.CNConnectivityRetryDelaySecondsKey] != float64(2) {
+		t.Fatalf("expected CN connectivity retry delay seconds to be readable, got %#v", firstResp.Data[config.CNConnectivityRetryDelaySecondsKey])
+	}
+	if firstResp.Data[config.CNConnectivityTimeoutSecondsKey] != float64(7) {
+		t.Fatalf("expected CN connectivity timeout seconds to be readable, got %#v", firstResp.Data[config.CNConnectivityTimeoutSecondsKey])
 	}
 
 	secondCtx, secondRecorder := newSettingsTestContext(t, http.MethodGet, nil, "settings-user-b", "user")
@@ -109,9 +121,12 @@ func TestEditSettingsOnlyAllowsDelegatedCNConnectivityEditors(t *testing.T) {
 	setupAdminSettingsTestDB(t)
 
 	if err := config.SetMany(map[string]any{
-		config.CNConnectivityEnabledKey:  true,
-		config.CNConnectivityTargetKey:   "223.5.5.5",
-		config.CNConnectivityIntervalKey: 60,
+		config.CNConnectivityEnabledKey:           true,
+		config.CNConnectivityTargetKey:            "223.5.5.5",
+		config.CNConnectivityIntervalKey:          60,
+		config.CNConnectivityRetryAttemptsKey:     3,
+		config.CNConnectivityRetryDelaySecondsKey: 1,
+		config.CNConnectivityTimeoutSecondsKey:    5,
 	}); err != nil {
 		t.Fatalf("failed to seed cn connectivity settings: %v", err)
 	}
@@ -149,7 +164,7 @@ func TestEditSettingsOnlyAllowsDelegatedCNConnectivityEditors(t *testing.T) {
 	delegatedCtx, delegatedRecorder := newSettingsTestContext(
 		t,
 		http.MethodPost,
-		[]byte(`{"cn_connectivity_enabled":false,"cn_connectivity_target":"1.1.1.1","cn_connectivity_interval":15}`),
+		[]byte(`{"cn_connectivity_enabled":false,"cn_connectivity_target":"1.1.1.1","cn_connectivity_interval":15,"cn_connectivity_retry_attempts":4,"cn_connectivity_retry_delay_seconds":2,"cn_connectivity_timeout_seconds":8}`),
 		"delegated-user",
 		"user",
 	)
@@ -160,7 +175,7 @@ func TestEditSettingsOnlyAllowsDelegatedCNConnectivityEditors(t *testing.T) {
 
 	delegatedResp := decodeSettingsTestEnvelope(t, delegatedRecorder)
 	updated, _ := delegatedResp.Data["updated_system_keys"].([]any)
-	if len(updated) != 3 {
+	if len(updated) != 6 {
 		t.Fatalf("expected delegated user to update all CN keys, got %#v", delegatedResp.Data["updated_system_keys"])
 	}
 
@@ -184,5 +199,77 @@ func TestEditSettingsOnlyAllowsDelegatedCNConnectivityEditors(t *testing.T) {
 	}
 	if intervalAfterDelegated != 15 {
 		t.Fatalf("expected delegated user to update interval to 15, got %d", intervalAfterDelegated)
+	}
+	retryAfterDelegated, err := config.GetAs[int](config.CNConnectivityRetryAttemptsKey)
+	if err != nil {
+		t.Fatalf("failed to reload delegated cn connectivity retry attempts: %v", err)
+	}
+	if retryAfterDelegated != 4 {
+		t.Fatalf("expected delegated user to update retry attempts to 4, got %d", retryAfterDelegated)
+	}
+	retryDelayAfterDelegated, err := config.GetAs[int](config.CNConnectivityRetryDelaySecondsKey)
+	if err != nil {
+		t.Fatalf("failed to reload delegated cn connectivity retry delay seconds: %v", err)
+	}
+	if retryDelayAfterDelegated != 2 {
+		t.Fatalf("expected delegated user to update retry delay seconds to 2, got %d", retryDelayAfterDelegated)
+	}
+	timeoutAfterDelegated, err := config.GetAs[int](config.CNConnectivityTimeoutSecondsKey)
+	if err != nil {
+		t.Fatalf("failed to reload delegated cn connectivity timeout seconds: %v", err)
+	}
+	if timeoutAfterDelegated != 8 {
+		t.Fatalf("expected delegated user to update timeout seconds to 8, got %d", timeoutAfterDelegated)
+	}
+}
+
+func TestEditSettingsValidatesOfflineCleanupSchedule(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	setupAdminSettingsTestDB(t)
+
+	validCtx, validRecorder := newSettingsTestContext(
+		t,
+		http.MethodPost,
+		[]byte(`{"offline_cleanup_enabled":true,"offline_cleanup_time":" 04:30 ","offline_cleanup_grace_hours":48}`),
+		"platform-admin",
+		"admin",
+	)
+	EditSettings(validCtx)
+	if validRecorder.Code != http.StatusOK {
+		t.Fatalf("expected valid offline cleanup update to return 200, got %d", validRecorder.Code)
+	}
+
+	enabled, err := config.GetAs[bool](config.OfflineCleanupEnabledKey)
+	if err != nil {
+		t.Fatalf("failed to reload offline cleanup enabled flag: %v", err)
+	}
+	if !enabled {
+		t.Fatal("expected offline cleanup to be enabled")
+	}
+	runAt, err := config.GetAs[string](config.OfflineCleanupTimeKey)
+	if err != nil {
+		t.Fatalf("failed to reload offline cleanup time: %v", err)
+	}
+	if runAt != "04:30" {
+		t.Fatalf("expected normalized offline cleanup time, got %q", runAt)
+	}
+	graceHours, err := config.GetAs[int](config.OfflineCleanupGraceHoursKey)
+	if err != nil {
+		t.Fatalf("failed to reload offline cleanup grace hours: %v", err)
+	}
+	if graceHours != 48 {
+		t.Fatalf("expected grace hours to be 48, got %d", graceHours)
+	}
+
+	invalidCtx, invalidRecorder := newSettingsTestContext(
+		t,
+		http.MethodPost,
+		[]byte(`{"offline_cleanup_time":"25:00","offline_cleanup_grace_hours":0}`),
+		"platform-admin",
+		"admin",
+	)
+	EditSettings(invalidCtx)
+	if invalidRecorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected invalid offline cleanup update to return 400, got %d", invalidRecorder.Code)
 	}
 }
