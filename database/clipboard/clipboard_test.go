@@ -84,3 +84,48 @@ func TestCreateClipboardForUserRequiresUser(t *testing.T) {
 		t.Fatal("expected user-scoped clipboard create to require user id")
 	}
 }
+
+func TestListClipboardPageByUserRespectsPaginationAndOrder(t *testing.T) {
+	db := openClipboardTestDB(t)
+
+	if err := db.AutoMigrate(&models.Clipboard{}); err != nil {
+		t.Fatalf("failed to migrate test schema: %v", err)
+	}
+
+	entries := []models.Clipboard{
+		{UserID: "user-a", Name: "Weight 10", Text: "echo a", Weight: 10},
+		{UserID: "user-a", Name: "Weight 7", Text: "echo b", Weight: 7},
+		{UserID: "user-a", Name: "Weight 3", Text: "echo c", Weight: 3},
+		{UserID: "user-b", Name: "Other User", Text: "echo other", Weight: 99},
+	}
+	for i := range entries {
+		if err := db.Create(&entries[i]).Error; err != nil {
+			t.Fatalf("failed to create clipboard entry: %v", err)
+		}
+	}
+
+	pageOne, total, err := listClipboardPageByUserWithDB(db, "user-a", 1, 2)
+	if err != nil {
+		t.Fatalf("failed to list first page: %v", err)
+	}
+	if total != 3 {
+		t.Fatalf("expected total 3 for user-a, got %d", total)
+	}
+	if len(pageOne) != 2 {
+		t.Fatalf("expected 2 entries on first page, got %d", len(pageOne))
+	}
+	if pageOne[0].Name != "Weight 10" || pageOne[1].Name != "Weight 7" {
+		t.Fatalf("unexpected first page order: %+v", pageOne)
+	}
+
+	pageTwo, total, err := listClipboardPageByUserWithDB(db, "user-a", 2, 2)
+	if err != nil {
+		t.Fatalf("failed to list second page: %v", err)
+	}
+	if total != 3 {
+		t.Fatalf("expected total 3 for user-a on second page, got %d", total)
+	}
+	if len(pageTwo) != 1 || pageTwo[0].Name != "Weight 3" {
+		t.Fatalf("unexpected second page contents: %+v", pageTwo)
+	}
+}

@@ -21,3 +21,18 @@ func TestListClipboardRequiresUserContext(t *testing.T) {
 		t.Fatalf("expected 403 when user context is missing, got %d", recorder.Code)
 	}
 }
+
+func TestListClipboardRejectsInvalidPage(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodGet, "/admin/clipboard?page=0", nil)
+	c.Set("uuid", "user-a")
+
+	ListClipboard(c)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for invalid page, got %d", recorder.Code)
+	}
+}

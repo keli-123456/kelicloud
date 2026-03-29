@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/api"
@@ -53,6 +54,44 @@ func ListClipboard(c *gin.Context) {
 		api.RespondError(c, http.StatusForbidden, "User context is required")
 		return
 	}
+
+	rawPage := strings.TrimSpace(c.Query("page"))
+	rawLimit := strings.TrimSpace(c.Query("limit"))
+	if rawPage != "" || rawLimit != "" {
+		page := 1
+		limit := 20
+
+		if rawPage != "" {
+			parsed, err := strconv.Atoi(rawPage)
+			if err != nil || parsed <= 0 {
+				api.RespondError(c, http.StatusBadRequest, "Invalid page")
+				return
+			}
+			page = parsed
+		}
+		if rawLimit != "" {
+			parsed, err := strconv.Atoi(rawLimit)
+			if err != nil || parsed <= 0 {
+				api.RespondError(c, http.StatusBadRequest, "Invalid limit")
+				return
+			}
+			limit = parsed
+		}
+
+		items, total, err := clipboardDB.ListClipboardPageByUser(userUUID, page, limit)
+		if err != nil {
+			api.RespondError(c, http.StatusInternalServerError, "Failed to list clipboard: "+err.Error())
+			return
+		}
+		api.RespondSuccess(c, gin.H{
+			"items": items,
+			"total": total,
+			"page":  page,
+			"limit": limit,
+		})
+		return
+	}
+
 	list, err := clipboardDB.ListClipboardByUser(userUUID)
 	if err != nil {
 		api.RespondError(c, http.StatusInternalServerError, "Failed to list clipboard: "+err.Error())
