@@ -381,6 +381,13 @@ func (state *providerEntryRuntimeState) availableSlots(snapshot *providerEntryCa
 	}
 
 	if !shouldCheckProviderCapacity(plan) || snapshot.Mode == providerEntryCapacityModeSerialized {
+		if snapshot.Mode == providerEntryCapacityModeSerialized &&
+			strings.TrimSpace(plan.ActionType) == models.FailoverActionProvisionInstance {
+			// Providers without reliable quota data should still allow multiple failover
+			// tasks to queue on the same entry; BeginSerializedOperation enforces that
+			// only one create operation runs at a time.
+			return 1
+		}
 		free := 1 - state.reserved
 		if free < 0 {
 			return 0

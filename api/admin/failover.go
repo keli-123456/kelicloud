@@ -28,7 +28,7 @@ type failoverPlanRequest struct {
 	Priority            int             `json:"priority"`
 	Enabled             *bool           `json:"enabled"`
 	Provider            string          `json:"provider" binding:"required"`
-	ProviderEntryID     string          `json:"provider_entry_id" binding:"required"`
+	ProviderEntryID     string          `json:"provider_entry_id"`
 	ActionType          string          `json:"action_type" binding:"required"`
 	Payload             json.RawMessage `json:"payload"`
 	AutoConnectGroup    string          `json:"auto_connect_group"`
@@ -548,7 +548,12 @@ func validateCloudProviderEntryForScope(scope ownerScope, providerName, entryID 
 	providerName = strings.ToLower(strings.TrimSpace(providerName))
 	entryID = strings.TrimSpace(entryID)
 	if entryID == "" {
-		return fmt.Errorf("provider entry id is required")
+		switch providerName {
+		case awsProviderName, digitalOceanProviderName, linodeProviderName:
+			entryID = "active"
+		default:
+			return fmt.Errorf("provider entry id is required")
+		}
 	}
 
 	switch providerName {
@@ -834,7 +839,7 @@ func validateFailoverTaskRequest(scope ownerScope, req *failoverTaskRequest) (*m
 
 		providerEntryID := strings.TrimSpace(planReq.ProviderEntryID)
 		if providerEntryID == "" {
-			return nil, nil, fmt.Errorf("plan %d provider_entry_id is required", index+1)
+			providerEntryID = "active"
 		}
 		if err := validateCloudProviderEntryForScope(scope, provider, providerEntryID); err != nil {
 			return nil, nil, err

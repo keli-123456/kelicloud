@@ -66,6 +66,26 @@ func TestAvailableSlotsFallsBackToSerializedMode(t *testing.T) {
 	}
 }
 
+func TestAvailableSlotsAllowsQueuedSerializedProvisioning(t *testing.T) {
+	state := &providerEntryRuntimeState{
+		reserved: 1,
+	}
+	plan := models.FailoverPlan{
+		Provider:   "linode",
+		ActionType: models.FailoverActionProvisionInstance,
+	}
+	snapshot := &providerEntryCapacitySnapshot{
+		Mode:  providerEntryCapacityModeSerialized,
+		Limit: 1,
+		Used:  3,
+	}
+
+	free := state.availableSlots(snapshot, plan)
+	if free != 1 {
+		t.Fatalf("expected serialized provisioning to stay queueable, got %d", free)
+	}
+}
+
 func TestBeginSerializedOperationQueuesRequests(t *testing.T) {
 	state := &providerEntryRuntimeState{}
 	state.cond = sync.NewCond(&state.mu)
