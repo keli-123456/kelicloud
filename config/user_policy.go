@@ -23,6 +23,7 @@ const (
 	UserFeatureCloud             = "cloud"
 	UserFeatureCloudDigitalOcean = "cloud_digitalocean"
 	UserFeatureCloudLinode       = "cloud_linode"
+	UserFeatureCloudAzure        = "cloud_azure"
 	UserFeatureCloudAWS          = "cloud_aws"
 	UserFeatureCloudDNS          = "cloud_dns"
 	UserFeatureCloudFailover     = "cloud_failover"
@@ -39,6 +40,7 @@ var userFeatureDefaultAllowSet = map[string]struct{}{
 	UserFeatureNotifications:     {},
 	UserFeatureCloudDigitalOcean: {},
 	UserFeatureCloudLinode:       {},
+	UserFeatureCloudAzure:        {},
 	UserFeatureCloudAWS:          {},
 	UserFeatureCloudDNS:          {},
 	UserFeatureCloudFailover:     {},
@@ -59,6 +61,7 @@ var userFeatureSet = map[string]struct{}{
 	UserFeatureCloud:             {},
 	UserFeatureCloudDigitalOcean: {},
 	UserFeatureCloudLinode:       {},
+	UserFeatureCloudAzure:        {},
 	UserFeatureCloudAWS:          {},
 	UserFeatureCloudDNS:          {},
 	UserFeatureCloudFailover:     {},
@@ -75,6 +78,7 @@ var userVisibleFeatureSet = map[string]struct{}{
 	UserFeatureNotifications:     {},
 	UserFeatureCloudDigitalOcean: {},
 	UserFeatureCloudLinode:       {},
+	UserFeatureCloudAzure:        {},
 	UserFeatureCloudAWS:          {},
 	UserFeatureCloudDNS:          {},
 	UserFeatureCloudFailover:     {},
@@ -87,6 +91,7 @@ var legacyFeatureAliases = map[string][]string{
 	UserFeatureCloud: {
 		UserFeatureCloudDigitalOcean,
 		UserFeatureCloudLinode,
+		UserFeatureCloudAzure,
 		UserFeatureCloudAWS,
 		UserFeatureCloudDNS,
 		UserFeatureCloudFailover,

@@ -262,6 +262,7 @@ func RunServer() {
 			admin.RequireAnyUserFeatureMiddleware(
 				config.UserFeatureCloudDigitalOcean,
 				config.UserFeatureCloudLinode,
+				config.UserFeatureCloudAzure,
 				config.UserFeatureCloudAWS,
 				config.UserFeatureCloudDNS,
 				config.UserFeatureCloudFailover,
@@ -309,6 +310,23 @@ func RunServer() {
 				linodeGroup.POST("/instances", admin.CreateLinodeInstance)
 				linodeGroup.DELETE("/instances/:id", admin.DeleteLinodeInstance)
 				linodeGroup.POST("/instances/:id/actions", admin.PostLinodeInstanceAction)
+			}
+			azureGroup := cloudGroup.Group("/azure", admin.RequireUserFeatureMiddleware(config.UserFeatureCloudAzure))
+			{
+				azureGroup.GET("/credentials", admin.GetAzureCredentials)
+				azureGroup.POST("/credentials", admin.SaveAzureCredentials)
+				azureGroup.POST("/credentials/active", admin.SetAzureActiveCredential)
+				azureGroup.POST("/credentials/location", admin.SetAzureActiveLocation)
+				azureGroup.POST("/credentials/check", admin.CheckAzureCredentials)
+				azureGroup.GET("/credentials/:id/secret", admin.GetAzureCredentialSecret)
+				azureGroup.DELETE("/credentials/:id", admin.DeleteAzureCredential)
+				azureGroup.GET("/account", admin.GetAzureAccount)
+				azureGroup.GET("/catalog", admin.GetAzureCatalog)
+				azureGroup.GET("/instances", admin.ListAzureInstances)
+				azureGroup.GET("/instances/:id", admin.GetAzureInstanceDetail)
+				azureGroup.POST("/instances", admin.CreateAzureInstance)
+				azureGroup.DELETE("/instances/:id", admin.DeleteAzureInstance)
+				azureGroup.POST("/instances/:id/actions", admin.PostAzureInstanceAction)
 			}
 			awsGroup := cloudGroup.Group("/aws", admin.RequireUserFeatureMiddleware(config.UserFeatureCloudAWS))
 			{
