@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"runtime/debug"
 	"strconv"
 	"strings"
@@ -950,7 +951,15 @@ func (r *executionRunner) finalizePlan(plan models.FailoverPlan, outcome *action
 			"status": models.FailoverExecutionStatusWaitingAgent,
 		})
 
-		clientUUID, waitErr := waitForClientByGroup(r.ctx, r.task.UserID, outcome.AutoConnectGroup, r.task.WatchClientUUID, r.startedAt, plan.WaitAgentTimeoutSec)
+		clientUUID, waitErr := waitForClientByGroup(
+			r.ctx,
+			r.task.UserID,
+			outcome.AutoConnectGroup,
+			r.task.WatchClientUUID,
+			r.startedAt,
+			plan.WaitAgentTimeoutSec,
+			expectedClientAddresses(outcome),
+		)
 		if waitErr != nil {
 			r.finishStep(waitStep, models.FailoverStepStatusFailed, waitErr.Error(), nil)
 			return waitErr
@@ -2314,7 +2323,15 @@ func truncateOutput(output string, limit int) (string, bool) {
 	return output[:limit], true
 }
 
-func waitForClientByGroup(ctx context.Context, userUUID, group, excludeUUID string, startedAt time.Time, timeoutSeconds int) (string, error) {
+func waitForClientByGroup(
+	ctx context.Context,
+	userUUID,
+	group,
+	excludeUUID string,
+	startedAt time.Time,
+	timeoutSeconds int,
+	expectedAddresses map[string]struct{},
+) (string, error) {
 	if timeoutSeconds <= 0 {
 		timeoutSeconds = 600
 	}
@@ -2329,7 +2346,6 @@ func waitForClientByGroup(ctx context.Context, userUUID, group, excludeUUID stri
 		if err != nil {
 			return "", err
 		}
-		reports := ws.GetLatestReport()
 		online := ws.GetConnectedClients()
 
 		candidates := make([]models.Client, 0)
@@ -2340,24 +2356,130 @@ func waitForClientByGroup(ctx context.Context, userUUID, group, excludeUUID stri
 			if _, ok := online[client.UUID]; !ok {
 				continue
 			}
-			report := reports[client.UUID]
-			if client.CreatedAt.ToTime().After(startedAt.Add(-2 * time.Minute)) {
-				candidates = append(candidates, client)
-				continue
-			}
-			if report != nil && report.UpdatedAt.After(startedAt) {
-				candidates = append(candidates, client)
-			}
+			candidates = append(candidates, client)
 		}
-		if len(candidates) > 0 {
-			sortClientsNewestFirst(candidates)
-			return candidates[0].UUID, nil
+		if clientUUID := pickPreferredAutoConnectClient(candidates, startedAt, expectedAddresses); clientUUID != "" {
+			return clientUUID, nil
 		}
 		if err := waitContextOrDelay(ctx, 5*time.Second); err != nil {
 			return "", err
 		}
 	}
 	return "", fmt.Errorf("timed out waiting for agent group %q", group)
+}
+
+func expectedClientAddresses(outcome *actionOutcome) map[string]struct{} {
+	addresses := make(map[string]struct{})
+	if outcome == nil {
+		return addresses
+	}
+
+	for _, value := range []string{
+		outcome.IPv4,
+		outcome.IPv6,
+		primaryOutcomeAddress(outcome),
+	} {
+		addExpectedClientAddress(addresses, value)
+	}
+	collectExpectedAddresses(addresses, outcome.NewAddresses)
+	return addresses
+}
+
+func addExpectedClientAddress(addresses map[string]struct{}, value string) {
+	normalized := normalizeIPAddress(value)
+	if normalized == "" {
+		return
+	}
+	addresses[normalized] = struct{}{}
+}
+
+func collectExpectedAddresses(addresses map[string]struct{}, value interface{}) {
+	switch raw := value.(type) {
+	case map[string]interface{}:
+		for _, nested := range raw {
+			collectExpectedAddresses(addresses, nested)
+		}
+	case []interface{}:
+		for _, nested := range raw {
+			collectExpectedAddresses(addresses, nested)
+		}
+	case []string:
+		for _, nested := range raw {
+			addExpectedClientAddress(addresses, nested)
+		}
+	case string:
+		addExpectedClientAddress(addresses, raw)
+	}
+}
+
+func normalizeIPAddress(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	ip := net.ParseIP(value)
+	if ip == nil {
+		return ""
+	}
+	return ip.String()
+}
+
+func clientMatchesExpectedAddress(client models.Client, expectedAddresses map[string]struct{}) bool {
+	if len(expectedAddresses) == 0 {
+		return false
+	}
+	for _, value := range []string{client.IPv4, client.IPv6} {
+		normalized := normalizeIPAddress(value)
+		if normalized == "" {
+			continue
+		}
+		if _, ok := expectedAddresses[normalized]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func clientCreatedForExecution(client models.Client, startedAt time.Time) bool {
+	createdAt := client.CreatedAt.ToTime()
+	if createdAt.IsZero() {
+		return false
+	}
+	return !createdAt.Before(startedAt)
+}
+
+func pickPreferredAutoConnectClient(
+	candidates []models.Client,
+	startedAt time.Time,
+	expectedAddresses map[string]struct{},
+) string {
+	if len(candidates) == 0 {
+		return ""
+	}
+
+	ipMatches := make([]models.Client, 0, len(candidates))
+	newClients := make([]models.Client, 0, len(candidates))
+	for _, client := range candidates {
+		if clientMatchesExpectedAddress(client, expectedAddresses) {
+			ipMatches = append(ipMatches, client)
+		}
+		if clientCreatedForExecution(client, startedAt) {
+			newClients = append(newClients, client)
+		}
+	}
+
+	if len(ipMatches) > 0 {
+		sortClientsNewestFirst(ipMatches)
+		return ipMatches[0].UUID
+	}
+	if len(expectedAddresses) > 0 {
+		return ""
+	}
+	if len(newClients) > 0 {
+		sortClientsNewestFirst(newClients)
+		return newClients[0].UUID
+	}
+	return ""
 }
 
 func sortClientsNewestFirst(clients []models.Client) {

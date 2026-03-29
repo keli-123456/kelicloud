@@ -111,7 +111,7 @@ func TestWaitForClientByGroupStopsWhenContextCancelled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	clientUUID, err := waitForClientByGroup(ctx, "user-a", "test-group", "", time.Now(), 30)
+	clientUUID, err := waitForClientByGroup(ctx, "user-a", "test-group", "", time.Now(), 30, nil)
 	if err == nil {
 		t.Fatal("expected waitForClientByGroup to stop on cancelled context")
 	}
@@ -120,6 +120,78 @@ func TestWaitForClientByGroupStopsWhenContextCancelled(t *testing.T) {
 	}
 	if clientUUID != "" {
 		t.Fatalf("expected empty client UUID, got %q", clientUUID)
+	}
+}
+
+func TestPickPreferredAutoConnectClientPrefersExpectedIPAddress(t *testing.T) {
+	startedAt := time.Now()
+	candidates := []models.Client{
+		{
+			UUID:      "first-task-client",
+			IPv4:      "1.1.1.1",
+			CreatedAt: models.FromTime(startedAt.Add(-10 * time.Minute)),
+		},
+		{
+			UUID:      "new-task-client",
+			IPv4:      "2.2.2.2",
+			CreatedAt: models.FromTime(startedAt.Add(15 * time.Second)),
+		},
+	}
+
+	expected := expectedClientAddresses(&actionOutcome{IPv4: "2.2.2.2"})
+	if got := pickPreferredAutoConnectClient(candidates, startedAt, expected); got != "new-task-client" {
+		t.Fatalf("expected new-task-client, got %q", got)
+	}
+}
+
+func TestPickPreferredAutoConnectClientFallsBackToNewlyCreatedClient(t *testing.T) {
+	startedAt := time.Now()
+	candidates := []models.Client{
+		{
+			UUID:      "old-client",
+			IPv4:      "1.1.1.1",
+			CreatedAt: models.FromTime(startedAt.Add(-5 * time.Minute)),
+		},
+		{
+			UUID:      "fresh-client",
+			IPv4:      "2.2.2.2",
+			CreatedAt: models.FromTime(startedAt.Add(10 * time.Second)),
+		},
+	}
+
+	if got := pickPreferredAutoConnectClient(candidates, startedAt, nil); got != "fresh-client" {
+		t.Fatalf("expected fresh-client, got %q", got)
+	}
+}
+
+func TestPickPreferredAutoConnectClientRequiresIPMatchWhenExpectedAddressExists(t *testing.T) {
+	startedAt := time.Now()
+	candidates := []models.Client{
+		{
+			UUID:      "fresh-client",
+			IPv4:      "2.2.2.2",
+			CreatedAt: models.FromTime(startedAt.Add(10 * time.Second)),
+		},
+	}
+
+	expected := expectedClientAddresses(&actionOutcome{IPv4: "3.3.3.3"})
+	if got := pickPreferredAutoConnectClient(candidates, startedAt, expected); got != "" {
+		t.Fatalf("expected no client without IP match, got %q", got)
+	}
+}
+
+func TestPickPreferredAutoConnectClientIgnoresOlderSameGroupClients(t *testing.T) {
+	startedAt := time.Now()
+	candidates := []models.Client{
+		{
+			UUID:      "first-task-client",
+			IPv4:      "1.1.1.1",
+			CreatedAt: models.FromTime(startedAt.Add(-30 * time.Minute)),
+		},
+	}
+
+	if got := pickPreferredAutoConnectClient(candidates, startedAt, nil); got != "" {
+		t.Fatalf("expected no client to be selected, got %q", got)
 	}
 }
 
