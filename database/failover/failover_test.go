@@ -213,3 +213,68 @@ func TestStopExecutionForUserMarksExecutionFailed(t *testing.T) {
 		t.Fatalf("expected step status %q, got %q", models.FailoverStepStatusFailed, updatedStep.Status)
 	}
 }
+
+func TestListTasksByUserWithDBUsesStableCreationOrder(t *testing.T) {
+	db := openFailoverTestDB(t)
+	if err := db.AutoMigrate(
+		&models.FailoverTask{},
+		&models.FailoverPlan{},
+	); err != nil {
+		t.Fatalf("failed to migrate test schema: %v", err)
+	}
+
+	firstCreatedAt := models.FromTime(time.Now().Add(-2 * time.Hour))
+	secondCreatedAt := models.FromTime(time.Now().Add(-1 * time.Hour))
+	firstUpdatedAt := models.FromTime(time.Now())
+	secondUpdatedAt := models.FromTime(time.Now().Add(-3 * time.Hour))
+
+	firstTask := &models.FailoverTask{
+		UserID:          "user-a",
+		Name:            "task-a",
+		Enabled:         true,
+		WatchClientUUID: "client-a",
+		LastStatus:      models.FailoverTaskStatusUnknown,
+		CreatedAt:       firstCreatedAt,
+		UpdatedAt:       firstUpdatedAt,
+	}
+	secondTask := &models.FailoverTask{
+		UserID:          "user-a",
+		Name:            "task-b",
+		Enabled:         true,
+		WatchClientUUID: "client-b",
+		LastStatus:      models.FailoverTaskStatusUnknown,
+		CreatedAt:       secondCreatedAt,
+		UpdatedAt:       secondUpdatedAt,
+	}
+	otherUserTask := &models.FailoverTask{
+		UserID:          "user-b",
+		Name:            "task-c",
+		Enabled:         true,
+		WatchClientUUID: "client-c",
+		LastStatus:      models.FailoverTaskStatusUnknown,
+	}
+
+	if err := db.Create(firstTask).Error; err != nil {
+		t.Fatalf("failed to create first task: %v", err)
+	}
+	if err := db.Create(secondTask).Error; err != nil {
+		t.Fatalf("failed to create second task: %v", err)
+	}
+	if err := db.Create(otherUserTask).Error; err != nil {
+		t.Fatalf("failed to create scoped-out task: %v", err)
+	}
+
+	taskList, err := listTasksByUserWithDB(db, "user-a")
+	if err != nil {
+		t.Fatalf("listTasksByUserWithDB returned error: %v", err)
+	}
+	if len(taskList) != 2 {
+		t.Fatalf("expected 2 tasks for user-a, got %d", len(taskList))
+	}
+	if taskList[0].ID != firstTask.ID {
+		t.Fatalf("expected first created task first, got task id %d", taskList[0].ID)
+	}
+	if taskList[1].ID != secondTask.ID {
+		t.Fatalf("expected second created task second, got task id %d", taskList[1].ID)
+	}
+}

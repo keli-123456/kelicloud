@@ -136,8 +136,7 @@ func listTasksByUserWithDB(db *gorm.DB, userUUID string) ([]models.FailoverTask,
 
 	var taskList []models.FailoverTask
 	if err := preloadFailoverTask(taskScopeWithDB(db, userUUID)).
-		Order("updated_at DESC").
-		Order("id DESC").
+		Order("id ASC").
 		Find(&taskList).Error; err != nil {
 		return nil, err
 	}
