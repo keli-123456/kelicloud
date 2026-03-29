@@ -33,6 +33,8 @@ type dnsUpdateResult struct {
 	RR       string `json:"rr,omitempty"`
 }
 
+type DNSUpdateResult = dnsUpdateResult
+
 type DNSCatalog struct {
 	Provider string             `json:"provider"`
 	Defaults DNSCatalogDefaults `json:"defaults"`
@@ -202,6 +204,10 @@ func applyDNSRecord(userUUID, providerName, entryID, payloadJSON, ipv4, ipv6 str
 	default:
 		return nil, fmt.Errorf("unsupported dns provider: %s", providerName)
 	}
+}
+
+func ApplyDNSRecord(userUUID, providerName, entryID, payloadJSON, ipv4, ipv6 string) (*DNSUpdateResult, error) {
+	return applyDNSRecord(userUUID, providerName, entryID, payloadJSON, ipv4, ipv6)
 }
 
 func loadCloudflareDNSCatalog(userUUID, entryID, zoneName string) (*DNSCatalog, error) {

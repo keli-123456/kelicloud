@@ -14,6 +14,9 @@ func TestParseCloudProviderEntriesFromLegacyObject(t *testing.T) {
 	if len(entries) != 1 {
 		t.Fatalf("expected 1 entry, got %d", len(entries))
 	}
+	if entries[0].ID != "default" {
+		t.Fatalf("expected legacy entry id to normalize to default, got %q", entries[0].ID)
+	}
 	if entries[0].Name != defaultCloudProviderEntryName {
 		t.Fatalf("expected default entry name, got %q", entries[0].Name)
 	}

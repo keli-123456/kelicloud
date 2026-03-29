@@ -37,6 +37,7 @@ import (
 	"github.com/komari-monitor/komari/database/tasks"
 	"github.com/komari-monitor/komari/public"
 	"github.com/komari-monitor/komari/utils"
+	clientddns "github.com/komari-monitor/komari/utils/clientddns"
 	"github.com/komari-monitor/komari/utils/cloudflared"
 	_ "github.com/komari-monitor/komari/utils/cloudprovider"
 	"github.com/komari-monitor/komari/utils/failover"
@@ -353,6 +354,14 @@ func RunServer() {
 			clientGroup.POST("/order", admin.OrderWeight)
 			// client terminal
 			clientGroup.GET("/:uuid/terminal", api.RequestTerminal)
+			clientDDNSGroup := clientGroup.Group("/:uuid/ddns", admin.RequireUserFeatureMiddleware(config.UserFeatureCloudDNS))
+			{
+				clientDDNSGroup.GET("", admin.GetClientDDNSBinding)
+				clientDDNSGroup.POST("", admin.SaveClientDDNSBinding)
+				clientDDNSGroup.POST("/remove", admin.DeleteClientDDNSBinding)
+				clientDDNSGroup.POST("/sync", admin.SyncClientDDNSBinding)
+				clientDDNSGroup.GET("/catalog", admin.GetClientDDNSCatalog)
+			}
 		}
 
 		// records
@@ -520,6 +529,7 @@ func DoScheduledWork() {
 			// 每分钟检查一次流量提醒
 			go notifier.CheckTraffic()
 			failover.RunScheduledWork()
+			clientddns.RunScheduledSync()
 			offlinecleanup.RunScheduledWork()
 		}
 	}

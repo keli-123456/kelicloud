@@ -628,7 +628,7 @@ func findDNSProviderEntryForScope(scope ownerScope, providerName, entryID string
 			return nil, fmt.Errorf("provider %s entry %s was not found", providerName, entryID)
 		}
 
-		if entryID == "default" {
+		if entryID == "default" || entryID == "legacy-default" {
 			values := map[string]interface{}{}
 			if err := json.Unmarshal([]byte(trimmed), &values); err != nil {
 				return nil, fmt.Errorf("invalid DNS provider configuration: %w", err)

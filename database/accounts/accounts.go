@@ -322,6 +322,7 @@ func DeleteUserByUUID(userUUID string) error {
 			&models.CloudProvider{},
 			&models.CloudInstanceShare{},
 			&models.Clipboard{},
+			&models.ClientDDNSBinding{},
 			&models.Log{},
 			&models.LoadNotification{},
 			&models.PingTask{},

@@ -47,6 +47,7 @@ func deleteClientTx(tx *gorm.DB, clientUuid string) error {
 		query string
 	}{
 		{model: &common.ClientConfig{}, query: "client_uuid = ?"},
+		{model: &models.ClientDDNSBinding{}, query: "client_uuid = ?"},
 		{model: &models.OfflineNotification{}, query: "client = ?"},
 		{model: &models.TaskResult{}, query: "client = ?"},
 		{model: &models.PingRecord{}, query: "client = ?"},

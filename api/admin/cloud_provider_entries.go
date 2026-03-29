@@ -83,7 +83,7 @@ func parseCloudProviderEntries(addition string) ([]cloudProviderEntry, error) {
 	}
 
 	return []cloudProviderEntry{normalizeCloudProviderEntry(cloudProviderEntry{
-		ID:     uuid.NewString(),
+		ID:     "default",
 		Name:   defaultCloudProviderEntryName,
 		Values: legacyValues,
 	})}, nil
@@ -181,7 +181,7 @@ func convertLegacyAdditionToCloudProviderEntries(addition string) ([]cloudProvid
 	}
 
 	return []cloudProviderEntry{{
-		ID:     uuid.NewString(),
+		ID:     "default",
 		Name:   defaultCloudProviderEntryName,
 		Values: legacyValues,
 	}}, nil
