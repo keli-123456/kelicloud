@@ -70,12 +70,23 @@ type currentInstanceCleanup struct {
 	Addresses map[string]interface{}
 	Label     string
 	Cleanup   func() error
+	Missing   bool
 }
 
 type blockedOutletError struct {
 	ClientUUID string
 	Status     string
 	Message    string
+}
+
+func isDigitalOceanNotFoundError(err error) bool {
+	var apiErr *digitalocean.APIError
+	return errors.As(err, &apiErr) && apiErr != nil && apiErr.StatusCode == 404
+}
+
+func isLinodeNotFoundError(err error) bool {
+	var apiErr *linodecloud.APIError
+	return errors.As(err, &apiErr) && apiErr != nil && apiErr.StatusCode == 404
 }
 
 func (e *blockedOutletError) Error() string {
@@ -619,6 +630,23 @@ func (r *executionRunner) executePlanActionWithProviderPool(plan models.Failover
 				attemptDetail["error"] = finalizeErr.Error()
 				attemptDetail["failure_class"] = executionDecision.Class
 				if executionDecision.RetrySameEntry && attemptNumber < maxAttempts {
+					retryDetail := map[string]interface{}{
+						"entry_id":       candidate.EntryID,
+						"entry_name":     candidate.EntryName,
+						"attempt":        attemptNumber,
+						"next_attempt":   attemptNumber + 1,
+						"failure_class":  executionDecision.Class,
+						"error_message":  finalizeErr.Error(),
+						"provider":       selectedPlan.Provider,
+						"provider_entry": candidate.EntryID,
+					}
+					retryStep := r.startStep("retry_same_entry", "Retry Same Provider Entry", retryDetail)
+					r.finishStep(
+						retryStep,
+						models.FailoverStepStatusSuccess,
+						"retryable new-outlet failure detected; retrying the same provider entry",
+						retryDetail,
+					)
 					attemptDetail["status"] = "retry"
 					entryAttempts = append(entryAttempts, attemptDetail)
 					continue
@@ -1736,12 +1764,18 @@ func (r *executionRunner) ensureCurrentOutletAddress() (string, error) {
 }
 
 func (r *executionRunner) recycleCurrentOutletForCandidate(plan models.FailoverPlan, candidate providerPoolCandidate) (map[string]interface{}, error) {
-	cleanup, err := resolveCurrentInstanceCleanupFromRef(r.task.UserID, parseJSONMap(r.task.CurrentInstanceRef))
+	currentRef := parseJSONMap(r.task.CurrentInstanceRef)
+	cleanup, err := resolveCurrentInstanceCleanupFromRef(r.task.UserID, currentRef)
 	if err != nil {
 		return nil, err
 	}
+	staleCurrentOutlet := cleanup != nil && cleanup.Missing
 	if cleanup != nil && (strings.ToLower(strings.TrimSpace(stringMapValue(cleanup.Ref, "provider"))) != strings.ToLower(strings.TrimSpace(plan.Provider)) ||
 		strings.TrimSpace(providerEntryIDFromRef(cleanup.Ref)) != strings.TrimSpace(candidate.EntryID)) {
+		cleanup = nil
+		staleCurrentOutlet = false
+	}
+	if staleCurrentOutlet {
 		cleanup = nil
 	}
 	if cleanup == nil {
@@ -1749,6 +1783,23 @@ func (r *executionRunner) recycleCurrentOutletForCandidate(plan models.FailoverP
 		if err != nil {
 			return nil, err
 		}
+	}
+	if cleanup == nil && staleCurrentOutlet {
+		reclaimStep := r.startStep("reclaim_current", "Pre-Provision Old Instance Cleanup", map[string]interface{}{
+			"provider": plan.Provider,
+			"entry_id": candidate.EntryID,
+			"ref":      currentRef,
+		})
+		detail := map[string]interface{}{
+			"message": "current outlet was already missing; continuing with provisioning",
+			"missing": true,
+		}
+		if len(currentRef) > 0 {
+			detail["ref"] = currentRef
+		}
+		r.clearCurrentOutletTracking()
+		r.finishStep(reclaimStep, models.FailoverStepStatusSkipped, "current outlet was already missing; skipping delete", detail)
+		return detail, nil
 	}
 	if cleanup == nil || cleanup.Cleanup == nil {
 		return nil, nil
@@ -1774,14 +1825,18 @@ func (r *executionRunner) recycleCurrentOutletForCandidate(plan models.FailoverP
 	if len(cleanup.Addresses) > 0 {
 		detail["addresses"] = cleanup.Addresses
 	}
+	r.clearCurrentOutletTracking()
+	r.finishStep(reclaimStep, models.FailoverStepStatusSuccess, "current failed outlet deleted to free capacity", detail)
+	return detail, nil
+}
+
+func (r *executionRunner) clearCurrentOutletTracking() {
 	r.task.CurrentInstanceRef = ""
 	r.task.CurrentAddress = ""
 	_ = failoverdb.UpdateTaskFields(r.task.ID, map[string]interface{}{
 		"current_instance_ref": "",
 		"current_address":      "",
 	})
-	r.finishStep(reclaimStep, models.FailoverStepStatusSuccess, "current failed outlet deleted to free capacity", detail)
-	return detail, nil
 }
 
 func resolveDigitalOceanCurrentInstanceCleanupForToken(userUUID, address string, tokenAddition *digitalocean.Addition, token *digitalocean.TokenRecord, entryID, entryName string) (*currentInstanceCleanup, error) {
@@ -1817,6 +1872,10 @@ func resolveDigitalOceanCurrentInstanceCleanupForToken(userUUID, address string,
 			Label: fmt.Sprintf("delete digitalocean droplet %d", droplet.ID),
 			Cleanup: func() error {
 				if err := client.DeleteDroplet(context.Background(), droplet.ID); err != nil {
+					if isDigitalOceanNotFoundError(err) {
+						removeSavedDigitalOceanRootPassword(userUUID, tokenAddition, token, droplet.ID)
+						return nil
+					}
 					return err
 				}
 				removeSavedDigitalOceanRootPassword(userUUID, tokenAddition, token, droplet.ID)
@@ -1860,6 +1919,10 @@ func resolveLinodeCurrentInstanceCleanupForToken(userUUID, address string, token
 			Label: fmt.Sprintf("delete linode instance %d", instance.ID),
 			Cleanup: func() error {
 				if err := client.DeleteInstance(context.Background(), instance.ID); err != nil {
+					if isLinodeNotFoundError(err) {
+						removeSavedLinodeRootPassword(userUUID, tokenAddition, token, instance.ID)
+						return nil
+					}
 					return err
 				}
 				removeSavedLinodeRootPassword(userUUID, tokenAddition, token, instance.ID)
@@ -2008,11 +2071,33 @@ func resolveCurrentInstanceCleanupFromRef(userUUID string, ref map[string]interf
 		if name := providerEntryNameFromRef(ref); name != "" {
 			resolvedRef["provider_entry_name"] = name
 		}
+		droplets, err := client.ListDroplets(context.Background())
+		if err != nil {
+			return nil, err
+		}
+		exists := false
+		for _, droplet := range droplets {
+			if droplet.ID == dropletID {
+				exists = true
+				break
+			}
+		}
+		if !exists {
+			return &currentInstanceCleanup{
+				Ref:     resolvedRef,
+				Label:   fmt.Sprintf("delete digitalocean droplet %d", dropletID),
+				Missing: true,
+			}, nil
+		}
 		return &currentInstanceCleanup{
 			Ref:   resolvedRef,
 			Label: fmt.Sprintf("delete digitalocean droplet %d", dropletID),
 			Cleanup: func() error {
 				if err := client.DeleteDroplet(context.Background(), dropletID); err != nil {
+					if isDigitalOceanNotFoundError(err) {
+						removeSavedDigitalOceanRootPassword(userUUID, addition, token, dropletID)
+						return nil
+					}
 					return err
 				}
 				removeSavedDigitalOceanRootPassword(userUUID, addition, token, dropletID)
@@ -2038,11 +2123,25 @@ func resolveCurrentInstanceCleanupFromRef(userUUID string, ref map[string]interf
 		if name := providerEntryNameFromRef(ref); name != "" {
 			resolvedRef["provider_entry_name"] = name
 		}
+		if _, err := client.GetInstance(context.Background(), instanceID); err != nil {
+			if isLinodeNotFoundError(err) {
+				return &currentInstanceCleanup{
+					Ref:     resolvedRef,
+					Label:   fmt.Sprintf("delete linode instance %d", instanceID),
+					Missing: true,
+				}, nil
+			}
+			return nil, err
+		}
 		return &currentInstanceCleanup{
 			Ref:   resolvedRef,
 			Label: fmt.Sprintf("delete linode instance %d", instanceID),
 			Cleanup: func() error {
 				if err := client.DeleteInstance(context.Background(), instanceID); err != nil {
+					if isLinodeNotFoundError(err) {
+						removeSavedLinodeRootPassword(userUUID, addition, token, instanceID)
+						return nil
+					}
 					return err
 				}
 				removeSavedLinodeRootPassword(userUUID, addition, token, instanceID)
