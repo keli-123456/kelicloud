@@ -25,6 +25,10 @@ func TestCredentialRecordSetCheckResultStoresQuota(t *testing.T) {
 		MaxInstances:                     20,
 		MaxElasticIPs:                    5,
 		VPCMaxSecurityGroupsPerInterface: 5,
+		RunningInstances:                 3,
+		TotalInstances:                   4,
+		AllocatedElasticIPs:              2,
+		AssociatedElasticIPs:             1,
 	}, nil, nil)
 
 	require.Equal(t, CredentialStatusHealthy, credential.LastStatus)
@@ -35,7 +39,24 @@ func TestCredentialRecordSetCheckResultStoresQuota(t *testing.T) {
 	require.Equal(t, 20, credential.EC2Quota.MaxInstances)
 	require.Equal(t, 5, credential.EC2Quota.MaxElasticIPs)
 	require.Equal(t, 5, credential.EC2Quota.VPCMaxSecurityGroupsPerInterface)
+	require.Equal(t, 3, credential.EC2Quota.RunningInstances)
+	require.Equal(t, 4, credential.EC2Quota.TotalInstances)
+	require.Equal(t, 2, credential.EC2Quota.AllocatedElasticIPs)
+	require.Equal(t, 1, credential.EC2Quota.AssociatedElasticIPs)
 	require.Empty(t, credential.EC2QuotaError)
+}
+
+func TestNormalizeEC2QuotaSummaryKeepsUsageOnlyData(t *testing.T) {
+	summary := normalizeEC2QuotaSummary(&EC2QuotaSummary{
+		Region:              "us-east-1",
+		RunningInstances:    2,
+		AllocatedElasticIPs: 1,
+	})
+
+	require.NotNil(t, summary)
+	require.Equal(t, "us-east-1", summary.Region)
+	require.Equal(t, 2, summary.RunningInstances)
+	require.Equal(t, 1, summary.AllocatedElasticIPs)
 }
 
 func TestCredentialRecordSetCheckResultKeepsHealthyWhenQuotaLookupFails(t *testing.T) {

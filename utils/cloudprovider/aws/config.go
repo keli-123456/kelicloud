@@ -500,7 +500,11 @@ func normalizeEC2QuotaSummary(summary *EC2QuotaSummary) *EC2QuotaSummary {
 	if summary.MaxInstances == 0 &&
 		summary.MaxElasticIPs == 0 &&
 		summary.VPCMaxElasticIPs == 0 &&
-		summary.VPCMaxSecurityGroupsPerInterface == 0 {
+		summary.VPCMaxSecurityGroupsPerInterface == 0 &&
+		summary.RunningInstances == 0 &&
+		summary.TotalInstances == 0 &&
+		summary.AllocatedElasticIPs == 0 &&
+		summary.AssociatedElasticIPs == 0 {
 		return nil
 	}
 

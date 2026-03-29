@@ -375,6 +375,69 @@ func ReleaseAddress(ctx context.Context, credential *CredentialRecord, region, a
 	return err
 }
 
+func AllowAllSecurityGroupTraffic(ctx context.Context, credential *CredentialRecord, region, instanceID string) ([]string, error) {
+	cfg, err := buildConfig(ctx, credential, region)
+	if err != nil {
+		return nil, err
+	}
+
+	client := ec2.NewFromConfig(cfg)
+	instance, err := describeInstance(ctx, client, instanceID)
+	if err != nil {
+		return nil, err
+	}
+
+	groupIDs := make([]string, 0, len(instance.SecurityGroups))
+	for _, group := range instance.SecurityGroups {
+		groupID := strings.TrimSpace(awssdk.ToString(group.GroupId))
+		if groupID == "" {
+			continue
+		}
+		groupIDs = append(groupIDs, groupID)
+	}
+	if len(groupIDs) == 0 {
+		return nil, fmt.Errorf("instance has no security groups: %s", strings.TrimSpace(instanceID))
+	}
+
+	output, err := client.DescribeSecurityGroups(ctx, &ec2.DescribeSecurityGroupsInput{
+		GroupIds: groupIDs,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	for _, group := range output.SecurityGroups {
+		groupID := strings.TrimSpace(awssdk.ToString(group.GroupId))
+		if groupID == "" {
+			continue
+		}
+
+		if !hasAllTrafficRule(group.IpPermissions, "0.0.0.0/0", false) {
+			if err := authorizeSecurityGroupIngress(ctx, client, groupID, "0.0.0.0/0", false); err != nil {
+				return nil, err
+			}
+		}
+		if !hasAllTrafficRule(group.IpPermissions, "::/0", true) {
+			if err := authorizeSecurityGroupIngress(ctx, client, groupID, "::/0", true); err != nil {
+				return nil, err
+			}
+		}
+		if !hasAllTrafficRule(group.IpPermissionsEgress, "0.0.0.0/0", false) {
+			if err := authorizeSecurityGroupEgress(ctx, client, groupID, "0.0.0.0/0", false); err != nil {
+				return nil, err
+			}
+		}
+		if !hasAllTrafficRule(group.IpPermissionsEgress, "::/0", true) {
+			if err := authorizeSecurityGroupEgress(ctx, client, groupID, "::/0", true); err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	sort.Strings(groupIDs)
+	return groupIDs, nil
+}
+
 func describeInstance(ctx context.Context, client *ec2.Client, instanceID string) (ec2types.Instance, error) {
 	output, err := client.DescribeInstances(ctx, &ec2.DescribeInstancesInput{
 		InstanceIds: []string{strings.TrimSpace(instanceID)},
@@ -482,6 +545,76 @@ func getInstanceConsoleOutput(ctx context.Context, client *ec2.Client, instanceI
 		return strings.TrimSpace(string(decoded))
 	}
 	return value
+}
+
+func hasAllTrafficRule(permissions []ec2types.IpPermission, cidr string, ipv6 bool) bool {
+	cidr = strings.TrimSpace(cidr)
+	if cidr == "" {
+		return false
+	}
+
+	for _, permission := range permissions {
+		if strings.TrimSpace(awssdk.ToString(permission.IpProtocol)) != "-1" {
+			continue
+		}
+		if ipv6 {
+			for _, item := range permission.Ipv6Ranges {
+				if strings.TrimSpace(awssdk.ToString(item.CidrIpv6)) == cidr {
+					return true
+				}
+			}
+			continue
+		}
+		for _, item := range permission.IpRanges {
+			if strings.TrimSpace(awssdk.ToString(item.CidrIp)) == cidr {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+func authorizeSecurityGroupIngress(ctx context.Context, client *ec2.Client, groupID, cidr string, ipv6 bool) error {
+	permission := ec2types.IpPermission{
+		IpProtocol: awssdk.String("-1"),
+	}
+	if ipv6 {
+		permission.Ipv6Ranges = []ec2types.Ipv6Range{
+			{CidrIpv6: awssdk.String(strings.TrimSpace(cidr))},
+		}
+	} else {
+		permission.IpRanges = []ec2types.IpRange{
+			{CidrIp: awssdk.String(strings.TrimSpace(cidr))},
+		}
+	}
+
+	_, err := client.AuthorizeSecurityGroupIngress(ctx, &ec2.AuthorizeSecurityGroupIngressInput{
+		GroupId:       awssdk.String(strings.TrimSpace(groupID)),
+		IpPermissions: []ec2types.IpPermission{permission},
+	})
+	return err
+}
+
+func authorizeSecurityGroupEgress(ctx context.Context, client *ec2.Client, groupID, cidr string, ipv6 bool) error {
+	permission := ec2types.IpPermission{
+		IpProtocol: awssdk.String("-1"),
+	}
+	if ipv6 {
+		permission.Ipv6Ranges = []ec2types.Ipv6Range{
+			{CidrIpv6: awssdk.String(strings.TrimSpace(cidr))},
+		}
+	} else {
+		permission.IpRanges = []ec2types.IpRange{
+			{CidrIp: awssdk.String(strings.TrimSpace(cidr))},
+		}
+	}
+
+	_, err := client.AuthorizeSecurityGroupEgress(ctx, &ec2.AuthorizeSecurityGroupEgressInput{
+		GroupId:       awssdk.String(strings.TrimSpace(groupID)),
+		IpPermissions: []ec2types.IpPermission{permission},
+	})
+	return err
 }
 
 func mapSecurityGroups(items []ec2types.GroupIdentifier) []SecurityGroup {

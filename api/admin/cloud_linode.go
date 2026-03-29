@@ -374,6 +374,42 @@ func GetLinodeAccount(c *gin.Context) {
 	})
 }
 
+func RedeemLinodePromoCode(c *gin.Context) {
+	scope, ok := requireCurrentOwnerScope(c)
+	if !ok {
+		return
+	}
+
+	client, ctx, cancel, err := getLinodeClient(c, scope)
+	if err != nil {
+		respondLinodeError(c, err)
+		return
+	}
+	defer cancel()
+
+	var payload struct {
+		PromoCode string `json:"promo_code" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&payload); err != nil {
+		api.RespondError(c, http.StatusBadRequest, "Invalid promo code payload: "+err.Error())
+		return
+	}
+
+	payload.PromoCode = strings.TrimSpace(payload.PromoCode)
+	if payload.PromoCode == "" {
+		api.RespondError(c, http.StatusBadRequest, "promo_code is required")
+		return
+	}
+
+	if err := client.RedeemPromoCode(ctx, payload.PromoCode); err != nil {
+		respondLinodeError(c, err)
+		return
+	}
+
+	logCloudAudit(c, "redeem linode promo code")
+	api.RespondSuccess(c, nil)
+}
+
 func GetLinodeCatalog(c *gin.Context) {
 	scope, ok := requireCurrentOwnerScope(c)
 	if !ok {

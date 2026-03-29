@@ -389,6 +389,11 @@ func GetAWSCatalog(c *gin.Context) {
 		respondAWSError(c, err)
 		return
 	}
+	instanceTypeOfferings, err := awscloud.ListInstanceTypeOfferings(ctx, credential, region)
+	if err != nil {
+		respondAWSError(c, err)
+		return
+	}
 	images, err := awscloud.ListSuggestedImages(ctx, credential, region)
 	if err != nil {
 		respondAWSError(c, err)
@@ -421,6 +426,9 @@ func GetAWSCatalog(c *gin.Context) {
 	if instanceTypes == nil {
 		instanceTypes = make([]awscloud.InstanceType, 0)
 	}
+	if instanceTypeOfferings == nil {
+		instanceTypeOfferings = make([]awscloud.InstanceTypeOffering, 0)
+	}
 	if images == nil {
 		images = make([]awscloud.Image, 0)
 	}
@@ -438,14 +446,15 @@ func GetAWSCatalog(c *gin.Context) {
 	}
 
 	api.RespondSuccess(c, gin.H{
-		"active_region":     region,
-		"regions":           regions,
-		"instance_types":    instanceTypes,
-		"images":            images,
-		"key_pairs":         keyPairs,
-		"subnets":           subnets,
-		"security_groups":   securityGroups,
-		"elastic_addresses": elasticAddresses,
+		"active_region":           region,
+		"regions":                 regions,
+		"instance_types":          instanceTypes,
+		"instance_type_offerings": instanceTypeOfferings,
+		"images":                  images,
+		"key_pairs":               keyPairs,
+		"subnets":                 subnets,
+		"security_groups":         securityGroups,
+		"elastic_addresses":       elasticAddresses,
 	})
 }
 
@@ -910,6 +919,10 @@ func PostAWSInstanceAction(c *gin.Context) {
 			return
 		}
 		err = awscloud.ReleaseAddress(ctx, credential, region, payload.AllocationID)
+	case "allow_all_traffic":
+		groupIDs, actionErr := awscloud.AllowAllSecurityGroupTraffic(ctx, credential, region, instanceID)
+		err = actionErr
+		response["security_group_ids"] = groupIDs
 	default:
 		api.RespondError(c, http.StatusBadRequest, "Unsupported instance action: "+payload.Type)
 		return
@@ -997,6 +1010,8 @@ func PostAWSLightsailInstanceAction(c *gin.Context) {
 		}
 		err = awscloud.ReleaseLightsailStaticIP(ctx, credential, region, payload.StaticIPName)
 		response["static_ip_name"] = strings.TrimSpace(payload.StaticIPName)
+	case "allow_all_traffic":
+		err = awscloud.OpenLightsailAllPublicPorts(ctx, credential, region, instanceName)
 	default:
 		api.RespondError(c, http.StatusBadRequest, "Unsupported Lightsail action: "+payload.Type)
 		return

@@ -535,6 +535,67 @@ func ReleaseLightsailStaticIP(ctx context.Context, credential *CredentialRecord,
 	return err
 }
 
+func OpenLightsailAllPublicPorts(ctx context.Context, credential *CredentialRecord, region, instanceName string) error {
+	client, err := newLightsailClient(ctx, credential, region)
+	if err != nil {
+		return err
+	}
+
+	output, err := client.GetInstance(ctx, &lightsail.GetInstanceInput{
+		InstanceName: awssdk.String(strings.TrimSpace(instanceName)),
+	})
+	if err != nil {
+		return err
+	}
+	if output.Instance == nil {
+		return fmt.Errorf("lightsail instance not found: %s", strings.TrimSpace(instanceName))
+	}
+
+	openIPv4 := true
+	openIPv6 := len(output.Instance.Ipv6Addresses) > 0
+	if output.Instance.Networking != nil {
+		for _, port := range output.Instance.Networking.Ports {
+			if strings.TrimSpace(string(port.Protocol)) != "all" || port.FromPort != 0 || port.ToPort != 65535 {
+				continue
+			}
+			for _, cidr := range port.Cidrs {
+				if strings.TrimSpace(cidr) == "0.0.0.0/0" {
+					openIPv4 = false
+					break
+				}
+			}
+			for _, cidr := range port.Ipv6Cidrs {
+				if strings.TrimSpace(cidr) == "::/0" {
+					openIPv6 = false
+					break
+				}
+			}
+		}
+	}
+
+	if !openIPv4 && !openIPv6 {
+		return nil
+	}
+
+	portInfo := &lightsailtypes.PortInfo{
+		FromPort: 0,
+		ToPort:   65535,
+		Protocol: lightsailtypes.NetworkProtocol("all"),
+	}
+	if openIPv4 {
+		portInfo.Cidrs = []string{"0.0.0.0/0"}
+	}
+	if openIPv6 {
+		portInfo.Ipv6Cidrs = []string{"::/0"}
+	}
+
+	_, err = client.OpenInstancePublicPorts(ctx, &lightsail.OpenInstancePublicPortsInput{
+		InstanceName: awssdk.String(strings.TrimSpace(instanceName)),
+		PortInfo:     portInfo,
+	})
+	return err
+}
+
 func newLightsailClient(ctx context.Context, credential *CredentialRecord, region string) (*lightsail.Client, error) {
 	cfg, err := buildConfig(ctx, credential, region)
 	if err != nil {

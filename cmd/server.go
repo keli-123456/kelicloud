@@ -301,6 +301,7 @@ func RunServer() {
 				linodeGroup.GET("/tokens/:id/secret", admin.GetLinodeTokenSecret)
 				linodeGroup.DELETE("/tokens/:id", admin.DeleteLinodeToken)
 				linodeGroup.GET("/account", admin.GetLinodeAccount)
+				linodeGroup.POST("/promo-codes", admin.RedeemLinodePromoCode)
 				linodeGroup.GET("/catalog", admin.GetLinodeCatalog)
 				linodeGroup.GET("/instances", admin.ListLinodeInstances)
 				linodeGroup.GET("/instances/:id", admin.GetLinodeInstanceDetail)

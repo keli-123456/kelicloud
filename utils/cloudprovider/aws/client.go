@@ -31,6 +31,10 @@ type EC2QuotaSummary struct {
 	MaxElasticIPs                    int    `json:"max_elastic_ips,omitempty"`
 	VPCMaxElasticIPs                 int    `json:"vpc_max_elastic_ips,omitempty"`
 	VPCMaxSecurityGroupsPerInterface int    `json:"vpc_max_security_groups_per_interface,omitempty"`
+	RunningInstances                 int    `json:"running_instances,omitempty"`
+	TotalInstances                   int    `json:"total_instances,omitempty"`
+	AllocatedElasticIPs              int    `json:"allocated_elastic_ips,omitempty"`
+	AssociatedElasticIPs             int    `json:"associated_elastic_ips,omitempty"`
 }
 
 type Region struct {
@@ -82,6 +86,11 @@ type SecurityGroup struct {
 	GroupName   string `json:"group_name"`
 	Description string `json:"description"`
 	VpcID       string `json:"vpc_id"`
+}
+
+type InstanceTypeOffering struct {
+	InstanceType      string   `json:"instance_type"`
+	AvailabilityZones []string `json:"availability_zones"`
 }
 
 type Instance struct {
@@ -202,6 +211,28 @@ func GetEC2QuotaSummary(ctx context.Context, credential *CredentialRecord, regio
 		summary.MaxElasticIPs == 0 &&
 		summary.VPCMaxElasticIPs == 0 &&
 		summary.VPCMaxSecurityGroupsPerInterface == 0 {
+		// Keep returning a summary when usage can still be observed even if
+		// account attributes are not populated for this credential.
+	}
+
+	if runningCount, totalCount, usageErr := getInstanceUsageCounts(ctx, client); usageErr == nil {
+		summary.RunningInstances = runningCount
+		summary.TotalInstances = totalCount
+	}
+
+	if allocatedCount, associatedCount, usageErr := getElasticAddressUsageCounts(ctx, client); usageErr == nil {
+		summary.AllocatedElasticIPs = allocatedCount
+		summary.AssociatedElasticIPs = associatedCount
+	}
+
+	if summary.MaxInstances == 0 &&
+		summary.MaxElasticIPs == 0 &&
+		summary.VPCMaxElasticIPs == 0 &&
+		summary.VPCMaxSecurityGroupsPerInterface == 0 &&
+		summary.RunningInstances == 0 &&
+		summary.TotalInstances == 0 &&
+		summary.AllocatedElasticIPs == 0 &&
+		summary.AssociatedElasticIPs == 0 {
 		return nil, nil
 	}
 
@@ -277,6 +308,57 @@ func ListInstanceTypes(ctx context.Context, credential *CredentialRecord, region
 		return instanceTypes[i].Name < instanceTypes[j].Name
 	})
 	return instanceTypes, nil
+}
+
+func ListInstanceTypeOfferings(ctx context.Context, credential *CredentialRecord, region string) ([]InstanceTypeOffering, error) {
+	cfg, err := buildConfig(ctx, credential, region)
+	if err != nil {
+		return nil, err
+	}
+
+	client := ec2.NewFromConfig(cfg)
+	paginator := ec2.NewDescribeInstanceTypeOfferingsPaginator(client, &ec2.DescribeInstanceTypeOfferingsInput{
+		LocationType: ec2types.LocationTypeAvailabilityZone,
+		MaxResults:   awssdk.Int32(100),
+	})
+
+	zoneSetsByType := make(map[string]map[string]struct{})
+	for paginator.HasMorePages() {
+		page, err := paginator.NextPage(ctx)
+		if err != nil {
+			return nil, err
+		}
+		for _, item := range page.InstanceTypeOfferings {
+			instanceType := strings.TrimSpace(string(item.InstanceType))
+			location := strings.TrimSpace(awssdk.ToString(item.Location))
+			if instanceType == "" || location == "" {
+				continue
+			}
+
+			if _, exists := zoneSetsByType[instanceType]; !exists {
+				zoneSetsByType[instanceType] = make(map[string]struct{})
+			}
+			zoneSetsByType[instanceType][location] = struct{}{}
+		}
+	}
+
+	offerings := make([]InstanceTypeOffering, 0, len(zoneSetsByType))
+	for instanceType, zoneSet := range zoneSetsByType {
+		zones := make([]string, 0, len(zoneSet))
+		for zone := range zoneSet {
+			zones = append(zones, zone)
+		}
+		sort.Strings(zones)
+		offerings = append(offerings, InstanceTypeOffering{
+			InstanceType:      instanceType,
+			AvailabilityZones: zones,
+		})
+	}
+
+	sort.Slice(offerings, func(i, j int) bool {
+		return offerings[i].InstanceType < offerings[j].InstanceType
+	})
+	return offerings, nil
 }
 
 func ListSuggestedImages(ctx context.Context, credential *CredentialRecord, region string) ([]Image, error) {
@@ -606,6 +688,52 @@ func mapInstance(item ec2types.Instance) Instance {
 		LaunchTime:       launchTime,
 		Tags:             tags,
 	}
+}
+
+func getInstanceUsageCounts(ctx context.Context, client *ec2.Client) (int, int, error) {
+	paginator := ec2.NewDescribeInstancesPaginator(client, &ec2.DescribeInstancesInput{
+		MaxResults: awssdk.Int32(100),
+	})
+
+	runningCount := 0
+	totalCount := 0
+	for paginator.HasMorePages() {
+		page, err := paginator.NextPage(ctx)
+		if err != nil {
+			return 0, 0, err
+		}
+		for _, reservation := range page.Reservations {
+			for _, item := range reservation.Instances {
+				state := item.State.Name
+				if state == ec2types.InstanceStateNameTerminated {
+					continue
+				}
+				totalCount++
+				if state == ec2types.InstanceStateNameRunning {
+					runningCount++
+				}
+			}
+		}
+	}
+
+	return runningCount, totalCount, nil
+}
+
+func getElasticAddressUsageCounts(ctx context.Context, client *ec2.Client) (int, int, error) {
+	output, err := client.DescribeAddresses(ctx, &ec2.DescribeAddressesInput{})
+	if err != nil {
+		return 0, 0, err
+	}
+
+	allocatedCount := len(output.Addresses)
+	associatedCount := 0
+	for _, item := range output.Addresses {
+		if strings.TrimSpace(awssdk.ToString(item.AssociationId)) != "" {
+			associatedCount++
+		}
+	}
+
+	return allocatedCount, associatedCount, nil
 }
 
 func buildTagSpecifications(name string, tags []Tag) []ec2types.TagSpecification {

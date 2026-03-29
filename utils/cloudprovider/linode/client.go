@@ -199,6 +199,12 @@ func (c *Client) GetAccount(ctx context.Context) (*Account, error) {
 	return getObject[Account](ctx, c, "/v4/account", nil)
 }
 
+func (c *Client) RedeemPromoCode(ctx context.Context, promoCode string) error {
+	return c.doEmpty(ctx, http.MethodPost, "/v4/account/promo-codes", nil, map[string]any{
+		"promo_code": strings.TrimSpace(promoCode),
+	})
+}
+
 func (c *Client) ListRegions(ctx context.Context) ([]Region, error) {
 	query := url.Values{"page_size": {"200"}}
 	return getPaginated[Region](ctx, c, "/v4/regions", query)
