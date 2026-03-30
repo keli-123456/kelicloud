@@ -527,7 +527,9 @@ func (r *executionRunner) executePlanActionWithProviderPool(plan models.Failover
 			}
 			if len(recycledDetail) > 0 {
 				candidateDetail["recycled_current_instance"] = recycledDetail
-				invalidateProviderEntrySnapshot(r.task.UserID, plan.Provider, candidate.EntryID)
+				if availabilityAfterRecycle := waitForProviderEntryCapacityAfterRecycle(r.ctx, r.task.UserID, plan, candidate); len(availabilityAfterRecycle) > 0 {
+					candidateDetail["availability_after_recycle"] = availabilityAfterRecycle
+				}
 			}
 		}
 
@@ -555,7 +557,9 @@ func (r *executionRunner) executePlanActionWithProviderPool(plan models.Failover
 					attemptDetail["recycle_error"] = recycleErr.Error()
 				} else if len(recycledDetail) > 0 {
 					attemptDetail["recycled_current_instance"] = recycledDetail
-					invalidateProviderEntrySnapshot(r.task.UserID, plan.Provider, candidate.EntryID)
+					if availabilityAfterRecycle := waitForProviderEntryCapacityAfterRecycle(r.ctx, r.task.UserID, selectedPlan, candidate); len(availabilityAfterRecycle) > 0 {
+						attemptDetail["availability_after_recycle"] = availabilityAfterRecycle
+					}
 					lease, availability, reserveErr = acquireProviderEntryLease(r.task.UserID, selectedPlan, candidate)
 					if len(availability) > 0 {
 						attemptDetail["availability"] = availability

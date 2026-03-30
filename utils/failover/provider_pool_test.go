@@ -1,6 +1,7 @@
 package failover
 
 import (
+	"context"
 	"sync"
 	"testing"
 	"time"
@@ -157,5 +158,58 @@ func TestBeginSerializedOperationAppliesMinimumSpacing(t *testing.T) {
 
 	if elapsed < 70*time.Millisecond {
 		t.Fatalf("expected serialized spacing to delay the second operation, got %s", elapsed)
+	}
+}
+
+func TestWaitForProviderEntryCapacityAfterRecyclePollsUntilFree(t *testing.T) {
+	originalScheduler := failoverProviderEntryScheduler
+	originalLoader := providerEntryCapacitySnapshotLoader
+	originalTimeout := providerEntryRecycleWaitTimeout
+	originalPollInterval := providerEntryRecycleWaitPollInterval
+	failoverProviderEntryScheduler = &providerEntryScheduler{
+		states: map[string]*providerEntryRuntimeState{},
+	}
+	providerEntryRecycleWaitTimeout = 80 * time.Millisecond
+	providerEntryRecycleWaitPollInterval = 1 * time.Millisecond
+	defer func() {
+		failoverProviderEntryScheduler = originalScheduler
+		providerEntryCapacitySnapshotLoader = originalLoader
+		providerEntryRecycleWaitTimeout = originalTimeout
+		providerEntryRecycleWaitPollInterval = originalPollInterval
+	}()
+
+	loadCalls := 0
+	providerEntryCapacitySnapshotLoader = func(userUUID string, plan models.FailoverPlan, candidate providerPoolCandidate) (*providerEntryCapacitySnapshot, error) {
+		loadCalls++
+		used := 3
+		if loadCalls >= 3 {
+			used = 2
+		}
+		return &providerEntryCapacitySnapshot{
+			FetchedAt: time.Now(),
+			Mode:      providerEntryCapacityModeQuota,
+			Limit:     3,
+			Used:      used,
+		}, nil
+	}
+
+	availability := waitForProviderEntryCapacityAfterRecycle(
+		context.Background(),
+		"user-1",
+		models.FailoverPlan{
+			Provider:   "digitalocean",
+			ActionType: models.FailoverActionProvisionInstance,
+		},
+		providerPoolCandidate{EntryID: "entry-1", EntryName: "Token 1"},
+	)
+
+	if loadCalls < 3 {
+		t.Fatalf("expected at least 3 snapshot refreshes, got %d", loadCalls)
+	}
+	if got := intMapValue(availability, "free"); got != 1 {
+		t.Fatalf("expected 1 free slot after recycle, got %d", got)
+	}
+	if got := stringMapValue(availability, "status"); got != "available" {
+		t.Fatalf("expected availability status to become available, got %q", got)
 	}
 }

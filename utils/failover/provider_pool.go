@@ -79,6 +79,12 @@ var failoverProviderEntryScheduler = &providerEntryScheduler{
 	states: map[string]*providerEntryRuntimeState{},
 }
 
+var (
+	providerEntryCapacitySnapshotLoader  = loadProviderEntryCapacitySnapshot
+	providerEntryRecycleWaitTimeout      = 25 * time.Second
+	providerEntryRecycleWaitPollInterval = 2 * time.Second
+)
+
 func (scheduler *providerEntryScheduler) stateFor(key string) *providerEntryRuntimeState {
 	scheduler.mu.Lock()
 	defer scheduler.mu.Unlock()
@@ -384,7 +390,29 @@ func (state *providerEntryRuntimeState) loadSnapshot(userUUID string, plan model
 		return state.snapshot, nil
 	}
 
-	snapshot, err := loadProviderEntryCapacitySnapshot(userUUID, plan, candidate)
+	snapshot, err := state.refreshSnapshot(userUUID, plan, candidate, now)
+	if err != nil {
+		return nil, err
+	}
+	return snapshot, nil
+}
+
+func (state *providerEntryRuntimeState) refreshSnapshot(userUUID string, plan models.FailoverPlan, candidate providerPoolCandidate, now time.Time) (*providerEntryCapacitySnapshot, error) {
+	if !shouldCheckProviderCapacity(plan) {
+		snapshot := &providerEntryCapacitySnapshot{
+			FetchedAt: now,
+			Mode:      providerEntryCapacityModeSerialized,
+			Limit:     1,
+			Detail: map[string]interface{}{
+				"policy": "serialized",
+			},
+		}
+		state.snapshot = snapshot
+		state.provisionedDelta = 0
+		return snapshot, nil
+	}
+
+	snapshot, err := providerEntryCapacitySnapshotLoader(userUUID, plan, candidate)
 	if err != nil {
 		return nil, err
 	}
@@ -392,6 +420,67 @@ func (state *providerEntryRuntimeState) loadSnapshot(userUUID string, plan model
 	state.snapshot = snapshot
 	state.provisionedDelta = 0
 	return snapshot, nil
+}
+
+func refreshProviderEntryAvailability(userUUID string, plan models.FailoverPlan, candidate providerPoolCandidate) (map[string]interface{}, error) {
+	key := providerEntryStateKey(userUUID, plan.Provider, candidate.EntryID)
+	state := failoverProviderEntryScheduler.stateFor(key)
+	finishTurn := state.beginTurn()
+	defer finishTurn()
+
+	now := time.Now()
+	if !state.cooldownUntil.IsZero() && state.cooldownUntil.After(now) {
+		availability := state.buildAvailability(nil, plan)
+		availability["status"] = "cooldown"
+		availability["reason"] = state.cooldownReason
+		availability["cooldown_until"] = state.cooldownUntil.UTC().Format(time.RFC3339)
+		return availability, fmt.Errorf("provider entry is cooling down until %s", state.cooldownUntil.UTC().Format(time.RFC3339))
+	}
+
+	snapshot, err := state.refreshSnapshot(userUUID, plan, candidate, now)
+	availability := state.buildAvailability(snapshot, plan)
+	if err != nil {
+		return availability, err
+	}
+	if intMapValue(availability, "free") > 0 {
+		availability["status"] = "available"
+	} else {
+		availability["status"] = "full"
+	}
+	return availability, nil
+}
+
+func waitForProviderEntryCapacityAfterRecycle(ctx context.Context, userUUID string, plan models.FailoverPlan, candidate providerPoolCandidate) map[string]interface{} {
+	if !shouldCheckProviderCapacity(plan) {
+		return nil
+	}
+
+	timeout := providerEntryRecycleWaitTimeout
+	if timeout <= 0 {
+		timeout = 1 * time.Second
+	}
+	pollInterval := providerEntryRecycleWaitPollInterval
+	if pollInterval <= 0 {
+		pollInterval = 250 * time.Millisecond
+	}
+
+	deadline := time.Now().Add(timeout)
+	var lastAvailability map[string]interface{}
+	for {
+		availability, err := refreshProviderEntryAvailability(userUUID, plan, candidate)
+		if len(availability) > 0 {
+			lastAvailability = availability
+		}
+		if err == nil && intMapValue(availability, "free") > 0 {
+			return availability
+		}
+		if time.Now().After(deadline) {
+			return lastAvailability
+		}
+		if err := waitContextOrDelay(ctx, pollInterval); err != nil {
+			return lastAvailability
+		}
+	}
 }
 
 func (state *providerEntryRuntimeState) availableSlots(snapshot *providerEntryCapacitySnapshot, plan models.FailoverPlan) int {
