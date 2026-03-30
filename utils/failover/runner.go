@@ -1210,6 +1210,16 @@ func waitForHealthyClientConnectivity(ctx context.Context, userUUID, clientUUID 
 	return nil, fmt.Errorf("timed out waiting for cn_connectivity report from client %s", clientUUID)
 }
 
+func resolveAutoConnectPoolGroup(plan models.FailoverPlan, credentialGroup string) string {
+	if group := strings.TrimSpace(plan.ProviderEntryGroup); group != "" {
+		return group
+	}
+	if entryID := strings.TrimSpace(plan.ProviderEntryID); entryID != "" && entryID != activeProviderEntryID {
+		return strings.TrimSpace(credentialGroup)
+	}
+	return ""
+}
+
 func persistDigitalOceanRootPassword(userUUID string, addition *digitalocean.Addition, token *digitalocean.TokenRecord, dropletID int, dropletName, passwordMode, rootPassword string) error {
 	if addition == nil || token == nil || dropletID <= 0 || strings.TrimSpace(rootPassword) == "" {
 		return nil
@@ -2688,6 +2698,7 @@ func provisionAWSInstance(ctx context.Context, userUUID string, plan models.Fail
 				UserData:          userData,
 				Provider:          "aws",
 				CredentialName:    credential.Name,
+				PoolGroup:         resolveAutoConnectPoolGroup(plan, credential.Group),
 				Group:             plan.AutoConnectGroup,
 				WrapInShellScript: true,
 			})
@@ -2766,6 +2777,7 @@ func provisionAWSInstance(ctx context.Context, userUUID string, plan models.Fail
 				UserData:          userData,
 				Provider:          "aws",
 				CredentialName:    credential.Name,
+				PoolGroup:         resolveAutoConnectPoolGroup(plan, credential.Group),
 				Group:             plan.AutoConnectGroup,
 				WrapInShellScript: true,
 			})
@@ -2858,6 +2870,7 @@ func provisionDigitalOceanDroplet(ctx context.Context, userUUID string, plan mod
 			UserData:          userData,
 			Provider:          "digitalocean",
 			CredentialName:    token.Name,
+			PoolGroup:         resolveAutoConnectPoolGroup(plan, token.Group),
 			Group:             plan.AutoConnectGroup,
 			WrapInShellScript: false,
 		})
@@ -2992,6 +3005,7 @@ func provisionLinodeInstance(ctx context.Context, userUUID string, plan models.F
 			UserData:          userData,
 			Provider:          "linode",
 			CredentialName:    token.Name,
+			PoolGroup:         resolveAutoConnectPoolGroup(plan, token.Group),
 			Group:             plan.AutoConnectGroup,
 			WrapInShellScript: true,
 		})

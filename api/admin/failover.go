@@ -163,6 +163,7 @@ type failoverExecutionSummaryView struct {
 	ScriptExitCode        *int              `json:"script_exit_code,omitempty"`
 	ScriptOutputTruncated bool              `json:"script_output_truncated"`
 	DNSStatus             string            `json:"dns_status"`
+	DNSResult             json.RawMessage   `json:"dns_result"`
 	CleanupStatus         string            `json:"cleanup_status"`
 	ErrorMessage          string            `json:"error_message"`
 	StartedAt             models.LocalTime  `json:"started_at"`
@@ -346,6 +347,7 @@ func buildFailoverExecutionSummaryView(execution *models.FailoverExecution) *fai
 		ScriptExitCode:        execution.ScriptExitCode,
 		ScriptOutputTruncated: execution.ScriptOutputTruncated,
 		DNSStatus:             execution.DNSStatus,
+		DNSResult:             rawJSONOrNull(execution.DNSResult),
 		CleanupStatus:         execution.CleanupStatus,
 		ErrorMessage:          execution.ErrorMessage,
 		StartedAt:             execution.StartedAt,

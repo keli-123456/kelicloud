@@ -373,6 +373,7 @@ type autoConnectOptions struct {
 	UserData          string
 	Provider          string
 	CredentialName    string
+	PoolGroup         string
 	Group             string
 	WrapInShellScript bool
 }
@@ -395,7 +396,7 @@ func buildAutoConnectUserData(opts autoConnectOptions) (string, string, error) {
 
 	group := normalizeAutoConnectGroup(opts.Group)
 	if group == "" {
-		group = normalizeAutoConnectGroup(defaultAutoConnectGroup(opts.Provider, opts.CredentialName))
+		group = normalizeAutoConnectGroup(defaultAutoConnectGroup(opts.Provider, opts.PoolGroup, opts.CredentialName))
 	}
 	if group == "" {
 		return "", "", errors.New("auto connect group cannot be empty")
@@ -543,10 +544,14 @@ func normalizeAutoConnectGroup(group string) string {
 	return strings.TrimSpace(group)
 }
 
-func defaultAutoConnectGroup(provider, credentialName string) string {
+func defaultAutoConnectGroup(provider, poolGroup, credentialName string) string {
 	provider = strings.ToLower(strings.TrimSpace(provider))
 	if provider == "" {
 		provider = "cloud"
+	}
+	poolGroup = normalizeAutoConnectGroup(poolGroup)
+	if poolGroup != "" {
+		return provider + "/" + poolGroup
 	}
 	credentialName = normalizeAutoConnectGroup(credentialName)
 	if credentialName == "" {
