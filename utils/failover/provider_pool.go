@@ -30,10 +30,11 @@ const (
 )
 
 type providerPoolCandidate struct {
-	EntryID   string
-	EntryName string
-	Preferred bool
-	Active    bool
+	EntryID    string
+	EntryName  string
+	EntryGroup string
+	Preferred  bool
+	Active     bool
 }
 
 type providerEntryCapacitySnapshot struct {
@@ -168,6 +169,7 @@ func (lease *providerEntryLease) BeginSerializedOperation(spacing time.Duration)
 }
 
 func listProviderPoolCandidates(userUUID string, plan models.FailoverPlan) ([]providerPoolCandidate, error) {
+	entryGroup := normalizeProviderEntryGroup(plan.ProviderEntryGroup)
 	switch strings.ToLower(strings.TrimSpace(plan.Provider)) {
 	case "aws":
 		raw, err := loadProviderAddition(userUUID, "aws")
@@ -188,12 +190,20 @@ func listProviderPoolCandidates(userUUID string, plan models.FailoverPlan) ([]pr
 		preferredID := resolvePreferredEntryID(strings.TrimSpace(plan.ProviderEntryID), addition.ActiveCredentialID)
 		candidates := make([]providerPoolCandidate, 0, len(addition.Credentials))
 		for _, credential := range addition.Credentials {
+			credentialGroup := normalizeProviderEntryGroup(credential.Group)
+			if entryGroup != "" && credentialGroup != entryGroup {
+				continue
+			}
 			candidates = append(candidates, providerPoolCandidate{
-				EntryID:   strings.TrimSpace(credential.ID),
-				EntryName: strings.TrimSpace(credential.Name),
-				Preferred: strings.TrimSpace(credential.ID) == preferredID,
-				Active:    strings.TrimSpace(credential.ID) == strings.TrimSpace(addition.ActiveCredentialID),
+				EntryID:    strings.TrimSpace(credential.ID),
+				EntryName:  strings.TrimSpace(credential.Name),
+				EntryGroup: credentialGroup,
+				Preferred:  strings.TrimSpace(credential.ID) == preferredID,
+				Active:     strings.TrimSpace(credential.ID) == strings.TrimSpace(addition.ActiveCredentialID),
 			})
+		}
+		if entryGroup != "" && len(candidates) == 0 {
+			return nil, fmt.Errorf("AWS credential group not found: %s", entryGroup)
 		}
 		return sortProviderPoolCandidates(candidates), nil
 	case "digitalocean":
@@ -215,12 +225,20 @@ func listProviderPoolCandidates(userUUID string, plan models.FailoverPlan) ([]pr
 		preferredID := resolvePreferredEntryID(strings.TrimSpace(plan.ProviderEntryID), addition.ActiveTokenID)
 		candidates := make([]providerPoolCandidate, 0, len(addition.Tokens))
 		for _, token := range addition.Tokens {
+			tokenGroup := normalizeProviderEntryGroup(token.Group)
+			if entryGroup != "" && tokenGroup != entryGroup {
+				continue
+			}
 			candidates = append(candidates, providerPoolCandidate{
-				EntryID:   strings.TrimSpace(token.ID),
-				EntryName: strings.TrimSpace(token.Name),
-				Preferred: strings.TrimSpace(token.ID) == preferredID,
-				Active:    strings.TrimSpace(token.ID) == strings.TrimSpace(addition.ActiveTokenID),
+				EntryID:    strings.TrimSpace(token.ID),
+				EntryName:  strings.TrimSpace(token.Name),
+				EntryGroup: tokenGroup,
+				Preferred:  strings.TrimSpace(token.ID) == preferredID,
+				Active:     strings.TrimSpace(token.ID) == strings.TrimSpace(addition.ActiveTokenID),
 			})
+		}
+		if entryGroup != "" && len(candidates) == 0 {
+			return nil, fmt.Errorf("DigitalOcean token group not found: %s", entryGroup)
 		}
 		return sortProviderPoolCandidates(candidates), nil
 	case "linode":
@@ -242,12 +260,20 @@ func listProviderPoolCandidates(userUUID string, plan models.FailoverPlan) ([]pr
 		preferredID := resolvePreferredEntryID(strings.TrimSpace(plan.ProviderEntryID), addition.ActiveTokenID)
 		candidates := make([]providerPoolCandidate, 0, len(addition.Tokens))
 		for _, token := range addition.Tokens {
+			tokenGroup := normalizeProviderEntryGroup(token.Group)
+			if entryGroup != "" && tokenGroup != entryGroup {
+				continue
+			}
 			candidates = append(candidates, providerPoolCandidate{
-				EntryID:   strings.TrimSpace(token.ID),
-				EntryName: strings.TrimSpace(token.Name),
-				Preferred: strings.TrimSpace(token.ID) == preferredID,
-				Active:    strings.TrimSpace(token.ID) == strings.TrimSpace(addition.ActiveTokenID),
+				EntryID:    strings.TrimSpace(token.ID),
+				EntryName:  strings.TrimSpace(token.Name),
+				EntryGroup: tokenGroup,
+				Preferred:  strings.TrimSpace(token.ID) == preferredID,
+				Active:     strings.TrimSpace(token.ID) == strings.TrimSpace(addition.ActiveTokenID),
 			})
+		}
+		if entryGroup != "" && len(candidates) == 0 {
+			return nil, fmt.Errorf("Linode token group not found: %s", entryGroup)
 		}
 		return sortProviderPoolCandidates(candidates), nil
 	default:

@@ -29,6 +29,7 @@ type failoverPlanRequest struct {
 	Enabled             *bool           `json:"enabled"`
 	Provider            string          `json:"provider" binding:"required"`
 	ProviderEntryID     string          `json:"provider_entry_id"`
+	ProviderEntryGroup  string          `json:"provider_entry_group"`
 	ActionType          string          `json:"action_type" binding:"required"`
 	Payload             json.RawMessage `json:"payload"`
 	AutoConnectGroup    string          `json:"auto_connect_group"`
@@ -66,6 +67,7 @@ type failoverPlanView struct {
 	Enabled             bool             `json:"enabled"`
 	Provider            string           `json:"provider"`
 	ProviderEntryID     string           `json:"provider_entry_id"`
+	ProviderEntryGroup  string           `json:"provider_entry_group"`
 	ActionType          string           `json:"action_type"`
 	Payload             json.RawMessage  `json:"payload"`
 	AutoConnectGroup    string           `json:"auto_connect_group"`
@@ -317,6 +319,7 @@ func buildFailoverPlanView(plan models.FailoverPlan) failoverPlanView {
 		Enabled:             plan.Enabled,
 		Provider:            plan.Provider,
 		ProviderEntryID:     plan.ProviderEntryID,
+		ProviderEntryGroup:  plan.ProviderEntryGroup,
 		ActionType:          plan.ActionType,
 		Payload:             rawJSONOrNull(plan.Payload),
 		AutoConnectGroup:    plan.AutoConnectGroup,
@@ -603,6 +606,118 @@ func validateCloudProviderEntryForScope(scope ownerScope, providerName, entryID 
 	return fmt.Errorf("provider %s entry %s was not found", providerName, entryID)
 }
 
+func validateFailoverProviderSelectionForScope(scope ownerScope, providerName, entryID, entryGroup string) error {
+	providerName = strings.ToLower(strings.TrimSpace(providerName))
+	entryID = strings.TrimSpace(entryID)
+	entryGroup = strings.TrimSpace(entryGroup)
+	if entryID == "" {
+		entryID = "active"
+	}
+
+	switch providerName {
+	case awsProviderName:
+		_, addition, err := loadAWSAddition(scope, false)
+		if err != nil {
+			return err
+		}
+		if entryGroup != "" {
+			if entryID != "active" {
+				credential := addition.FindCredential(entryID)
+				if credential == nil {
+					return fmt.Errorf("provider %s entry %s was not found", providerName, entryID)
+				}
+				if strings.TrimSpace(credential.Group) != entryGroup {
+					return fmt.Errorf("provider %s entry %s is not in group %s", providerName, entryID, entryGroup)
+				}
+				return nil
+			}
+			if active := addition.ActiveCredential(); active != nil && strings.TrimSpace(active.Group) == entryGroup {
+				return nil
+			}
+			for _, credential := range addition.Credentials {
+				if strings.TrimSpace(credential.Group) == entryGroup {
+					return nil
+				}
+			}
+			return fmt.Errorf("provider %s group %s was not found", providerName, entryGroup)
+		}
+		if entryID == "active" && addition.ActiveCredential() != nil {
+			return nil
+		}
+		if addition.FindCredential(entryID) != nil {
+			return nil
+		}
+	case digitalOceanProviderName:
+		_, addition, err := loadDigitalOceanAddition(scope, false)
+		if err != nil {
+			return err
+		}
+		if entryGroup != "" {
+			if entryID != "active" {
+				token := addition.FindToken(entryID)
+				if token == nil {
+					return fmt.Errorf("provider %s entry %s was not found", providerName, entryID)
+				}
+				if strings.TrimSpace(token.Group) != entryGroup {
+					return fmt.Errorf("provider %s entry %s is not in group %s", providerName, entryID, entryGroup)
+				}
+				return nil
+			}
+			if active := addition.ActiveToken(); active != nil && strings.TrimSpace(active.Group) == entryGroup {
+				return nil
+			}
+			for _, token := range addition.Tokens {
+				if strings.TrimSpace(token.Group) == entryGroup {
+					return nil
+				}
+			}
+			return fmt.Errorf("provider %s group %s was not found", providerName, entryGroup)
+		}
+		if entryID == "active" && addition.ActiveToken() != nil {
+			return nil
+		}
+		if addition.FindToken(entryID) != nil {
+			return nil
+		}
+	case linodeProviderName:
+		_, addition, err := loadLinodeAddition(scope, false)
+		if err != nil {
+			return err
+		}
+		if entryGroup != "" {
+			if entryID != "active" {
+				token := addition.FindToken(entryID)
+				if token == nil {
+					return fmt.Errorf("provider %s entry %s was not found", providerName, entryID)
+				}
+				if strings.TrimSpace(token.Group) != entryGroup {
+					return fmt.Errorf("provider %s entry %s is not in group %s", providerName, entryID, entryGroup)
+				}
+				return nil
+			}
+			if active := addition.ActiveToken(); active != nil && strings.TrimSpace(active.Group) == entryGroup {
+				return nil
+			}
+			for _, token := range addition.Tokens {
+				if strings.TrimSpace(token.Group) == entryGroup {
+					return nil
+				}
+			}
+			return fmt.Errorf("provider %s group %s was not found", providerName, entryGroup)
+		}
+		if entryID == "active" && addition.ActiveToken() != nil {
+			return nil
+		}
+		if addition.FindToken(entryID) != nil {
+			return nil
+		}
+	default:
+		return fmt.Errorf("unsupported provider: %s", providerName)
+	}
+
+	return fmt.Errorf("provider %s entry %s was not found", providerName, entryID)
+}
+
 func findDNSProviderEntryForScope(scope ownerScope, providerName, entryID string) (*cloudProviderEntry, error) {
 	config, err := getCloudProviderConfigForScope(scope, providerName)
 	if err != nil {
@@ -838,10 +953,11 @@ func validateFailoverTaskRequest(scope ownerScope, req *failoverTaskRequest) (*m
 		}
 
 		providerEntryID := strings.TrimSpace(planReq.ProviderEntryID)
+		providerEntryGroup := strings.TrimSpace(planReq.ProviderEntryGroup)
 		if providerEntryID == "" {
 			providerEntryID = "active"
 		}
-		if err := validateCloudProviderEntryForScope(scope, provider, providerEntryID); err != nil {
+		if err := validateFailoverProviderSelectionForScope(scope, provider, providerEntryID, providerEntryGroup); err != nil {
 			return nil, nil, err
 		}
 
@@ -902,6 +1018,7 @@ func validateFailoverTaskRequest(scope ownerScope, req *failoverTaskRequest) (*m
 			Enabled:             enabled,
 			Provider:            provider,
 			ProviderEntryID:     providerEntryID,
+			ProviderEntryGroup:  providerEntryGroup,
 			ActionType:          actionType,
 			Payload:             payload,
 			AutoConnectGroup:    strings.TrimSpace(planReq.AutoConnectGroup),
@@ -970,8 +1087,9 @@ func GetFailoverDNSCatalog(c *gin.Context) {
 
 	providerName := strings.TrimSpace(c.Query("provider"))
 	entryID := strings.TrimSpace(c.Query("entry_id"))
-	if providerName == "" || entryID == "" {
-		api.RespondError(c, http.StatusBadRequest, "provider and entry_id are required")
+	entryGroup := strings.TrimSpace(c.Query("entry_group"))
+	if providerName == "" || (entryID == "" && entryGroup == "") {
+		api.RespondError(c, http.StatusBadRequest, "provider and entry_id or entry_group are required")
 		return
 	}
 
@@ -998,8 +1116,9 @@ func GetFailoverPlanCatalog(c *gin.Context) {
 
 	providerName := strings.TrimSpace(c.Query("provider"))
 	entryID := strings.TrimSpace(c.Query("entry_id"))
-	if providerName == "" || entryID == "" {
-		api.RespondError(c, http.StatusBadRequest, "provider and entry_id are required")
+	entryGroup := strings.TrimSpace(c.Query("entry_group"))
+	if providerName == "" || (entryID == "" && entryGroup == "") {
+		api.RespondError(c, http.StatusBadRequest, "provider and entry_id or entry_group are required")
 		return
 	}
 
@@ -1012,6 +1131,7 @@ func GetFailoverPlanCatalog(c *gin.Context) {
 		scope.UserUUID,
 		providerName,
 		entryID,
+		entryGroup,
 		actionType,
 		strings.TrimSpace(c.Query("service")),
 		strings.TrimSpace(c.Query("region")),

@@ -60,26 +60,27 @@ func newEmptyPlanCatalog(providerName, actionType, service, region string) *Plan
 	}
 }
 
-func LoadPlanCatalog(userUUID, providerName, entryID, actionType, service, region, mode string) (*PlanCatalog, error) {
+func LoadPlanCatalog(userUUID, providerName, entryID, entryGroup, actionType, service, region, mode string) (*PlanCatalog, error) {
 	providerName = strings.ToLower(strings.TrimSpace(providerName))
 	actionType = strings.ToLower(strings.TrimSpace(actionType))
 	service = strings.ToLower(strings.TrimSpace(service))
 	region = strings.TrimSpace(region)
 	mode = strings.ToLower(strings.TrimSpace(mode))
+	entryGroup = normalizeProviderEntryGroup(entryGroup)
 	if mode == "" {
 		mode = "full"
 	}
 
 	return loadCatalogWithCache(
-		fmt.Sprintf("plan:%s:%s:%s:%s:%s:%s:%s", strings.TrimSpace(userUUID), providerName, strings.TrimSpace(entryID), actionType, service, region, mode),
+		fmt.Sprintf("plan:%s:%s:%s:%s:%s:%s:%s:%s", strings.TrimSpace(userUUID), providerName, strings.TrimSpace(entryID), entryGroup, actionType, service, region, mode),
 		func() (*PlanCatalog, error) {
 			switch providerName {
 			case "aws":
-				return loadAWSPlanCatalog(userUUID, entryID, actionType, service, region, mode)
+				return loadAWSPlanCatalog(userUUID, entryID, entryGroup, actionType, service, region, mode)
 			case "digitalocean":
-				return loadDigitalOceanPlanCatalog(userUUID, entryID, actionType, mode)
+				return loadDigitalOceanPlanCatalog(userUUID, entryID, entryGroup, actionType, mode)
 			case "linode":
-				return loadLinodePlanCatalog(userUUID, entryID, actionType, mode)
+				return loadLinodePlanCatalog(userUUID, entryID, entryGroup, actionType, mode)
 			default:
 				return nil, fmt.Errorf("unsupported failover plan provider: %s", providerName)
 			}
@@ -87,8 +88,8 @@ func LoadPlanCatalog(userUUID, providerName, entryID, actionType, service, regio
 	)
 }
 
-func loadAWSPlanCatalog(userUUID, entryID, actionType, service, region, mode string) (*PlanCatalog, error) {
-	addition, credential, err := loadAWSCredential(userUUID, entryID)
+func loadAWSPlanCatalog(userUUID, entryID, entryGroup, actionType, service, region, mode string) (*PlanCatalog, error) {
+	addition, credential, err := loadAWSCredentialSelection(userUUID, entryID, entryGroup)
 	if err != nil {
 		return nil, err
 	}
@@ -363,8 +364,8 @@ func loadAWSPlanCatalog(userUUID, entryID, actionType, service, region, mode str
 	return catalog, nil
 }
 
-func loadDigitalOceanPlanCatalog(userUUID, entryID, actionType, mode string) (*PlanCatalog, error) {
-	_, token, err := loadDigitalOceanToken(userUUID, entryID)
+func loadDigitalOceanPlanCatalog(userUUID, entryID, entryGroup, actionType, mode string) (*PlanCatalog, error) {
+	_, token, err := loadDigitalOceanTokenSelection(userUUID, entryID, entryGroup)
 	if err != nil {
 		return nil, err
 	}
@@ -439,8 +440,8 @@ func loadDigitalOceanPlanCatalog(userUUID, entryID, actionType, mode string) (*P
 	return catalog, nil
 }
 
-func loadLinodePlanCatalog(userUUID, entryID, actionType, mode string) (*PlanCatalog, error) {
-	_, token, err := loadLinodeToken(userUUID, entryID)
+func loadLinodePlanCatalog(userUUID, entryID, entryGroup, actionType, mode string) (*PlanCatalog, error) {
+	_, token, err := loadLinodeTokenSelection(userUUID, entryID, entryGroup)
 	if err != nil {
 		return nil, err
 	}

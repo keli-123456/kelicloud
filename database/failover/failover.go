@@ -83,6 +83,7 @@ func applyPlanDefaults(plan *models.FailoverPlan) {
 	plan.Name = strings.TrimSpace(plan.Name)
 	plan.Provider = strings.TrimSpace(plan.Provider)
 	plan.ProviderEntryID = strings.TrimSpace(plan.ProviderEntryID)
+	plan.ProviderEntryGroup = strings.TrimSpace(plan.ProviderEntryGroup)
 	plan.ActionType = strings.TrimSpace(plan.ActionType)
 	plan.AutoConnectGroup = strings.TrimSpace(plan.AutoConnectGroup)
 	scriptClipboardIDs := models.NormalizeFailoverScriptClipboardIDs(plan.ScriptClipboardID, plan.ScriptClipboardIDs)

@@ -117,6 +117,7 @@ type FailoverPlan struct {
 	Enabled             bool      `json:"enabled" gorm:"default:true"`
 	Provider            string    `json:"provider" gorm:"type:varchar(32);not null;index"`
 	ProviderEntryID     string    `json:"provider_entry_id" gorm:"type:varchar(64);not null"`
+	ProviderEntryGroup  string    `json:"provider_entry_group" gorm:"type:varchar(100)"`
 	ActionType          string    `json:"action_type" gorm:"type:varchar(64);not null"`
 	Payload             string    `json:"payload" gorm:"type:longtext"`
 	AutoConnectGroup    string    `json:"auto_connect_group" gorm:"type:varchar(100)"`

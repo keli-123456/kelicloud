@@ -77,13 +77,50 @@ func loadAWSAddition(userUUID string) (*awscloud.Addition, error) {
 	return addition, nil
 }
 
+func normalizeProviderEntryGroup(group string) string {
+	group = strings.TrimSpace(group)
+	if len(group) > 100 {
+		group = group[:100]
+	}
+	return group
+}
+
 func loadAWSCredential(userUUID, entryID string) (*awscloud.Addition, *awscloud.CredentialRecord, error) {
+	return loadAWSCredentialSelection(userUUID, entryID, "")
+}
+
+func loadAWSCredentialSelection(userUUID, entryID, entryGroup string) (*awscloud.Addition, *awscloud.CredentialRecord, error) {
 	addition, err := loadAWSAddition(userUUID)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	if strings.TrimSpace(entryID) == "" || strings.TrimSpace(entryID) == activeProviderEntryID {
+	entryID = strings.TrimSpace(entryID)
+	entryGroup = normalizeProviderEntryGroup(entryGroup)
+	if entryGroup != "" {
+		if entryID != "" && entryID != activeProviderEntryID {
+			credential := addition.FindCredential(entryID)
+			if credential == nil {
+				return nil, nil, fmt.Errorf("AWS credential not found: %s", entryID)
+			}
+			if normalizeProviderEntryGroup(credential.Group) != entryGroup {
+				return nil, nil, fmt.Errorf("AWS credential %s is not in group %s", entryID, entryGroup)
+			}
+			return addition, credential, nil
+		}
+
+		if credential := addition.ActiveCredential(); credential != nil && normalizeProviderEntryGroup(credential.Group) == entryGroup {
+			return addition, credential, nil
+		}
+		for index := range addition.Credentials {
+			if normalizeProviderEntryGroup(addition.Credentials[index].Group) == entryGroup {
+				return addition, &addition.Credentials[index], nil
+			}
+		}
+		return nil, nil, fmt.Errorf("AWS credential group not found: %s", entryGroup)
+	}
+
+	if entryID == "" || entryID == activeProviderEntryID {
 		credential := addition.ActiveCredential()
 		if credential == nil {
 			return nil, nil, errors.New("AWS credential is not configured")
@@ -116,12 +153,41 @@ func loadDigitalOceanAddition(userUUID string) (*digitalocean.Addition, error) {
 }
 
 func loadDigitalOceanToken(userUUID, entryID string) (*digitalocean.Addition, *digitalocean.TokenRecord, error) {
+	return loadDigitalOceanTokenSelection(userUUID, entryID, "")
+}
+
+func loadDigitalOceanTokenSelection(userUUID, entryID, entryGroup string) (*digitalocean.Addition, *digitalocean.TokenRecord, error) {
 	addition, err := loadDigitalOceanAddition(userUUID)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	if strings.TrimSpace(entryID) == "" || strings.TrimSpace(entryID) == activeProviderEntryID {
+	entryID = strings.TrimSpace(entryID)
+	entryGroup = normalizeProviderEntryGroup(entryGroup)
+	if entryGroup != "" {
+		if entryID != "" && entryID != activeProviderEntryID {
+			token := addition.FindToken(entryID)
+			if token == nil {
+				return nil, nil, fmt.Errorf("DigitalOcean token not found: %s", entryID)
+			}
+			if normalizeProviderEntryGroup(token.Group) != entryGroup {
+				return nil, nil, fmt.Errorf("DigitalOcean token %s is not in group %s", entryID, entryGroup)
+			}
+			return addition, token, nil
+		}
+
+		if token := addition.ActiveToken(); token != nil && normalizeProviderEntryGroup(token.Group) == entryGroup {
+			return addition, token, nil
+		}
+		for index := range addition.Tokens {
+			if normalizeProviderEntryGroup(addition.Tokens[index].Group) == entryGroup {
+				return addition, &addition.Tokens[index], nil
+			}
+		}
+		return nil, nil, fmt.Errorf("DigitalOcean token group not found: %s", entryGroup)
+	}
+
+	if entryID == "" || entryID == activeProviderEntryID {
 		token := addition.ActiveToken()
 		if token == nil {
 			return nil, nil, errors.New("DigitalOcean token is not configured")
@@ -167,12 +233,41 @@ func loadLinodeAddition(userUUID string) (*linode.Addition, error) {
 }
 
 func loadLinodeToken(userUUID, entryID string) (*linode.Addition, *linode.TokenRecord, error) {
+	return loadLinodeTokenSelection(userUUID, entryID, "")
+}
+
+func loadLinodeTokenSelection(userUUID, entryID, entryGroup string) (*linode.Addition, *linode.TokenRecord, error) {
 	addition, err := loadLinodeAddition(userUUID)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	if strings.TrimSpace(entryID) == "" || strings.TrimSpace(entryID) == activeProviderEntryID {
+	entryID = strings.TrimSpace(entryID)
+	entryGroup = normalizeProviderEntryGroup(entryGroup)
+	if entryGroup != "" {
+		if entryID != "" && entryID != activeProviderEntryID {
+			token := addition.FindToken(entryID)
+			if token == nil {
+				return nil, nil, fmt.Errorf("Linode token not found: %s", entryID)
+			}
+			if normalizeProviderEntryGroup(token.Group) != entryGroup {
+				return nil, nil, fmt.Errorf("Linode token %s is not in group %s", entryID, entryGroup)
+			}
+			return addition, token, nil
+		}
+
+		if token := addition.ActiveToken(); token != nil && normalizeProviderEntryGroup(token.Group) == entryGroup {
+			return addition, token, nil
+		}
+		for index := range addition.Tokens {
+			if normalizeProviderEntryGroup(addition.Tokens[index].Group) == entryGroup {
+				return addition, &addition.Tokens[index], nil
+			}
+		}
+		return nil, nil, fmt.Errorf("Linode token group not found: %s", entryGroup)
+	}
+
+	if entryID == "" || entryID == activeProviderEntryID {
 		token := addition.ActiveToken()
 		if token == nil {
 			return nil, nil, errors.New("Linode token is not configured")

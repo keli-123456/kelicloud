@@ -26,6 +26,7 @@ type Addition struct {
 type TokenRecord struct {
 	ID                  string                     `json:"id"`
 	Name                string                     `json:"name"`
+	Group               string                     `json:"group,omitempty"`
 	Token               string                     `json:"token"`
 	ProfileUsername     string                     `json:"profile_username,omitempty"`
 	ProfileEmail        string                     `json:"profile_email,omitempty"`
@@ -39,12 +40,14 @@ type TokenRecord struct {
 type TokenImport struct {
 	ID    string `json:"id,omitempty"`
 	Name  string `json:"name"`
+	Group string `json:"group,omitempty"`
 	Token string `json:"token"`
 }
 
 type TokenView struct {
 	ID              string `json:"id"`
 	Name            string `json:"name"`
+	Group           string `json:"group,omitempty"`
 	MaskedToken     string `json:"masked_token"`
 	ProfileUsername string `json:"profile_username,omitempty"`
 	ProfileEmail    string `json:"profile_email,omitempty"`
@@ -101,6 +104,7 @@ func (a *Addition) Normalize() {
 			{
 				ID:         uuid.NewString(),
 				Name:       "Default Token",
+				Group:      "",
 				Token:      a.Token,
 				LastStatus: TokenStatusUnknown,
 			},
@@ -114,6 +118,7 @@ func (a *Addition) Normalize() {
 	for _, token := range a.Tokens {
 		token.ID = strings.TrimSpace(token.ID)
 		token.Name = strings.TrimSpace(token.Name)
+		token.Group = normalizeTokenGroup(token.Group)
 		token.Token = strings.TrimSpace(token.Token)
 		token.ProfileUsername = strings.TrimSpace(token.ProfileUsername)
 		token.ProfileEmail = strings.TrimSpace(token.ProfileEmail)
@@ -141,6 +146,9 @@ func (a *Addition) Normalize() {
 			merged := normalized[existingIndex]
 			if token.Name != "" {
 				merged.Name = token.Name
+			}
+			if token.Group != "" {
+				merged.Group = token.Group
 			}
 			if token.ProfileUsername != "" {
 				merged.ProfileUsername = token.ProfileUsername
@@ -292,11 +300,12 @@ func (a *Addition) UpsertTokens(inputs []TokenImport) int {
 	count := 0
 	for _, input := range inputs {
 		tokenValue := strings.TrimSpace(input.Token)
-		if tokenValue == "" {
+		name := strings.TrimSpace(input.Name)
+		group := normalizeTokenGroup(input.Group)
+		inputID := strings.TrimSpace(input.ID)
+		if tokenValue == "" && inputID == "" {
 			continue
 		}
-		name := strings.TrimSpace(input.Name)
-		inputID := strings.TrimSpace(input.ID)
 
 		var matched *TokenRecord
 		for index := range a.Tokens {
@@ -304,7 +313,7 @@ func (a *Addition) UpsertTokens(inputs []TokenImport) int {
 				matched = &a.Tokens[index]
 				break
 			}
-			if a.Tokens[index].Token == tokenValue {
+			if tokenValue != "" && a.Tokens[index].Token == tokenValue {
 				matched = &a.Tokens[index]
 				break
 			}
@@ -314,14 +323,21 @@ func (a *Addition) UpsertTokens(inputs []TokenImport) int {
 			if name != "" {
 				matched.Name = name
 			}
-			matched.Token = tokenValue
+			matched.Group = group
+			if tokenValue != "" {
+				matched.Token = tokenValue
+			}
 		} else {
+			if tokenValue == "" {
+				continue
+			}
 			if name == "" {
 				name = nextGeneratedTokenName(a.Tokens)
 			}
 			a.Tokens = append(a.Tokens, TokenRecord{
 				ID:         uuid.NewString(),
 				Name:       name,
+				Group:      group,
 				Token:      tokenValue,
 				LastStatus: TokenStatusUnknown,
 			})
@@ -426,6 +442,7 @@ func (a *Addition) ToPoolView() TokenPoolView {
 		view.Tokens = append(view.Tokens, TokenView{
 			ID:              token.ID,
 			Name:            token.Name,
+			Group:           token.Group,
 			MaskedToken:     maskToken(token.Token),
 			ProfileUsername: token.ProfileUsername,
 			ProfileEmail:    token.ProfileEmail,
@@ -451,6 +468,14 @@ func (t *TokenRecord) TokenSecretView() *TokenSecretView {
 		ProfileUsername: t.ProfileUsername,
 		ProfileEmail:    t.ProfileEmail,
 	}
+}
+
+func normalizeTokenGroup(group string) string {
+	group = strings.TrimSpace(group)
+	if len(group) > 100 {
+		group = group[:100]
+	}
+	return group
 }
 
 func (t *TokenRecord) HasSavedInstancePassword(instanceID int) bool {

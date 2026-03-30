@@ -431,6 +431,7 @@ func (r *executionRunner) run(report *common.Report) {
 			"priority":     plan.Priority,
 			"plan_name":    plan.Name,
 			"entry_id":     plan.ProviderEntryID,
+			"entry_group":  plan.ProviderEntryGroup,
 			"auto_connect": plan.AutoConnectGroup,
 		})
 		_ = failoverdb.UpdateExecutionFields(r.execution.ID, map[string]interface{}{
@@ -439,10 +440,11 @@ func (r *executionRunner) run(report *common.Report) {
 
 		outcome, selectedEntryID, entryAttempts, err := r.executePlan(plan)
 		attempt := map[string]interface{}{
-			"plan_id":            plan.ID,
-			"provider":           plan.Provider,
-			"action_type":        plan.ActionType,
-			"preferred_entry_id": plan.ProviderEntryID,
+			"plan_id":               plan.ID,
+			"provider":              plan.Provider,
+			"action_type":           plan.ActionType,
+			"preferred_entry_id":    plan.ProviderEntryID,
+			"preferred_entry_group": plan.ProviderEntryGroup,
 		}
 		if selectedEntryID != "" {
 			attempt["provider_entry_id"] = selectedEntryID
@@ -503,6 +505,9 @@ func (r *executionRunner) executePlanActionWithProviderPool(plan models.Failover
 		candidateDetail := map[string]interface{}{
 			"entry_id":   candidate.EntryID,
 			"entry_name": candidate.EntryName,
+		}
+		if candidate.EntryGroup != "" {
+			candidateDetail["entry_group"] = candidate.EntryGroup
 		}
 		if candidate.Preferred {
 			candidateDetail["preferred"] = true

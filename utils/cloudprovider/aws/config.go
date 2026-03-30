@@ -28,6 +28,7 @@ type Addition struct {
 type CredentialRecord struct {
 	ID              string           `json:"id"`
 	Name            string           `json:"name"`
+	Group           string           `json:"group,omitempty"`
 	AccessKeyID     string           `json:"access_key_id"`
 	SecretAccessKey string           `json:"secret_access_key"`
 	SessionToken    string           `json:"session_token,omitempty"`
@@ -45,6 +46,7 @@ type CredentialRecord struct {
 type CredentialImport struct {
 	ID              string `json:"id,omitempty"`
 	Name            string `json:"name"`
+	Group           string `json:"group,omitempty"`
 	AccessKeyID     string `json:"access_key_id"`
 	SecretAccessKey string `json:"secret_access_key"`
 	SessionToken    string `json:"session_token,omitempty"`
@@ -54,6 +56,7 @@ type CredentialImport struct {
 type CredentialView struct {
 	ID                string           `json:"id"`
 	Name              string           `json:"name"`
+	Group             string           `json:"group,omitempty"`
 	MaskedAccessKeyID string           `json:"masked_access_key_id"`
 	DefaultRegion     string           `json:"default_region"`
 	AccountID         string           `json:"account_id,omitempty"`
@@ -105,6 +108,7 @@ func (a *Addition) Normalize() {
 			{
 				ID:              uuid.NewString(),
 				Name:            "Default Credential",
+				Group:           "",
 				AccessKeyID:     a.AccessKeyID,
 				SecretAccessKey: a.SecretAccessKey,
 				SessionToken:    a.SessionToken,
@@ -121,6 +125,7 @@ func (a *Addition) Normalize() {
 	for _, credential := range a.Credentials {
 		credential.ID = strings.TrimSpace(credential.ID)
 		credential.Name = strings.TrimSpace(credential.Name)
+		credential.Group = normalizeCredentialGroup(credential.Group)
 		credential.AccessKeyID = strings.TrimSpace(credential.AccessKeyID)
 		credential.SecretAccessKey = strings.TrimSpace(credential.SecretAccessKey)
 		credential.SessionToken = strings.TrimSpace(credential.SessionToken)
@@ -153,6 +158,9 @@ func (a *Addition) Normalize() {
 			merged := normalized[existingIndex]
 			if credential.Name != "" {
 				merged.Name = credential.Name
+			}
+			if credential.Group != "" {
+				merged.Group = credential.Group
 			}
 			if credential.SecretAccessKey != "" {
 				merged.SecretAccessKey = credential.SecretAccessKey
@@ -273,12 +281,14 @@ func (a *Addition) UpsertCredentials(inputs []CredentialImport) int {
 	for _, input := range inputs {
 		accessKeyID := strings.TrimSpace(input.AccessKeyID)
 		secretAccessKey := strings.TrimSpace(input.SecretAccessKey)
-		if accessKeyID == "" || secretAccessKey == "" {
-			continue
-		}
 		name := strings.TrimSpace(input.Name)
+		group := normalizeCredentialGroup(input.Group)
 		defaultRegion := normalizeRegion(input.DefaultRegion)
 		inputID := strings.TrimSpace(input.ID)
+		hasCredentialValue := accessKeyID != "" && secretAccessKey != ""
+		if !hasCredentialValue && inputID == "" {
+			continue
+		}
 
 		var matched *CredentialRecord
 		for index := range a.Credentials {
@@ -286,7 +296,7 @@ func (a *Addition) UpsertCredentials(inputs []CredentialImport) int {
 				matched = &a.Credentials[index]
 				break
 			}
-			if a.Credentials[index].AccessKeyID == accessKeyID && a.Credentials[index].DefaultRegion == defaultRegion {
+			if hasCredentialValue && a.Credentials[index].AccessKeyID == accessKeyID && a.Credentials[index].DefaultRegion == defaultRegion {
 				matched = &a.Credentials[index]
 				break
 			}
@@ -296,17 +306,24 @@ func (a *Addition) UpsertCredentials(inputs []CredentialImport) int {
 			if name != "" {
 				matched.Name = name
 			}
-			matched.AccessKeyID = accessKeyID
-			matched.SecretAccessKey = secretAccessKey
-			matched.SessionToken = strings.TrimSpace(input.SessionToken)
-			matched.DefaultRegion = defaultRegion
+			matched.Group = group
+			if hasCredentialValue {
+				matched.AccessKeyID = accessKeyID
+				matched.SecretAccessKey = secretAccessKey
+				matched.SessionToken = strings.TrimSpace(input.SessionToken)
+				matched.DefaultRegion = defaultRegion
+			}
 		} else {
+			if !hasCredentialValue {
+				continue
+			}
 			if name == "" {
 				name = nextGeneratedCredentialName(a.Credentials)
 			}
 			a.Credentials = append(a.Credentials, CredentialRecord{
 				ID:              uuid.NewString(),
 				Name:            name,
+				Group:           group,
 				AccessKeyID:     accessKeyID,
 				SecretAccessKey: secretAccessKey,
 				SessionToken:    strings.TrimSpace(input.SessionToken),
@@ -391,6 +408,7 @@ func (a *Addition) ToPoolView() CredentialPoolView {
 		view.Credentials = append(view.Credentials, CredentialView{
 			ID:                credential.ID,
 			Name:              credential.Name,
+			Group:             credential.Group,
 			MaskedAccessKeyID: maskAccessKeyID(credential.AccessKeyID),
 			DefaultRegion:     normalizeRegion(credential.DefaultRegion),
 			AccountID:         credential.AccountID,
@@ -468,6 +486,14 @@ func normalizeCredentialStatus(status string) string {
 	default:
 		return CredentialStatusUnknown
 	}
+}
+
+func normalizeCredentialGroup(group string) string {
+	group = strings.TrimSpace(group)
+	if len(group) > 100 {
+		group = group[:100]
+	}
+	return group
 }
 
 func normalizeRegion(region string) string {
