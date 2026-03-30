@@ -31,6 +31,8 @@ type dnsUpdateResult struct {
 	ZoneName string `json:"zone_name,omitempty"`
 	Domain   string `json:"domain,omitempty"`
 	RR       string `json:"rr,omitempty"`
+	Records      []dnsUpdateResult `json:"records,omitempty"`
+	SkippedTypes []string          `json:"skipped_types,omitempty"`
 }
 
 type DNSUpdateResult = dnsUpdateResult
@@ -76,6 +78,7 @@ type cloudflareDNSPayload struct {
 	ZoneName   string `json:"zone_name,omitempty"`
 	RecordName string `json:"record_name,omitempty"`
 	RecordType string `json:"record_type,omitempty"`
+	SyncIPv6   bool   `json:"sync_ipv6,omitempty"`
 	TTL        int    `json:"ttl,omitempty"`
 	Proxied    *bool  `json:"proxied,omitempty"`
 }
@@ -84,6 +87,7 @@ type aliyunRecordPayload struct {
 	DomainName string   `json:"domain_name,omitempty"`
 	RR         string   `json:"rr,omitempty"`
 	RecordType string   `json:"record_type,omitempty"`
+	SyncIPv6   bool     `json:"sync_ipv6,omitempty"`
 	TTL        int      `json:"ttl,omitempty"`
 	Line       string   `json:"line,omitempty"`
 	Lines      []string `json:"lines,omitempty"`
@@ -208,6 +212,58 @@ func applyDNSRecord(userUUID, providerName, entryID, payloadJSON, ipv4, ipv6 str
 
 func ApplyDNSRecord(userUUID, providerName, entryID, payloadJSON, ipv4, ipv6 string) (*DNSUpdateResult, error) {
 	return applyDNSRecord(userUUID, providerName, entryID, payloadJSON, ipv4, ipv6)
+}
+
+type dnsApplyPlan struct {
+	RecordTypes  []string
+	SkippedTypes []string
+}
+
+func buildDNSApplyPlan(recordType string, syncIPv6 bool, ipv4, ipv6 string) (*dnsApplyPlan, error) {
+	normalized := strings.ToUpper(strings.TrimSpace(recordType))
+	if normalized == "" {
+		normalized = "A"
+	}
+
+	if !syncIPv6 {
+		if _, err := selectRecordValue(normalized, ipv4, ipv6); err != nil {
+			return nil, err
+		}
+		return &dnsApplyPlan{RecordTypes: []string{normalized}}, nil
+	}
+
+	if _, err := selectRecordValue(normalized, ipv4, ipv6); err != nil {
+		return nil, err
+	}
+
+	counterpart := "AAAA"
+	if normalized == "AAAA" {
+		counterpart = "A"
+	}
+
+	plan := &dnsApplyPlan{
+		RecordTypes: []string{normalized},
+	}
+	if _, err := selectRecordValue(counterpart, ipv4, ipv6); err == nil {
+		plan.RecordTypes = append(plan.RecordTypes, counterpart)
+	} else {
+		plan.SkippedTypes = append(plan.SkippedTypes, counterpart)
+	}
+	return plan, nil
+}
+
+func summarizeDNSResults(results []dnsUpdateResult, skippedTypes []string) *dnsUpdateResult {
+	if len(results) == 0 {
+		return nil
+	}
+	if len(results) == 1 && len(skippedTypes) == 0 {
+		result := results[0]
+		return &result
+	}
+	summary := results[0]
+	summary.Records = append([]dnsUpdateResult(nil), results...)
+	summary.SkippedTypes = append([]string(nil), skippedTypes...)
+	return &summary
 }
 
 func loadCloudflareDNSCatalog(userUUID, entryID, zoneName string) (*DNSCatalog, error) {
@@ -394,11 +450,7 @@ func applyCloudflareDNSRecord(userUUID, entryID, payloadJSON, ipv4, ipv6 string)
 		}
 	}
 
-	recordType := strings.ToUpper(strings.TrimSpace(payload.RecordType))
-	if recordType == "" {
-		recordType = "A"
-	}
-	recordValue, err := selectRecordValue(recordType, ipv4, ipv6)
+	plan, err := buildDNSApplyPlan(payload.RecordType, payload.SyncIPv6, ipv4, ipv6)
 	if err != nil {
 		return nil, err
 	}
@@ -441,19 +493,24 @@ func applyCloudflareDNSRecord(userUUID, entryID, payloadJSON, ipv4, ipv6 string)
 		}
 	}
 
-	record, err := client.upsertRecord(context.Background(), zoneID, recordName, recordType, recordValue, ttl, proxied)
-	if err != nil {
-		return nil, err
+	results := make([]dnsUpdateResult, 0, len(plan.RecordTypes))
+	for _, currentRecordType := range plan.RecordTypes {
+		recordValue, _ := selectRecordValue(currentRecordType, ipv4, ipv6)
+		record, err := client.upsertRecord(context.Background(), zoneID, recordName, currentRecordType, recordValue, ttl, proxied)
+		if err != nil {
+			return nil, err
+		}
+		results = append(results, dnsUpdateResult{
+			Provider: cloudflareProviderName,
+			ID:       record.ID,
+			Name:     record.Name,
+			Type:     record.Type,
+			Value:    record.Content,
+			ZoneID:   zoneID,
+			ZoneName: zoneName,
+		})
 	}
-	return &dnsUpdateResult{
-		Provider: cloudflareProviderName,
-		ID:       record.ID,
-		Name:     record.Name,
-		Type:     record.Type,
-		Value:    record.Content,
-		ZoneID:   zoneID,
-		ZoneName: zoneName,
-	}, nil
+	return summarizeDNSResults(results, plan.SkippedTypes), nil
 }
 
 func normalizeCloudflareRecordName(recordName, zoneName string) string {
@@ -488,11 +545,7 @@ func applyAliyunDNSRecord(userUUID, entryID, payloadJSON, ipv4, ipv6 string) (*d
 		}
 	}
 
-	recordType := strings.ToUpper(strings.TrimSpace(payload.RecordType))
-	if recordType == "" {
-		recordType = "A"
-	}
-	recordValue, err := selectRecordValue(recordType, ipv4, ipv6)
+	plan, err := buildDNSApplyPlan(payload.RecordType, payload.SyncIPv6, ipv4, ipv6)
 	if err != nil {
 		return nil, err
 	}
@@ -515,23 +568,27 @@ func applyAliyunDNSRecord(userUUID, entryID, payloadJSON, ipv4, ipv6 string) (*d
 	}
 	client := newAliyunDNSClient(configValue.AccessKeyID, configValue.AccessKeySecret, configValue.RegionID)
 	lines := normalizeAliyunLines(payload.Line, payload.Lines)
-	recordIDs := make([]string, 0, len(lines))
-	for _, line := range lines {
-		recordID, err := client.upsertRecord(context.Background(), domainName, rr, recordType, recordValue, ttl, line)
-		if err != nil {
-			return nil, err
+	results := make([]dnsUpdateResult, 0, len(plan.RecordTypes))
+	for _, currentRecordType := range plan.RecordTypes {
+		recordValue, _ := selectRecordValue(currentRecordType, ipv4, ipv6)
+		recordIDs := make([]string, 0, len(lines))
+		for _, line := range lines {
+			recordID, err := client.upsertRecord(context.Background(), domainName, rr, currentRecordType, recordValue, ttl, line)
+			if err != nil {
+				return nil, err
+			}
+			recordIDs = append(recordIDs, recordID)
 		}
-		recordIDs = append(recordIDs, recordID)
+		results = append(results, dnsUpdateResult{
+			Provider: aliyunProviderName,
+			ID:       strings.Join(recordIDs, ","),
+			Type:     currentRecordType,
+			Value:    recordValue,
+			Domain:   domainName,
+			RR:       rr,
+		})
 	}
-
-	return &dnsUpdateResult{
-		Provider: aliyunProviderName,
-		ID:       strings.Join(recordIDs, ","),
-		Type:     recordType,
-		Value:    recordValue,
-		Domain:   domainName,
-		RR:       rr,
-	}, nil
+	return summarizeDNSResults(results, plan.SkippedTypes), nil
 }
 
 func normalizeAliyunLines(primary string, values []string) []string {

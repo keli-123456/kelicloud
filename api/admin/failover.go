@@ -770,6 +770,7 @@ type failoverCloudflareDNSPayload struct {
 	ZoneName   string `json:"zone_name,omitempty"`
 	RecordName string `json:"record_name,omitempty"`
 	RecordType string `json:"record_type,omitempty"`
+	SyncIPv6   bool   `json:"sync_ipv6,omitempty"`
 	TTL        int    `json:"ttl,omitempty"`
 }
 
@@ -777,6 +778,7 @@ type failoverAliyunDNSPayload struct {
 	DomainName string   `json:"domain_name,omitempty"`
 	RR         string   `json:"rr,omitempty"`
 	RecordType string   `json:"record_type,omitempty"`
+	SyncIPv6   bool     `json:"sync_ipv6,omitempty"`
 	TTL        int      `json:"ttl,omitempty"`
 	Line       string   `json:"line,omitempty"`
 	Lines      []string `json:"lines,omitempty"`

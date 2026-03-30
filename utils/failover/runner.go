@@ -2024,7 +2024,7 @@ func (r *executionRunner) resolveCurrentInstanceCleanupByAddress(plan models.Fai
 			return nil, err
 		}
 		for _, instance := range instances {
-			if !sameAddress(address, instance.PublicIP, instance.PrivateIP) {
+			if !sameAddress(address, append([]string{instance.PublicIP, instance.PrivateIP}, instance.IPv6Addresses...)...) {
 				continue
 			}
 			ref := map[string]interface{}{
@@ -2039,8 +2039,9 @@ func (r *executionRunner) resolveCurrentInstanceCleanupByAddress(plan models.Fai
 			return &currentInstanceCleanup{
 				Ref: ref,
 				Addresses: map[string]interface{}{
-					"public_ip":  instance.PublicIP,
-					"private_ip": instance.PrivateIP,
+					"public_ip":      instance.PublicIP,
+					"private_ip":     instance.PrivateIP,
+					"ipv6_addresses": instance.IPv6Addresses,
 				},
 				Label: "terminate aws ec2 instance " + instance.InstanceID,
 				Cleanup: func() error {
@@ -2710,6 +2711,7 @@ func provisionAWSInstance(ctx context.Context, userUUID string, plan models.Fail
 		}
 		outcome := &actionOutcome{
 			IPv4:             strings.TrimSpace(instance.PublicIP),
+			IPv6:             firstString(instance.IPv6Addresses),
 			TargetClientUUID: "",
 			AutoConnectGroup: autoConnectGroup,
 			NewInstanceRef: map[string]interface{}{
@@ -2722,9 +2724,10 @@ func provisionAWSInstance(ctx context.Context, userUUID string, plan models.Fail
 				"name":                instance.Name,
 			},
 			NewAddresses: map[string]interface{}{
-				"public_ip":  instance.PublicIP,
-				"private_ip": instance.PrivateIP,
-				"addresses":  detail.Addresses,
+				"public_ip":      instance.PublicIP,
+				"private_ip":     instance.PrivateIP,
+				"ipv6_addresses": instance.IPv6Addresses,
+				"addresses":      detail.Addresses,
 			},
 			RollbackLabel: "terminate failed aws ec2 instance " + strings.TrimSpace(instance.InstanceID),
 			Rollback: func() error {
@@ -3140,6 +3143,7 @@ func rebindAWSIPAddress(task models.FailoverTask, plan models.FailoverPlan) (*ac
 		}
 		return &actionOutcome{
 			IPv4:             strings.TrimSpace(address.PublicIP),
+			IPv6:             firstString(detail.Instance.IPv6Addresses),
 			TargetClientUUID: task.WatchClientUUID,
 			NewClientUUID:    task.WatchClientUUID,
 			OldInstanceRef: map[string]interface{}{
@@ -3155,6 +3159,7 @@ func rebindAWSIPAddress(task models.FailoverTask, plan models.FailoverPlan) (*ac
 				"association_id": address.AssociationID,
 				"public_ip":      address.PublicIP,
 				"private_ip":     address.PrivateIP,
+				"ipv6_addresses": detail.Instance.IPv6Addresses,
 				"old_addresses":  detail.Addresses,
 			},
 		}, nil

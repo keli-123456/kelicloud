@@ -102,6 +102,7 @@ type Instance struct {
 	KeyName          string            `json:"key_name"`
 	PublicIP         string            `json:"public_ip"`
 	PrivateIP        string            `json:"private_ip"`
+	IPv6Addresses    []string          `json:"ipv6_addresses"`
 	AvailabilityZone string            `json:"availability_zone"`
 	LaunchTime       string            `json:"launch_time"`
 	Tags             map[string]string `json:"tags"`
@@ -684,10 +685,31 @@ func mapInstance(item ec2types.Instance) Instance {
 		KeyName:          awssdk.ToString(item.KeyName),
 		PublicIP:         awssdk.ToString(item.PublicIpAddress),
 		PrivateIP:        awssdk.ToString(item.PrivateIpAddress),
+		IPv6Addresses:    listInstanceIPv6Addresses(item),
 		AvailabilityZone: awssdk.ToString(item.Placement.AvailabilityZone),
 		LaunchTime:       launchTime,
 		Tags:             tags,
 	}
+}
+
+func listInstanceIPv6Addresses(item ec2types.Instance) []string {
+	seen := map[string]struct{}{}
+	addresses := make([]string, 0)
+	for _, networkInterface := range item.NetworkInterfaces {
+		for _, address := range networkInterface.Ipv6Addresses {
+			value := strings.TrimSpace(awssdk.ToString(address.Ipv6Address))
+			if value == "" {
+				continue
+			}
+			if _, exists := seen[value]; exists {
+				continue
+			}
+			seen[value] = struct{}{}
+			addresses = append(addresses, value)
+		}
+	}
+	sort.Strings(addresses)
+	return addresses
 }
 
 func getInstanceUsageCounts(ctx context.Context, client *ec2.Client) (int, int, error) {
