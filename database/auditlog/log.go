@@ -58,6 +58,7 @@ func listLogsByUserWithDB(db *gorm.DB, userUUID string, limit, offset int) ([]mo
 	var logs []models.Log
 	if err := db.Where("user_id = ?", userUUID).
 		Order("time desc").
+		Order("id desc").
 		Limit(limit).
 		Offset(offset).
 		Find(&logs).Error; err != nil {
