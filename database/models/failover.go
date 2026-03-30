@@ -26,6 +26,11 @@ const (
 )
 
 const (
+	FailoverProvisionRetryLimitDefault           = 6
+	FailoverProvisionFailureFallbackLimitDefault = 3
+)
+
+const (
 	FailoverTaskStatusDisabled  = "disabled"
 	FailoverTaskStatusHealthy   = "healthy"
 	FailoverTaskStatusTriggered = "triggered"
@@ -80,33 +85,35 @@ const (
 )
 
 type FailoverTask struct {
-	ID                  uint                `json:"id,omitempty" gorm:"primaryKey;autoIncrement"`
-	UserID              string              `json:"user_id,omitempty" gorm:"type:varchar(36);index"`
-	Name                string              `json:"name" gorm:"type:varchar(255);not null;index"`
-	Enabled             bool                `json:"enabled" gorm:"default:true"`
-	WatchClientUUID     string              `json:"watch_client_uuid" gorm:"type:varchar(36);not null;index"`
-	CurrentAddress      string              `json:"current_address" gorm:"type:varchar(255)"`
-	CurrentInstanceRef  string              `json:"current_instance_ref" gorm:"type:longtext"`
-	TriggerFailureCount int                 `json:"trigger_failure_count" gorm:"type:int;not null;default:0"`
-	TriggerSource       string              `json:"trigger_source" gorm:"type:varchar(64);not null;default:'cn_connectivity'"`
-	FailureThreshold    int                 `json:"failure_threshold" gorm:"type:int;not null;default:2"`
-	StaleAfterSeconds   int                 `json:"stale_after_seconds" gorm:"type:int;not null;default:300"`
-	CooldownSeconds     int                 `json:"cooldown_seconds" gorm:"type:int;not null;default:1800"`
-	DNSProvider         string              `json:"dns_provider" gorm:"type:varchar(32);not null"`
-	DNSEntryID          string              `json:"dns_entry_id" gorm:"type:varchar(64);not null"`
-	DNSPayload          string              `json:"dns_payload" gorm:"type:longtext"`
-	DeleteStrategy      string              `json:"delete_strategy" gorm:"type:varchar(64);not null;default:'keep'"`
-	DeleteDelaySeconds  int                 `json:"delete_delay_seconds" gorm:"type:int;not null;default:0"`
-	LastExecutionID     *uint               `json:"last_execution_id,omitempty" gorm:"index"`
-	LastStatus          string              `json:"last_status" gorm:"type:varchar(64);not null;default:'unknown'"`
-	LastMessage         string              `json:"last_message" gorm:"type:text"`
-	LastTriggeredAt     *LocalTime          `json:"last_triggered_at" gorm:"type:timestamp"`
-	LastSucceededAt     *LocalTime          `json:"last_succeeded_at" gorm:"type:timestamp"`
-	LastFailedAt        *LocalTime          `json:"last_failed_at" gorm:"type:timestamp"`
-	Plans               []FailoverPlan      `json:"plans,omitempty" gorm:"foreignKey:TaskID;references:ID;constraint:OnDelete:CASCADE,OnUpdate:CASCADE"`
-	Executions          []FailoverExecution `json:"executions,omitempty" gorm:"foreignKey:TaskID;references:ID;constraint:OnDelete:CASCADE,OnUpdate:CASCADE"`
-	CreatedAt           LocalTime           `json:"created_at"`
-	UpdatedAt           LocalTime           `json:"updated_at"`
+	ID                            uint                `json:"id,omitempty" gorm:"primaryKey;autoIncrement"`
+	UserID                        string              `json:"user_id,omitempty" gorm:"type:varchar(36);index"`
+	Name                          string              `json:"name" gorm:"type:varchar(255);not null;index"`
+	Enabled                       bool                `json:"enabled" gorm:"default:true"`
+	WatchClientUUID               string              `json:"watch_client_uuid" gorm:"type:varchar(36);not null;index"`
+	CurrentAddress                string              `json:"current_address" gorm:"type:varchar(255)"`
+	CurrentInstanceRef            string              `json:"current_instance_ref" gorm:"type:longtext"`
+	TriggerFailureCount           int                 `json:"trigger_failure_count" gorm:"type:int;not null;default:0"`
+	TriggerSource                 string              `json:"trigger_source" gorm:"type:varchar(64);not null;default:'cn_connectivity'"`
+	FailureThreshold              int                 `json:"failure_threshold" gorm:"type:int;not null;default:2"`
+	StaleAfterSeconds             int                 `json:"stale_after_seconds" gorm:"type:int;not null;default:300"`
+	CooldownSeconds               int                 `json:"cooldown_seconds" gorm:"type:int;not null;default:1800"`
+	ProvisionRetryLimit           int                 `json:"provision_retry_limit" gorm:"type:int;not null;default:6"`
+	ProvisionFailureFallbackLimit int                 `json:"provision_failure_fallback_limit" gorm:"type:int;not null;default:3"`
+	DNSProvider                   string              `json:"dns_provider" gorm:"type:varchar(32);not null"`
+	DNSEntryID                    string              `json:"dns_entry_id" gorm:"type:varchar(64);not null"`
+	DNSPayload                    string              `json:"dns_payload" gorm:"type:longtext"`
+	DeleteStrategy                string              `json:"delete_strategy" gorm:"type:varchar(64);not null;default:'keep'"`
+	DeleteDelaySeconds            int                 `json:"delete_delay_seconds" gorm:"type:int;not null;default:0"`
+	LastExecutionID               *uint               `json:"last_execution_id,omitempty" gorm:"index"`
+	LastStatus                    string              `json:"last_status" gorm:"type:varchar(64);not null;default:'unknown'"`
+	LastMessage                   string              `json:"last_message" gorm:"type:text"`
+	LastTriggeredAt               *LocalTime          `json:"last_triggered_at" gorm:"type:timestamp"`
+	LastSucceededAt               *LocalTime          `json:"last_succeeded_at" gorm:"type:timestamp"`
+	LastFailedAt                  *LocalTime          `json:"last_failed_at" gorm:"type:timestamp"`
+	Plans                         []FailoverPlan      `json:"plans,omitempty" gorm:"foreignKey:TaskID;references:ID;constraint:OnDelete:CASCADE,OnUpdate:CASCADE"`
+	Executions                    []FailoverExecution `json:"executions,omitempty" gorm:"foreignKey:TaskID;references:ID;constraint:OnDelete:CASCADE,OnUpdate:CASCADE"`
+	CreatedAt                     LocalTime           `json:"created_at"`
+	UpdatedAt                     LocalTime           `json:"updated_at"`
 }
 
 type FailoverPlan struct {

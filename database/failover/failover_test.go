@@ -278,3 +278,61 @@ func TestListTasksByUserWithDBUsesStableCreationOrder(t *testing.T) {
 		t.Fatalf("expected second created task second, got task id %d", taskList[1].ID)
 	}
 }
+
+func TestApplyTaskDefaultsSetsProvisionRetryLimit(t *testing.T) {
+	task := &models.FailoverTask{
+		Name:            "task-default-limit",
+		Enabled:         true,
+		WatchClientUUID: "client-a",
+	}
+
+	applyTaskDefaults(task)
+
+	if task.ProvisionRetryLimit != models.FailoverProvisionRetryLimitDefault {
+		t.Fatalf(
+			"expected default provision_retry_limit %d, got %d",
+			models.FailoverProvisionRetryLimitDefault,
+			task.ProvisionRetryLimit,
+		)
+	}
+	if task.ProvisionFailureFallbackLimit != models.FailoverProvisionFailureFallbackLimitDefault {
+		t.Fatalf(
+			"expected default provision_failure_fallback_limit %d, got %d",
+			models.FailoverProvisionFailureFallbackLimitDefault,
+			task.ProvisionFailureFallbackLimit,
+		)
+	}
+}
+
+func TestFailoverTaskPersistsProvisionRetryLimit(t *testing.T) {
+	db := openFailoverTestDB(t)
+	if err := db.AutoMigrate(
+		&models.FailoverTask{},
+	); err != nil {
+		t.Fatalf("failed to migrate test schema: %v", err)
+	}
+
+	task := &models.FailoverTask{
+		UserID:                        "user-a",
+		Name:                          "task-update-limit",
+		Enabled:                       true,
+		WatchClientUUID:               "client-a",
+		LastStatus:                    models.FailoverTaskStatusUnknown,
+		ProvisionRetryLimit:           3,
+		ProvisionFailureFallbackLimit: 2,
+	}
+	if err := db.Create(task).Error; err != nil {
+		t.Fatalf("failed to create task: %v", err)
+	}
+
+	var loaded models.FailoverTask
+	if err := db.First(&loaded, task.ID).Error; err != nil {
+		t.Fatalf("failed to reload task: %v", err)
+	}
+	if loaded.ProvisionRetryLimit != 3 {
+		t.Fatalf("expected provision_retry_limit 3, got %d", loaded.ProvisionRetryLimit)
+	}
+	if loaded.ProvisionFailureFallbackLimit != 2 {
+		t.Fatalf("expected provision_failure_fallback_limit 2, got %d", loaded.ProvisionFailureFallbackLimit)
+	}
+}

@@ -57,7 +57,8 @@ func ListClipboard(c *gin.Context) {
 
 	rawPage := strings.TrimSpace(c.Query("page"))
 	rawLimit := strings.TrimSpace(c.Query("limit"))
-	if rawPage != "" || rawLimit != "" {
+	rawSearch := strings.TrimSpace(c.Query("search"))
+	if rawPage != "" || rawLimit != "" || rawSearch != "" {
 		page := 1
 		limit := 20
 
@@ -78,7 +79,7 @@ func ListClipboard(c *gin.Context) {
 			limit = parsed
 		}
 
-		items, total, err := clipboardDB.ListClipboardPageByUser(userUUID, page, limit)
+		items, total, err := clipboardDB.ListClipboardPageByUserWithSearch(userUUID, page, limit, rawSearch)
 		if err != nil {
 			api.RespondError(c, http.StatusInternalServerError, "Failed to list clipboard: "+err.Error())
 			return

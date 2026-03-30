@@ -71,6 +71,46 @@ func deleteClipboardBatchForUserWithDB(db *gorm.DB, ids []int, userUUID string) 
 	return db.Where("user_id = ? AND id IN ?", userUUID, ids).Delete(&models.Clipboard{}).Error
 }
 
+func buildClipboardSearchTokens(rawSearch string) []string {
+	return strings.Fields(strings.ToLower(strings.TrimSpace(rawSearch)))
+}
+
+func buildClipboardFuzzyPattern(token string) string {
+	if token == "" {
+		return "%"
+	}
+
+	var builder strings.Builder
+	builder.Grow((len(token) * 2) + 2)
+	builder.WriteByte('%')
+	for _, char := range token {
+		switch char {
+		case '\\', '%', '_':
+			builder.WriteByte('\\')
+		}
+		builder.WriteRune(char)
+		builder.WriteByte('%')
+	}
+	return builder.String()
+}
+
+func applyClipboardSearchQuery(query *gorm.DB, rawSearch string) *gorm.DB {
+	for _, token := range buildClipboardSearchTokens(rawSearch) {
+		pattern := buildClipboardFuzzyPattern(token)
+		query = query.Where(
+			`(
+				LOWER(name) LIKE ? ESCAPE '\'
+				OR LOWER(COALESCE(remark, '')) LIKE ? ESCAPE '\'
+				OR LOWER(text) LIKE ? ESCAPE '\'
+			)`,
+			pattern,
+			pattern,
+			pattern,
+		)
+	}
+	return query
+}
+
 func listClipboardByUserWithDB(db *gorm.DB, userUUID string) ([]models.Clipboard, error) {
 	userUUID, err := normalizeClipboardUserID(userUUID)
 	if err != nil {
@@ -78,13 +118,17 @@ func listClipboardByUserWithDB(db *gorm.DB, userUUID string) ([]models.Clipboard
 	}
 
 	var list []models.Clipboard
-	if err := db.Where("user_id = ?", userUUID).Find(&list).Error; err != nil {
+	if err := db.
+		Where("user_id = ?", userUUID).
+		Order("weight DESC").
+		Order("id DESC").
+		Find(&list).Error; err != nil {
 		return nil, err
 	}
 	return list, nil
 }
 
-func listClipboardPageByUserWithDB(db *gorm.DB, userUUID string, page, limit int) ([]models.Clipboard, int64, error) {
+func listClipboardPageByUserWithDB(db *gorm.DB, userUUID string, page, limit int, search string) ([]models.Clipboard, int64, error) {
 	userUUID, err := normalizeClipboardUserID(userUUID)
 	if err != nil {
 		return nil, 0, err
@@ -101,6 +145,7 @@ func listClipboardPageByUserWithDB(db *gorm.DB, userUUID string, page, limit int
 	}
 
 	query := db.Model(&models.Clipboard{}).Where("user_id = ?", userUUID)
+	query = applyClipboardSearchQuery(query, search)
 
 	var total int64
 	if err := query.Count(&total).Error; err != nil {
@@ -111,7 +156,6 @@ func listClipboardPageByUserWithDB(db *gorm.DB, userUUID string, page, limit int
 	offset := (page - 1) * limit
 	if err := query.
 		Order("weight DESC").
-		Order("updated_at DESC").
 		Order("id DESC").
 		Limit(limit).
 		Offset(offset).
@@ -163,5 +207,10 @@ func ListClipboardByUser(userUUID string) ([]models.Clipboard, error) {
 
 func ListClipboardPageByUser(userUUID string, page, limit int) ([]models.Clipboard, int64, error) {
 	db := dbcore.GetDBInstance()
-	return listClipboardPageByUserWithDB(db, userUUID, page, limit)
+	return listClipboardPageByUserWithDB(db, userUUID, page, limit, "")
+}
+
+func ListClipboardPageByUserWithSearch(userUUID string, page, limit int, search string) ([]models.Clipboard, int64, error) {
+	db := dbcore.GetDBInstance()
+	return listClipboardPageByUserWithDB(db, userUUID, page, limit, search)
 }

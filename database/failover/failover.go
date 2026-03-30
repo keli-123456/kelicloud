@@ -11,11 +11,13 @@ import (
 )
 
 const (
-	defaultFailureThreshold    = 2
-	defaultStaleAfterSeconds   = 300
-	defaultCooldownSeconds     = 1800
-	defaultScriptTimeoutSec    = 600
-	defaultWaitAgentTimeoutSec = 600
+	defaultFailureThreshold              = 2
+	defaultStaleAfterSeconds             = 300
+	defaultCooldownSeconds               = 1800
+	defaultProvisionRetryLimit           = models.FailoverProvisionRetryLimitDefault
+	defaultProvisionFailureFallbackLimit = models.FailoverProvisionFailureFallbackLimitDefault
+	defaultScriptTimeoutSec              = 600
+	defaultWaitAgentTimeoutSec           = 600
 )
 
 func normalizeFailoverUserID(userUUID string) (string, error) {
@@ -69,6 +71,12 @@ func applyTaskDefaults(task *models.FailoverTask) {
 	}
 	if task.CooldownSeconds < 0 {
 		task.CooldownSeconds = defaultCooldownSeconds
+	}
+	if task.ProvisionRetryLimit <= 0 {
+		task.ProvisionRetryLimit = defaultProvisionRetryLimit
+	}
+	if task.ProvisionFailureFallbackLimit <= 0 {
+		task.ProvisionFailureFallbackLimit = defaultProvisionFailureFallbackLimit
 	}
 	if strings.TrimSpace(task.DNSPayload) == "" {
 		task.DNSPayload = "{}"
@@ -210,22 +218,24 @@ func UpdateTaskForUser(userUUID string, taskID uint, task *models.FailoverTask, 
 
 		applyTaskDefaults(task)
 		updates := map[string]interface{}{
-			"name":                  task.Name,
-			"enabled":               task.Enabled,
-			"watch_client_uuid":     strings.TrimSpace(existing.WatchClientUUID),
-			"current_address":       strings.TrimSpace(existing.CurrentAddress),
-			"current_instance_ref":  strings.TrimSpace(existing.CurrentInstanceRef),
-			"trigger_failure_count": existing.TriggerFailureCount,
-			"trigger_source":        task.TriggerSource,
-			"failure_threshold":     task.FailureThreshold,
-			"stale_after_seconds":   task.StaleAfterSeconds,
-			"cooldown_seconds":      task.CooldownSeconds,
-			"dns_provider":          task.DNSProvider,
-			"dns_entry_id":          task.DNSEntryID,
-			"dns_payload":           task.DNSPayload,
-			"delete_strategy":       task.DeleteStrategy,
-			"delete_delay_seconds":  task.DeleteDelaySeconds,
-			"last_status":           taskStatusForEnabled(task.Enabled, existing.LastStatus),
+			"name":                             task.Name,
+			"enabled":                          task.Enabled,
+			"watch_client_uuid":                strings.TrimSpace(existing.WatchClientUUID),
+			"current_address":                  strings.TrimSpace(existing.CurrentAddress),
+			"current_instance_ref":             strings.TrimSpace(existing.CurrentInstanceRef),
+			"trigger_failure_count":            existing.TriggerFailureCount,
+			"trigger_source":                   task.TriggerSource,
+			"failure_threshold":                task.FailureThreshold,
+			"stale_after_seconds":              task.StaleAfterSeconds,
+			"cooldown_seconds":                 task.CooldownSeconds,
+			"provision_retry_limit":            task.ProvisionRetryLimit,
+			"provision_failure_fallback_limit": task.ProvisionFailureFallbackLimit,
+			"dns_provider":                     task.DNSProvider,
+			"dns_entry_id":                     task.DNSEntryID,
+			"dns_payload":                      task.DNSPayload,
+			"delete_strategy":                  task.DeleteStrategy,
+			"delete_delay_seconds":             task.DeleteDelaySeconds,
+			"last_status":                      taskStatusForEnabled(task.Enabled, existing.LastStatus),
 		}
 		if task.WatchClientUUID != "" {
 			updates["watch_client_uuid"] = task.WatchClientUUID

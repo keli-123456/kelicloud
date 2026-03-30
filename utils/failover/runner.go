@@ -116,7 +116,27 @@ type planExecutionFailureDecision struct {
 	Cooldown       time.Duration
 }
 
-const providerEntryProvisionRetryLimit = 2
+type noPlanFallbackError struct {
+	err error
+}
+
+func (e *noPlanFallbackError) Error() string {
+	if e == nil || e.err == nil {
+		return ""
+	}
+	return e.err.Error()
+}
+
+func (e *noPlanFallbackError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.err
+}
+
+const (
+	blockedOutletRetryBaseBackoff = 15 * time.Second
+)
 
 type awsProvisionPayload struct {
 	Service             string         `json:"service,omitempty"`
@@ -464,6 +484,11 @@ func (r *executionRunner) run(report *common.Report) {
 				r.failExecution(err.Error())
 				return
 			}
+			var noFallbackErr *noPlanFallbackError
+			if errors.As(err, &noFallbackErr) {
+				r.failExecution(err.Error())
+				return
+			}
 			continue
 		}
 
@@ -497,6 +522,10 @@ func (r *executionRunner) executePlanActionWithProviderPool(plan models.Failover
 		return nil, "", nil, err
 	}
 
+	postProvisionFailureSeen := false
+	var postProvisionFailureErr error
+	provisionFailureCount := 0
+	provisionFailureLimit := provisionPlanFailureFallbackLimit(r.task, plan)
 	entryAttempts := make([]map[string]interface{}, 0, len(candidates))
 	for _, candidate := range candidates {
 		if err := r.checkStopped(); err != nil {
@@ -536,7 +565,7 @@ func (r *executionRunner) executePlanActionWithProviderPool(plan models.Failover
 		selectedPlan := plan
 		selectedPlan.ProviderEntryID = candidate.EntryID
 		isProvisionPlan := strings.TrimSpace(selectedPlan.ActionType) == models.FailoverActionProvisionInstance
-		maxAttempts := providerEntryMaxAttempts(selectedPlan)
+		maxAttempts := providerEntryMaxAttempts(r.task, selectedPlan)
 		for attemptNumber := 1; attemptNumber <= maxAttempts; attemptNumber++ {
 			if err := r.checkStopped(); err != nil {
 				return nil, "", entryAttempts, err
@@ -610,7 +639,19 @@ func (r *executionRunner) executePlanActionWithProviderPool(plan models.Failover
 				attemptDetail["status"] = "failed"
 				attemptDetail["error"] = actionErr.Error()
 				attemptDetail["failure_class"] = decision.Class
+				if isProvisionPlan {
+					provisionFailureCount++
+					attemptDetail["plan_provision_failures"] = provisionFailureCount
+					attemptDetail["plan_provision_failure_limit"] = provisionFailureLimit
+				}
 				entryAttempts = append(entryAttempts, attemptDetail)
+				if isProvisionPlan && provisionFailureCount >= provisionFailureLimit {
+					return nil, "", entryAttempts, fmt.Errorf(
+						"plan provisioning failed %d times, switching to next failover plan: %w",
+						provisionFailureLimit,
+						actionErr,
+					)
+				}
 				goto nextCandidate
 			}
 			if isProvisionPlan {
@@ -620,6 +661,8 @@ func (r *executionRunner) executePlanActionWithProviderPool(plan models.Failover
 					attemptDetail["error"] = cleanupErr.Error()
 					attemptDetail["failure_class"] = "post_provision_error"
 					entryAttempts = append(entryAttempts, attemptDetail)
+					postProvisionFailureSeen = true
+					postProvisionFailureErr = cleanupErr
 					goto nextCandidate
 				}
 
@@ -640,17 +683,26 @@ func (r *executionRunner) executePlanActionWithProviderPool(plan models.Failover
 				attemptDetail["error"] = finalizeErr.Error()
 				attemptDetail["failure_class"] = executionDecision.Class
 				if executionDecision.RetrySameEntry && attemptNumber < maxAttempts {
+					retryBackoff := blockedOutletRetryBackoff(attemptNumber)
 					retryDetail := map[string]interface{}{
-						"entry_id":       candidate.EntryID,
-						"entry_name":     candidate.EntryName,
-						"attempt":        attemptNumber,
-						"next_attempt":   attemptNumber + 1,
-						"failure_class":  executionDecision.Class,
-						"error_message":  finalizeErr.Error(),
-						"provider":       selectedPlan.Provider,
-						"provider_entry": candidate.EntryID,
+						"entry_id":            candidate.EntryID,
+						"entry_name":          candidate.EntryName,
+						"attempt":             attemptNumber,
+						"next_attempt":        attemptNumber + 1,
+						"failure_class":       executionDecision.Class,
+						"error_message":       finalizeErr.Error(),
+						"provider":            selectedPlan.Provider,
+						"provider_entry":      candidate.EntryID,
+						"retry_after_seconds": int(retryBackoff / time.Second),
 					}
 					retryStep := r.startStep("retry_same_entry", "Retry Same Provider Entry", retryDetail)
+					if err := waitContextOrDelay(r.ctx, retryBackoff); err != nil {
+						r.finishStep(retryStep, models.FailoverStepStatusFailed, err.Error(), retryDetail)
+						releaseProvisioningWindow(false)
+						attemptDetail["status"] = "failed"
+						entryAttempts = append(entryAttempts, attemptDetail)
+						return nil, "", entryAttempts, err
+					}
 					r.finishStep(
 						retryStep,
 						models.FailoverStepStatusSuccess,
@@ -661,6 +713,8 @@ func (r *executionRunner) executePlanActionWithProviderPool(plan models.Failover
 					entryAttempts = append(entryAttempts, attemptDetail)
 					continue
 				}
+				postProvisionFailureSeen = true
+				postProvisionFailureErr = finalizeErr
 				if executionDecision.Cooldown > 0 {
 					applyProviderEntryFailure(r.task.UserID, plan.Provider, candidate.EntryID, providerFailureDecision{
 						Class:    executionDecision.Class,
@@ -683,6 +737,9 @@ func (r *executionRunner) executePlanActionWithProviderPool(plan models.Failover
 	nextCandidate:
 	}
 
+	if postProvisionFailureSeen && postProvisionFailureErr != nil {
+		return nil, "", entryAttempts, &noPlanFallbackError{err: postProvisionFailureErr}
+	}
 	return nil, "", entryAttempts, buildProviderPoolUnavailableError(entryAttempts)
 }
 
@@ -918,9 +975,22 @@ func (r *executionRunner) executePlanAction(plan models.FailoverPlan) (*actionOu
 	return outcome, nil
 }
 
-func providerEntryMaxAttempts(plan models.FailoverPlan) int {
+func providerEntryMaxAttempts(task models.FailoverTask, plan models.FailoverPlan) int {
 	if strings.TrimSpace(plan.ActionType) == models.FailoverActionProvisionInstance {
-		return providerEntryProvisionRetryLimit
+		if task.ProvisionRetryLimit > 0 {
+			return task.ProvisionRetryLimit
+		}
+		return models.FailoverProvisionRetryLimitDefault
+	}
+	return 1
+}
+
+func provisionPlanFailureFallbackLimit(task models.FailoverTask, plan models.FailoverPlan) int {
+	if strings.TrimSpace(plan.ActionType) == models.FailoverActionProvisionInstance {
+		if task.ProvisionFailureFallbackLimit > 0 {
+			return task.ProvisionFailureFallbackLimit
+		}
+		return models.FailoverProvisionFailureFallbackLimitDefault
 	}
 	return 1
 }
@@ -939,6 +1009,10 @@ func classifyPlanExecutionFailure(err error) planExecutionFailureDecision {
 		Class:          "post_provision_error",
 		RetrySameEntry: false,
 	}
+}
+
+func blockedOutletRetryBackoff(attemptNumber int) time.Duration {
+	return blockedOutletRetryBaseBackoff
 }
 
 func (r *executionRunner) finalizePlan(plan models.FailoverPlan, outcome *actionOutcome) (err error) {

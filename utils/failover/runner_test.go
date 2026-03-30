@@ -227,6 +227,111 @@ func TestEnsureCommandResultReturnsEmptyResultForNil(t *testing.T) {
 	}
 }
 
+func TestProviderEntryMaxAttemptsUsesTaskProvisionRetryLimit(t *testing.T) {
+	task := models.FailoverTask{
+		ProvisionRetryLimit: 3,
+	}
+	provisionPlan := models.FailoverPlan{
+		Provider:   "digitalocean",
+		ActionType: models.FailoverActionProvisionInstance,
+	}
+	rebindPlan := models.FailoverPlan{
+		Provider:   "aws",
+		ActionType: models.FailoverActionRebindPublicIP,
+	}
+
+	if got := providerEntryMaxAttempts(task, provisionPlan); got != 3 {
+		t.Fatalf("expected provision retries to use task limit 3, got %d", got)
+	}
+	if got := providerEntryMaxAttempts(task, rebindPlan); got != 1 {
+		t.Fatalf("expected rebind retries to remain 1, got %d", got)
+	}
+}
+
+func TestProviderEntryMaxAttemptsFallsBackToDefaultProvisionRetryLimit(t *testing.T) {
+	task := models.FailoverTask{}
+	provisionPlan := models.FailoverPlan{
+		Provider:   "digitalocean",
+		ActionType: models.FailoverActionProvisionInstance,
+	}
+
+	if got := providerEntryMaxAttempts(task, provisionPlan); got != models.FailoverProvisionRetryLimitDefault {
+		t.Fatalf(
+			"expected default provision retry limit %d, got %d",
+			models.FailoverProvisionRetryLimitDefault,
+			got,
+		)
+	}
+}
+
+func TestProvisionPlanFailureFallbackLimitUsesTaskSetting(t *testing.T) {
+	task := models.FailoverTask{
+		ProvisionFailureFallbackLimit: 4,
+	}
+	provisionPlan := models.FailoverPlan{
+		Provider:   "digitalocean",
+		ActionType: models.FailoverActionProvisionInstance,
+	}
+	rebindPlan := models.FailoverPlan{
+		Provider:   "aws",
+		ActionType: models.FailoverActionRebindPublicIP,
+	}
+
+	if got := provisionPlanFailureFallbackLimit(task, provisionPlan); got != 4 {
+		t.Fatalf("expected provision fallback limit to use task value 4, got %d", got)
+	}
+	if got := provisionPlanFailureFallbackLimit(task, rebindPlan); got != 1 {
+		t.Fatalf("expected rebind fallback limit to remain 1, got %d", got)
+	}
+}
+
+func TestProvisionPlanFailureFallbackLimitFallsBackToDefault(t *testing.T) {
+	task := models.FailoverTask{}
+	provisionPlan := models.FailoverPlan{
+		Provider:   "digitalocean",
+		ActionType: models.FailoverActionProvisionInstance,
+	}
+
+	if got := provisionPlanFailureFallbackLimit(task, provisionPlan); got != models.FailoverProvisionFailureFallbackLimitDefault {
+		t.Fatalf(
+			"expected default provision fallback limit %d, got %d",
+			models.FailoverProvisionFailureFallbackLimitDefault,
+			got,
+		)
+	}
+}
+
+func TestNoPlanFallbackErrorWrapsUnderlyingError(t *testing.T) {
+	baseErr := errors.New("blocked after successful provisioning")
+	err := &noPlanFallbackError{err: baseErr}
+
+	if !errors.Is(err, baseErr) {
+		t.Fatal("expected noPlanFallbackError to unwrap the underlying error")
+	}
+	if got := err.Error(); got != baseErr.Error() {
+		t.Fatalf("expected error message %q, got %q", baseErr.Error(), got)
+	}
+}
+
+func TestBlockedOutletRetryBackoffUsesFixedDelay(t *testing.T) {
+	cases := []struct {
+		attempt  int
+		expected time.Duration
+	}{
+		{attempt: 1, expected: 15 * time.Second},
+		{attempt: 2, expected: 15 * time.Second},
+		{attempt: 3, expected: 15 * time.Second},
+		{attempt: 4, expected: 15 * time.Second},
+		{attempt: 5, expected: 15 * time.Second},
+	}
+
+	for _, tc := range cases {
+		if got := blockedOutletRetryBackoff(tc.attempt); got != tc.expected {
+			t.Fatalf("attempt %d backoff = %s, want %s", tc.attempt, got, tc.expected)
+		}
+	}
+}
+
 func TestEffectiveTaskDeleteStrategyForProvisionPlans(t *testing.T) {
 	task := models.FailoverTask{
 		DeleteStrategy: models.FailoverDeleteStrategyKeep,

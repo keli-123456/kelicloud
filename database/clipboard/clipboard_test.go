@@ -104,7 +104,7 @@ func TestListClipboardPageByUserRespectsPaginationAndOrder(t *testing.T) {
 		}
 	}
 
-	pageOne, total, err := listClipboardPageByUserWithDB(db, "user-a", 1, 2)
+	pageOne, total, err := listClipboardPageByUserWithDB(db, "user-a", 1, 2, "")
 	if err != nil {
 		t.Fatalf("failed to list first page: %v", err)
 	}
@@ -118,7 +118,7 @@ func TestListClipboardPageByUserRespectsPaginationAndOrder(t *testing.T) {
 		t.Fatalf("unexpected first page order: %+v", pageOne)
 	}
 
-	pageTwo, total, err := listClipboardPageByUserWithDB(db, "user-a", 2, 2)
+	pageTwo, total, err := listClipboardPageByUserWithDB(db, "user-a", 2, 2, "")
 	if err != nil {
 		t.Fatalf("failed to list second page: %v", err)
 	}
@@ -127,5 +127,65 @@ func TestListClipboardPageByUserRespectsPaginationAndOrder(t *testing.T) {
 	}
 	if len(pageTwo) != 1 || pageTwo[0].Name != "Weight 3" {
 		t.Fatalf("unexpected second page contents: %+v", pageTwo)
+	}
+}
+
+func TestListClipboardPageByUserSearchesFuzzilyAndKeepsStableOrderAfterEdit(t *testing.T) {
+	db := openClipboardTestDB(t)
+
+	if err := db.AutoMigrate(&models.Clipboard{}); err != nil {
+		t.Fatalf("failed to migrate test schema: %v", err)
+	}
+
+	older := models.Clipboard{
+		UserID: "user-a",
+		Name:   "Singapore Bootstrap",
+		Text:   "systemctl restart komari-agent",
+		Remark: "sg1 edge rollout",
+		Weight: 5,
+	}
+	newer := models.Clipboard{
+		UserID: "user-a",
+		Name:   "Tokyo Bootstrap",
+		Text:   "curl -fsSL https://example.com/install.sh | bash",
+		Remark: "jp1 edge rollout",
+		Weight: 5,
+	}
+
+	for _, item := range []*models.Clipboard{&older, &newer} {
+		if err := db.Create(item).Error; err != nil {
+			t.Fatalf("failed to create clipboard entry: %v", err)
+		}
+	}
+
+	searchResult, total, err := listClipboardPageByUserWithDB(db, "user-a", 1, 20, "sg1 rst")
+	if err != nil {
+		t.Fatalf("failed to search clipboard entries: %v", err)
+	}
+	if total != 1 {
+		t.Fatalf("expected exactly one fuzzy search match, got %d", total)
+	}
+	if len(searchResult) != 1 || searchResult[0].Id != older.Id {
+		t.Fatalf("unexpected fuzzy search result: %+v", searchResult)
+	}
+
+	if err := updateClipboardFieldsForUserWithDB(db, older.Id, "user-a", map[string]interface{}{
+		"remark": "sg1 edge rollout updated",
+	}); err != nil {
+		t.Fatalf("failed to update clipboard entry: %v", err)
+	}
+
+	page, total, err := listClipboardPageByUserWithDB(db, "user-a", 1, 20, "")
+	if err != nil {
+		t.Fatalf("failed to list clipboard entries after update: %v", err)
+	}
+	if total != 2 {
+		t.Fatalf("expected total 2 after update, got %d", total)
+	}
+	if len(page) != 2 {
+		t.Fatalf("expected 2 entries after update, got %d", len(page))
+	}
+	if page[0].Id != newer.Id || page[1].Id != older.Id {
+		t.Fatalf("expected stable id-based order after edit, got %+v", page)
 	}
 }
