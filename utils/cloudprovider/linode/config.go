@@ -31,6 +31,7 @@ type TokenRecord struct {
 	ProfileUsername     string                     `json:"profile_username,omitempty"`
 	ProfileEmail        string                     `json:"profile_email,omitempty"`
 	AccountCompany      string                     `json:"account_company,omitempty"`
+	AccountBalance      float64                    `json:"account_balance,omitempty"`
 	LastStatus          string                     `json:"last_status,omitempty"`
 	LastError           string                     `json:"last_error,omitempty"`
 	LastCheckedAt       string                     `json:"last_checked_at,omitempty"`
@@ -52,6 +53,7 @@ type TokenView struct {
 	ProfileUsername string `json:"profile_username,omitempty"`
 	ProfileEmail    string `json:"profile_email,omitempty"`
 	AccountCompany  string `json:"account_company,omitempty"`
+	AccountBalance  float64 `json:"account_balance,omitempty"`
 	LastStatus      string `json:"last_status"`
 	LastError       string `json:"last_error,omitempty"`
 	LastCheckedAt   string `json:"last_checked_at,omitempty"`
@@ -447,6 +449,7 @@ func (a *Addition) ToPoolView() TokenPoolView {
 			ProfileUsername: token.ProfileUsername,
 			ProfileEmail:    token.ProfileEmail,
 			AccountCompany:  token.AccountCompany,
+			AccountBalance:  token.AccountBalance,
 			LastStatus:      normalizeTokenStatus(token.LastStatus),
 			LastError:       token.LastError,
 			LastCheckedAt:   token.LastCheckedAt,
@@ -628,6 +631,7 @@ func (t *TokenRecord) SetCheckResult(checkedAt time.Time, profile *Profile, acco
 		t.ProfileUsername = ""
 		t.ProfileEmail = ""
 		t.AccountCompany = ""
+		t.AccountBalance = 0
 		return
 	}
 
@@ -639,6 +643,7 @@ func (t *TokenRecord) SetCheckResult(checkedAt time.Time, profile *Profile, acco
 	}
 	if account != nil {
 		t.AccountCompany = strings.TrimSpace(account.Company)
+		t.AccountBalance = account.Balance
 		if t.ProfileEmail == "" {
 			t.ProfileEmail = strings.TrimSpace(account.Email)
 		}

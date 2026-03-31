@@ -21,6 +21,7 @@ func TestTokenRecordSetCheckResultStoresProfileAndAccount(t *testing.T) {
 		Email:    "ops@example.com",
 	}, &Account{
 		Company: "Example Inc",
+		Balance: 12.34,
 	}, nil)
 
 	require.Equal(t, TokenStatusHealthy, token.LastStatus)
@@ -28,6 +29,7 @@ func TestTokenRecordSetCheckResultStoresProfileAndAccount(t *testing.T) {
 	require.Equal(t, "komari", token.ProfileUsername)
 	require.Equal(t, "ops@example.com", token.ProfileEmail)
 	require.Equal(t, "Example Inc", token.AccountCompany)
+	require.Equal(t, 12.34, token.AccountBalance)
 }
 
 func TestTokenRecordSetCheckResultMarksRestrictedProfileAsError(t *testing.T) {
@@ -53,6 +55,7 @@ func TestTokenRecordSetCheckResultClearsFieldsOnError(t *testing.T) {
 		ProfileUsername: "komari",
 		ProfileEmail:    "ops@example.com",
 		AccountCompany:  "Example Inc",
+		AccountBalance:  12.34,
 	}
 
 	checkErr := errors.New("invalid token")
@@ -63,6 +66,7 @@ func TestTokenRecordSetCheckResultClearsFieldsOnError(t *testing.T) {
 	require.Empty(t, token.ProfileUsername)
 	require.Empty(t, token.ProfileEmail)
 	require.Empty(t, token.AccountCompany)
+	require.Zero(t, token.AccountBalance)
 }
 
 func TestAdditionUpsertTokensGeneratesUniqueDefaultNames(t *testing.T) {
