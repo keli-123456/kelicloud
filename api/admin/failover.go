@@ -158,20 +158,23 @@ func normalizeFailoverDeleteStrategy(deleteStrategy string, plans []models.Failo
 }
 
 type failoverExecutionSummaryView struct {
-	ID                    uint              `json:"id"`
-	Status                string            `json:"status"`
-	TriggerReason         string            `json:"trigger_reason"`
-	SelectedPlanID        *uint             `json:"selected_plan_id,omitempty"`
-	ScriptNameSnapshot    string            `json:"script_name_snapshot"`
-	ScriptStatus          string            `json:"script_status"`
-	ScriptExitCode        *int              `json:"script_exit_code,omitempty"`
-	ScriptOutputTruncated bool              `json:"script_output_truncated"`
-	DNSStatus             string            `json:"dns_status"`
-	DNSResult             json.RawMessage   `json:"dns_result"`
-	CleanupStatus         string            `json:"cleanup_status"`
-	ErrorMessage          string            `json:"error_message"`
-	StartedAt             models.LocalTime  `json:"started_at"`
-	FinishedAt            *models.LocalTime `json:"finished_at"`
+	ID                    uint                       `json:"id"`
+	Status                string                     `json:"status"`
+	TriggerReason         string                     `json:"trigger_reason"`
+	SelectedPlanID        *uint                      `json:"selected_plan_id,omitempty"`
+	AttemptedPlans        json.RawMessage            `json:"attempted_plans"`
+	ScriptNameSnapshot    string                     `json:"script_name_snapshot"`
+	ScriptStatus          string                     `json:"script_status"`
+	ScriptExitCode        *int                       `json:"script_exit_code,omitempty"`
+	ScriptOutputTruncated bool                       `json:"script_output_truncated"`
+	DNSStatus             string                     `json:"dns_status"`
+	DNSResult             json.RawMessage            `json:"dns_result"`
+	CleanupStatus         string                     `json:"cleanup_status"`
+	CleanupResult         json.RawMessage            `json:"cleanup_result"`
+	LastStep              *failoverExecutionStepView `json:"last_step,omitempty"`
+	ErrorMessage          string                     `json:"error_message"`
+	StartedAt             models.LocalTime           `json:"started_at"`
+	FinishedAt            *models.LocalTime          `json:"finished_at"`
 }
 
 type failoverExecutionStepView struct {
@@ -341,11 +344,32 @@ func buildFailoverExecutionSummaryView(execution *models.FailoverExecution) *fai
 	if execution == nil {
 		return nil
 	}
+
+	var lastStep *failoverExecutionStepView
+	if len(execution.Steps) > 0 {
+		last := execution.Steps[len(execution.Steps)-1]
+		lastStep = &failoverExecutionStepView{
+			ID:          last.ID,
+			ExecutionID: last.ExecutionID,
+			Sort:        last.Sort,
+			StepKey:     last.StepKey,
+			StepLabel:   last.StepLabel,
+			Status:      last.Status,
+			Message:     last.Message,
+			Detail:      rawJSONOrNull(last.Detail),
+			StartedAt:   last.StartedAt,
+			FinishedAt:  last.FinishedAt,
+			CreatedAt:   last.CreatedAt,
+			UpdatedAt:   last.UpdatedAt,
+		}
+	}
+
 	return &failoverExecutionSummaryView{
 		ID:                    execution.ID,
 		Status:                execution.Status,
 		TriggerReason:         execution.TriggerReason,
 		SelectedPlanID:        execution.SelectedPlanID,
+		AttemptedPlans:        rawJSONOrNull(execution.AttemptedPlans),
 		ScriptNameSnapshot:    execution.ScriptNameSnapshot,
 		ScriptStatus:          execution.ScriptStatus,
 		ScriptExitCode:        execution.ScriptExitCode,
@@ -353,6 +377,8 @@ func buildFailoverExecutionSummaryView(execution *models.FailoverExecution) *fai
 		DNSStatus:             execution.DNSStatus,
 		DNSResult:             rawJSONOrNull(execution.DNSResult),
 		CleanupStatus:         execution.CleanupStatus,
+		CleanupResult:         rawJSONOrNull(execution.CleanupResult),
+		LastStep:              lastStep,
 		ErrorMessage:          execution.ErrorMessage,
 		StartedAt:             execution.StartedAt,
 		FinishedAt:            execution.FinishedAt,

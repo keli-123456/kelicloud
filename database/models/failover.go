@@ -82,6 +82,7 @@ const (
 	FailoverCleanupStatusSuccess = "success"
 	FailoverCleanupStatusFailed  = "failed"
 	FailoverCleanupStatusSkipped = "skipped"
+	FailoverCleanupStatusWarning = "warning"
 )
 
 type FailoverTask struct {

@@ -52,26 +52,35 @@ type executionRunner struct {
 }
 
 type actionOutcome struct {
-	IPv4             string
-	IPv6             string
-	TargetClientUUID string
-	NewClientUUID    string
-	AutoConnectGroup string
-	NewInstanceRef   map[string]interface{}
-	NewAddresses     map[string]interface{}
-	OldInstanceRef   map[string]interface{}
-	CleanupLabel     string
-	Cleanup          func() error
-	RollbackLabel    string
-	Rollback         func() error
+	IPv4              string
+	IPv6              string
+	TargetClientUUID  string
+	NewClientUUID     string
+	AutoConnectGroup  string
+	NewInstanceRef    map[string]interface{}
+	NewAddresses      map[string]interface{}
+	OldInstanceRef    map[string]interface{}
+	CleanupLabel      string
+	Cleanup           func(context.Context) error
+	CleanupAssessment *cleanupAssessment
+	RollbackLabel     string
+	Rollback          func(context.Context) error
 }
 
 type currentInstanceCleanup struct {
-	Ref       map[string]interface{}
-	Addresses map[string]interface{}
-	Label     string
-	Cleanup   func() error
-	Missing   bool
+	Ref        map[string]interface{}
+	Addresses  map[string]interface{}
+	Label      string
+	Cleanup    func(context.Context) error
+	Missing    bool
+	Assessment *cleanupAssessment
+}
+
+type cleanupAssessment struct {
+	Status      string
+	StepStatus  string
+	StepMessage string
+	Result      map[string]interface{}
 }
 
 type blockedOutletError struct {
@@ -136,6 +145,21 @@ func (e *noPlanFallbackError) Unwrap() error {
 
 const (
 	blockedOutletRetryBaseBackoff = 15 * time.Second
+)
+
+const (
+	cleanupClassificationNotRequested                = "not_requested"
+	cleanupClassificationInstanceDeleted             = "instance_deleted"
+	cleanupClassificationInstanceMissing             = "instance_missing"
+	cleanupClassificationProviderEntryMissing        = "provider_entry_missing"
+	cleanupClassificationProviderEntryUnhealthy      = "provider_entry_unhealthy"
+	cleanupClassificationCleanupStatusUnknown        = "cleanup_status_unknown"
+	cleanupClassificationInstanceConfirmedDeleteFail = "instance_confirmed_delete_failed"
+
+	cleanupStepMessageInstanceMissing        = "old instance already missing; no cleanup required"
+	cleanupStepMessageProviderEntryMissing   = "original cloud credential was deleted; manual cleanup review required"
+	cleanupStepMessageProviderEntryUnhealthy = "original cloud credential is unavailable; manual cleanup review required"
+	cleanupStepMessageCleanupStatusUnknown   = "old instance cleanup could not be verified; manual review required"
 )
 
 type awsProvisionPayload struct {
@@ -461,6 +485,8 @@ func (r *executionRunner) run(report *common.Report) {
 		outcome, selectedEntryID, entryAttempts, err := r.executePlan(plan)
 		attempt := map[string]interface{}{
 			"plan_id":               plan.ID,
+			"plan_name":             strings.TrimSpace(plan.Name),
+			"priority":              plan.Priority,
 			"provider":              plan.Provider,
 			"action_type":           plan.ActionType,
 			"preferred_entry_id":    plan.ProviderEntryID,
@@ -548,6 +574,9 @@ func (r *executionRunner) executePlanActionWithProviderPool(plan models.Failover
 		if strings.TrimSpace(plan.ActionType) == models.FailoverActionProvisionInstance {
 			recycledDetail, recycleErr := r.recycleCurrentOutletForCandidate(plan, candidate)
 			if recycleErr != nil {
+				if errors.Is(recycleErr, errExecutionStopped) {
+					return nil, "", entryAttempts, recycleErr
+				}
 				candidateDetail["status"] = "failed"
 				candidateDetail["error"] = recycleErr.Error()
 				candidateDetail["failure_class"] = "pre_reclaim_error"
@@ -576,26 +605,32 @@ func (r *executionRunner) executePlanActionWithProviderPool(plan models.Failover
 			}
 			attemptDetail["attempt"] = attemptNumber
 
-			lease, availability, reserveErr := acquireProviderEntryLease(r.task.UserID, selectedPlan, candidate)
+			lease, availability, reserveErr := acquireProviderEntryLease(r.ctx, r.task.UserID, selectedPlan, candidate)
 			if len(availability) > 0 {
 				attemptDetail["availability"] = availability
 			}
 			if reserveErr != nil && isProvisionPlan && strings.TrimSpace(stringMapValue(availability, "status")) == "full" {
 				recycledDetail, recycleErr := r.recycleCurrentOutletForCandidate(selectedPlan, candidate)
 				if recycleErr != nil {
+					if errors.Is(recycleErr, errExecutionStopped) {
+						return nil, "", entryAttempts, recycleErr
+					}
 					attemptDetail["recycle_error"] = recycleErr.Error()
 				} else if len(recycledDetail) > 0 {
 					attemptDetail["recycled_current_instance"] = recycledDetail
 					if availabilityAfterRecycle := waitForProviderEntryCapacityAfterRecycle(r.ctx, r.task.UserID, selectedPlan, candidate); len(availabilityAfterRecycle) > 0 {
 						attemptDetail["availability_after_recycle"] = availabilityAfterRecycle
 					}
-					lease, availability, reserveErr = acquireProviderEntryLease(r.task.UserID, selectedPlan, candidate)
+					lease, availability, reserveErr = acquireProviderEntryLease(r.ctx, r.task.UserID, selectedPlan, candidate)
 					if len(availability) > 0 {
 						attemptDetail["availability"] = availability
 					}
 				}
 			}
 			if reserveErr != nil {
+				if errors.Is(reserveErr, errExecutionStopped) {
+					return nil, "", entryAttempts, reserveErr
+				}
 				attemptDetail["status"] = "skipped"
 				attemptDetail["error"] = reserveErr.Error()
 				entryAttempts = append(entryAttempts, attemptDetail)
@@ -613,10 +648,22 @@ func (r *executionRunner) executePlanActionWithProviderPool(plan models.Failover
 					finishOperation = nil
 				}
 			}
+			defer func() {
+				if recovered := recover(); recovered != nil {
+					releaseProvisioningWindow(false)
+					panic(recovered)
+				}
+			}()
 			if shouldSerializeProviderOperation(selectedPlan) {
-				serialDone, serialErr := lease.BeginSerializedOperation(providerEntryOperationSpacing(selectedPlan))
+				serialDone, serialErr := lease.BeginSerializedOperation(r.ctx, providerEntryOperationSpacing(selectedPlan))
 				if serialErr != nil {
 					releaseProvisioningWindow(false)
+					if errors.Is(serialErr, errExecutionStopped) {
+						attemptDetail["status"] = "failed"
+						attemptDetail["error"] = serialErr.Error()
+						entryAttempts = append(entryAttempts, attemptDetail)
+						return nil, "", entryAttempts, serialErr
+					}
 					attemptDetail["status"] = "skipped"
 					attemptDetail["error"] = serialErr.Error()
 					entryAttempts = append(entryAttempts, attemptDetail)
@@ -657,6 +704,12 @@ func (r *executionRunner) executePlanActionWithProviderPool(plan models.Failover
 			if isProvisionPlan {
 				if cleanupErr := r.attachCurrentOutletCleanup(outcome, selectedPlan, candidate); cleanupErr != nil {
 					releaseProvisioningWindow(false)
+					if errors.Is(cleanupErr, errExecutionStopped) {
+						attemptDetail["status"] = "failed"
+						attemptDetail["error"] = cleanupErr.Error()
+						entryAttempts = append(entryAttempts, attemptDetail)
+						return nil, "", entryAttempts, cleanupErr
+					}
 					attemptDetail["status"] = "failed"
 					attemptDetail["error"] = cleanupErr.Error()
 					attemptDetail["failure_class"] = "post_provision_error"
@@ -1105,7 +1158,7 @@ func (r *executionRunner) finalizePlan(plan models.FailoverPlan, outcome *action
 	_ = failoverdb.UpdateExecutionFields(r.execution.ID, map[string]interface{}{
 		"status": models.FailoverExecutionStatusSwitchingDNS,
 	})
-	dnsResult, err := applyDNSRecord(r.task.UserID, r.task.DNSProvider, r.task.DNSEntryID, r.task.DNSPayload, outcome.IPv4, outcome.IPv6)
+	dnsResult, err := applyDNSRecord(r.ctx, r.task.UserID, r.task.DNSProvider, r.task.DNSEntryID, r.task.DNSPayload, outcome.IPv4, outcome.IPv6)
 	if err != nil {
 		_ = failoverdb.UpdateExecutionFields(r.execution.ID, map[string]interface{}{
 			"dns_status": models.FailoverDNSStatusFailed,
@@ -1377,7 +1430,7 @@ func (r *executionRunner) rollbackOutcome(outcome *actionOutcome, originalErr er
 		}(),
 	})
 
-	if err := outcome.Rollback(); err != nil {
+	if err := normalizeExecutionStopError(outcome.Rollback(r.ctx)); err != nil {
 		detail := map[string]interface{}{
 			"label": outcome.RollbackLabel,
 			"error": err.Error(),
@@ -1430,6 +1483,7 @@ func (r *executionRunner) executeProvisionPlan(plan models.FailoverPlan) (*actio
 	default:
 		err = fmt.Errorf("unsupported provision provider: %s", plan.Provider)
 	}
+	err = normalizeExecutionStopError(err)
 	if err != nil {
 		r.finishStep(provisionStep, models.FailoverStepStatusFailed, err.Error(), nil)
 		return nil, err
@@ -1457,10 +1511,11 @@ func (r *executionRunner) executeRebindPlan(plan models.FailoverPlan) (*actionOu
 	)
 	switch plan.Provider {
 	case "aws":
-		outcome, err = rebindAWSIPAddress(r.task, plan)
+		outcome, err = rebindAWSIPAddress(r.ctx, r.task, plan)
 	default:
 		err = fmt.Errorf("unsupported rebind provider: %s", plan.Provider)
 	}
+	err = normalizeExecutionStopError(err)
 	if err != nil {
 		r.finishStep(rebindStep, models.FailoverStepStatusFailed, err.Error(), nil)
 		return nil, err
@@ -1523,7 +1578,7 @@ func (r *executionRunner) runScripts(plan models.FailoverPlan, clientUUID string
 			"script_output_truncated": scriptOutputTruncated,
 		})
 
-		result, err := dispatchScriptToClient(r.task.UserID, clientUUID, clipboard.Text, time.Duration(plan.ScriptTimeoutSec)*time.Second)
+		result, err := dispatchScriptToClient(r.ctx, r.task.UserID, clientUUID, clipboard.Text, time.Duration(plan.ScriptTimeoutSec)*time.Second)
 		result = ensureCommandResult(result)
 		scriptTaskIDs = append(scriptTaskIDs, result.TaskID)
 		scriptOutputs = append(scriptOutputs, result.Output)
@@ -1608,7 +1663,7 @@ func (r *executionRunner) runScripts(plan models.FailoverPlan, clientUUID string
 func (r *executionRunner) succeedExecution(outcome *actionOutcome) {
 	now := time.Now()
 	cleanupStatus := models.FailoverCleanupStatusSkipped
-	cleanupResult := map[string]interface{}{"message": "cleanup not requested"}
+	cleanupResult := buildCleanupNotRequestedResult()
 	deleteStrategy := effectiveTaskDeleteStrategy(r.task)
 
 	if deleteStrategy != models.FailoverDeleteStrategyKeep && outcome != nil && outcome.Cleanup != nil {
@@ -1621,13 +1676,24 @@ func (r *executionRunner) succeedExecution(outcome *actionOutcome) {
 		})
 
 		if deleteStrategy == models.FailoverDeleteStrategyDeleteAfterSuccessDelay && r.task.DeleteDelaySeconds > 0 {
-			time.Sleep(time.Duration(r.task.DeleteDelaySeconds) * time.Second)
+			if err := waitContextOrDelay(r.ctx, time.Duration(r.task.DeleteDelaySeconds)*time.Second); err != nil {
+				cleanupStatus = models.FailoverCleanupStatusWarning
+				cleanupResult = buildCleanupInterruptedResult(outcome.OldInstanceRef, outcome.CleanupLabel, err)
+				r.finishStep(cleanupStep, models.FailoverStepStatusSkipped, cleanupStepMessageCleanupStatusUnknown, cleanupResult)
+				goto finalizeExecution
+			}
 		}
 
-		if err := outcome.Cleanup(); err != nil {
-			cleanupStatus = models.FailoverCleanupStatusFailed
-			cleanupResult = map[string]interface{}{"error": err.Error()}
-			r.finishStep(cleanupStep, models.FailoverStepStatusFailed, err.Error(), cleanupResult)
+		if err := normalizeExecutionStopError(outcome.Cleanup(r.ctx)); err != nil {
+			if errors.Is(err, errExecutionStopped) {
+				cleanupStatus = models.FailoverCleanupStatusWarning
+				cleanupResult = buildCleanupInterruptedResult(outcome.OldInstanceRef, outcome.CleanupLabel, err)
+				r.finishStep(cleanupStep, models.FailoverStepStatusSkipped, cleanupStepMessageCleanupStatusUnknown, cleanupResult)
+			} else {
+				cleanupStatus = models.FailoverCleanupStatusFailed
+				cleanupResult = buildCleanupDeleteFailedResult(outcome.OldInstanceRef, outcome.CleanupLabel, err)
+				r.finishStep(cleanupStep, models.FailoverStepStatusFailed, err.Error(), cleanupResult)
+			}
 		} else {
 			oldProvider := strings.TrimSpace(stringMapValue(outcome.OldInstanceRef, "provider"))
 			oldEntryID := strings.TrimSpace(providerEntryIDFromRef(outcome.OldInstanceRef))
@@ -1635,11 +1701,27 @@ func (r *executionRunner) succeedExecution(outcome *actionOutcome) {
 				invalidateProviderEntrySnapshot(r.task.UserID, oldProvider, oldEntryID)
 			}
 			cleanupStatus = models.FailoverCleanupStatusSuccess
-			cleanupResult = map[string]interface{}{"message": "old instance deleted"}
+			cleanupResult = buildCleanupDeletedResult(outcome.OldInstanceRef, outcome.CleanupLabel)
 			r.finishStep(cleanupStep, models.FailoverStepStatusSuccess, "old instance deleted", cleanupResult)
 		}
+	} else if deleteStrategy != models.FailoverDeleteStrategyKeep && outcome != nil && outcome.CleanupAssessment != nil {
+		cleanupStep := r.startStep("cleanup_old", "Cleanup Old Instance", map[string]interface{}{
+			"strategy":       deleteStrategy,
+			"label":          outcome.CleanupLabel,
+			"classification": stringMapValue(outcome.CleanupAssessment.Result, "classification"),
+		})
+		cleanupStatus = firstNonEmpty(strings.TrimSpace(outcome.CleanupAssessment.Status), models.FailoverCleanupStatusWarning)
+		cleanupResult = cloneJSONMap(outcome.CleanupAssessment.Result)
+		stepStatus := firstNonEmpty(strings.TrimSpace(outcome.CleanupAssessment.StepStatus), models.FailoverStepStatusSkipped)
+		stepMessage := firstNonEmpty(
+			strings.TrimSpace(outcome.CleanupAssessment.StepMessage),
+			strings.TrimSpace(stringMapValue(cleanupResult, "summary")),
+			"old instance cleanup requires manual review",
+		)
+		r.finishStep(cleanupStep, stepStatus, stepMessage, cleanupResult)
 	}
 
+finalizeExecution:
 	fields := map[string]interface{}{
 		"status":         models.FailoverExecutionStatusSuccess,
 		"finished_at":    models.FromTime(now),
@@ -1785,11 +1867,208 @@ func resolvedCurrentInstanceRef(ref map[string]interface{}, provider, entryID st
 	return resolvedRef
 }
 
-func missingCurrentInstanceCleanup(ref map[string]interface{}, provider, entryID, label string) *currentInstanceCleanup {
+func cleanupResultBase(classification, label string, ref map[string]interface{}) map[string]interface{} {
+	result := map[string]interface{}{
+		"classification": strings.TrimSpace(classification),
+	}
+	if provider := strings.TrimSpace(stringMapValue(ref, "provider")); provider != "" {
+		result["provider"] = provider
+	}
+	if entryID := strings.TrimSpace(providerEntryIDFromRef(ref)); entryID != "" {
+		result["provider_entry_id"] = entryID
+	}
+	if entryName := strings.TrimSpace(providerEntryNameFromRef(ref)); entryName != "" {
+		result["provider_entry_name"] = entryName
+	}
+	if strings.TrimSpace(label) != "" {
+		result["cleanup_label"] = strings.TrimSpace(label)
+	}
+	if len(ref) > 0 {
+		result["instance_ref"] = cloneJSONMap(ref)
+	}
+	return result
+}
+
+func cleanupAssessmentWithResult(status, stepStatus, stepMessage string, result map[string]interface{}) *cleanupAssessment {
+	return &cleanupAssessment{
+		Status:      strings.TrimSpace(status),
+		StepStatus:  strings.TrimSpace(stepStatus),
+		StepMessage: strings.TrimSpace(stepMessage),
+		Result:      cloneJSONMap(result),
+	}
+}
+
+func cloneCleanupAssessment(source *cleanupAssessment) *cleanupAssessment {
+	if source == nil {
+		return nil
+	}
+	return &cleanupAssessment{
+		Status:      strings.TrimSpace(source.Status),
+		StepStatus:  strings.TrimSpace(source.StepStatus),
+		StepMessage: strings.TrimSpace(source.StepMessage),
+		Result:      cloneJSONMap(source.Result),
+	}
+}
+
+func buildCleanupNotRequestedResult() map[string]interface{} {
+	return map[string]interface{}{
+		"classification": cleanupClassificationNotRequested,
+		"summary":        "old instance cleanup was not requested for this task",
+		"billing_risk":   "none",
+	}
+}
+
+func buildCleanupDeletedResult(ref map[string]interface{}, label string) map[string]interface{} {
+	result := cleanupResultBase(cleanupClassificationInstanceDeleted, label, ref)
+	result["summary"] = "old instance deleted successfully"
+	result["instance_state"] = "deleted"
+	result["billing_risk"] = "none"
+	return result
+}
+
+func buildCleanupDeleteFailedResult(ref map[string]interface{}, label string, err error) map[string]interface{} {
+	result := cleanupResultBase(cleanupClassificationInstanceConfirmedDeleteFail, label, ref)
+	result["summary"] = "old instance cleanup failed after confirming the old instance still exists; it is likely still billing until removed"
+	result["instance_state"] = "confirmed_present"
+	result["billing_risk"] = "likely"
+	result["manual_action_required"] = true
+	if err != nil && strings.TrimSpace(err.Error()) != "" {
+		result["error_message"] = strings.TrimSpace(err.Error())
+	}
+	return result
+}
+
+func buildCleanupInterruptedResult(ref map[string]interface{}, label string, err error) map[string]interface{} {
+	result := cleanupResultBase(cleanupClassificationCleanupStatusUnknown, label, ref)
+	result["summary"] = "old instance cleanup was interrupted before completion; the old instance status could not be confirmed, review the original cloud account manually"
+	result["instance_state"] = "unknown"
+	result["billing_risk"] = "unknown"
+	result["manual_action_required"] = true
+	result["interrupted"] = true
+	if err != nil && strings.TrimSpace(err.Error()) != "" {
+		result["error_message"] = strings.TrimSpace(err.Error())
+	}
+	return result
+}
+
+func buildInstanceMissingCleanupAssessment(ref map[string]interface{}, label string) *cleanupAssessment {
+	result := cleanupResultBase(cleanupClassificationInstanceMissing, label, ref)
+	result["summary"] = "old instance was already missing; no cleanup action was required"
+	result["instance_state"] = "missing"
+	result["billing_risk"] = "none"
+	return cleanupAssessmentWithResult(
+		models.FailoverCleanupStatusSkipped,
+		models.FailoverStepStatusSkipped,
+		cleanupStepMessageInstanceMissing,
+		result,
+	)
+}
+
+func buildProviderEntryMissingCleanupAssessment(ref map[string]interface{}, label string) *cleanupAssessment {
+	result := cleanupResultBase(cleanupClassificationProviderEntryMissing, label, ref)
+	result["summary"] = "old instance cleanup could not run because the original cloud credential entry was deleted; the old instance status could not be confirmed, review the original cloud account manually"
+	result["credential_state"] = "deleted"
+	result["instance_state"] = "unknown"
+	result["billing_risk"] = "unknown"
+	result["manual_action_required"] = true
+	return cleanupAssessmentWithResult(
+		models.FailoverCleanupStatusWarning,
+		models.FailoverStepStatusSkipped,
+		cleanupStepMessageProviderEntryMissing,
+		result,
+	)
+}
+
+func buildProviderEntryQueryCleanupAssessment(provider string, ref map[string]interface{}, label string, err error) *cleanupAssessment {
+	decision := classifyProviderFailure(provider, err)
+	classification := cleanupClassificationCleanupStatusUnknown
+	stepMessage := cleanupStepMessageCleanupStatusUnknown
+	summary := "old instance cleanup status could not be confirmed because the original cloud credential could not query the provider API; review the original cloud account manually"
+	credentialState := "query_failed"
+
+	switch decision.Class {
+	case "auth_invalid":
+		classification = cleanupClassificationProviderEntryUnhealthy
+		stepMessage = cleanupStepMessageProviderEntryUnhealthy
+		summary = "old instance cleanup could not run because the original cloud credential is no longer valid; the old instance status could not be confirmed, review the original cloud account manually"
+		credentialState = "unavailable"
+	case "billing_locked":
+		classification = cleanupClassificationProviderEntryUnhealthy
+		stepMessage = cleanupStepMessageProviderEntryUnhealthy
+		summary = "old instance cleanup could not run because the original cloud account is locked or billing-restricted; the old instance status could not be confirmed, review the original cloud account manually"
+		credentialState = "unavailable"
+	case "rate_limited":
+		summary = "old instance cleanup status could not be confirmed because the provider API rate-limited the original cloud credential; review the original cloud account manually"
+	}
+
+	result := cleanupResultBase(classification, label, ref)
+	result["summary"] = summary
+	result["credential_state"] = credentialState
+	result["instance_state"] = "unknown"
+	result["billing_risk"] = "unknown"
+	result["manual_action_required"] = true
+	if decision.Class != "" {
+		result["provider_failure_class"] = decision.Class
+	}
+	if err != nil && strings.TrimSpace(err.Error()) != "" {
+		result["error_message"] = strings.TrimSpace(err.Error())
+	}
+
+	return cleanupAssessmentWithResult(
+		models.FailoverCleanupStatusWarning,
+		models.FailoverStepStatusSkipped,
+		stepMessage,
+		result,
+	)
+}
+
+func isCurrentInstanceCredentialMissingError(provider string, err error) bool {
+	if err == nil {
+		return false
+	}
+	if isProviderEntryNotFoundError(err) {
+		return true
+	}
+
+	message := strings.ToLower(strings.TrimSpace(err.Error()))
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "digitalocean":
+		return strings.Contains(message, "digitalocean provider is not configured") ||
+			strings.Contains(message, "digitalocean token is not configured")
+	case "linode":
+		return strings.Contains(message, "linode provider is not configured") ||
+			strings.Contains(message, "linode token is not configured")
+	case "aws":
+		return strings.Contains(message, "aws provider is not configured") ||
+			strings.Contains(message, "aws credential is not configured")
+	default:
+		return false
+	}
+}
+
+func instanceMissingCurrentInstanceCleanup(ref map[string]interface{}, provider, entryID, label string) *currentInstanceCleanup {
 	return &currentInstanceCleanup{
-		Ref:     resolvedCurrentInstanceRef(ref, provider, entryID),
-		Label:   strings.TrimSpace(label),
-		Missing: true,
+		Ref:        resolvedCurrentInstanceRef(ref, provider, entryID),
+		Label:      strings.TrimSpace(label),
+		Missing:    true,
+		Assessment: buildInstanceMissingCleanupAssessment(resolvedCurrentInstanceRef(ref, provider, entryID), label),
+	}
+}
+
+func providerEntryMissingCurrentInstanceCleanup(ref map[string]interface{}, provider, entryID, label string) *currentInstanceCleanup {
+	return &currentInstanceCleanup{
+		Ref:        resolvedCurrentInstanceRef(ref, provider, entryID),
+		Label:      strings.TrimSpace(label),
+		Assessment: buildProviderEntryMissingCleanupAssessment(resolvedCurrentInstanceRef(ref, provider, entryID), label),
+	}
+}
+
+func providerEntryQueryCurrentInstanceCleanup(ref map[string]interface{}, provider, entryID, label string, err error) *currentInstanceCleanup {
+	resolvedRef := resolvedCurrentInstanceRef(ref, provider, entryID)
+	return &currentInstanceCleanup{
+		Ref:        resolvedRef,
+		Label:      strings.TrimSpace(label),
+		Assessment: buildProviderEntryQueryCleanupAssessment(provider, resolvedRef, label, err),
 	}
 }
 
@@ -1822,9 +2101,9 @@ func (r *executionRunner) attachCurrentOutletCleanup(outcome *actionOutcome, pla
 	if outcome == nil || outcome.Cleanup != nil {
 		return nil
 	}
-	cleanup, err := resolveCurrentInstanceCleanupFromRef(r.task.UserID, parseJSONMap(r.task.CurrentInstanceRef))
+	cleanup, err := resolveCurrentInstanceCleanupFromRef(r.ctx, r.task.UserID, parseJSONMap(r.task.CurrentInstanceRef))
 	if err != nil {
-		return err
+		return normalizeExecutionStopError(err)
 	}
 	if cleanup == nil {
 		address, addressErr := r.ensureCurrentOutletAddress()
@@ -1832,9 +2111,9 @@ func (r *executionRunner) attachCurrentOutletCleanup(outcome *actionOutcome, pla
 			return addressErr
 		}
 		if address != "" {
-			cleanup, err = r.resolveCurrentInstanceCleanupByAddress(plan, candidate)
+			cleanup, err = r.resolveCurrentInstanceCleanupByAddress(r.ctx, plan, candidate)
 			if err != nil {
-				return err
+				return normalizeExecutionStopError(err)
 			}
 		}
 	}
@@ -1851,6 +2130,7 @@ func (r *executionRunner) attachCurrentOutletCleanup(outcome *actionOutcome, pla
 	outcome.OldInstanceRef = cloneJSONMap(cleanup.Ref)
 	outcome.CleanupLabel = cleanup.Label
 	outcome.Cleanup = cleanup.Cleanup
+	outcome.CleanupAssessment = cloneCleanupAssessment(cleanup.Assessment)
 	return nil
 }
 
@@ -1888,9 +2168,9 @@ func (r *executionRunner) ensureCurrentOutletAddress() (string, error) {
 
 func (r *executionRunner) recycleCurrentOutletForCandidate(plan models.FailoverPlan, candidate providerPoolCandidate) (map[string]interface{}, error) {
 	currentRef := parseJSONMap(r.task.CurrentInstanceRef)
-	cleanup, err := resolveCurrentInstanceCleanupFromRef(r.task.UserID, currentRef)
+	cleanup, err := resolveCurrentInstanceCleanupFromRef(r.ctx, r.task.UserID, currentRef)
 	if err != nil {
-		return nil, err
+		return nil, normalizeExecutionStopError(err)
 	}
 	staleCurrentOutlet := cleanup != nil && cleanup.Missing
 	if cleanup != nil && (strings.ToLower(strings.TrimSpace(stringMapValue(cleanup.Ref, "provider"))) != strings.ToLower(strings.TrimSpace(plan.Provider)) ||
@@ -1902,9 +2182,9 @@ func (r *executionRunner) recycleCurrentOutletForCandidate(plan models.FailoverP
 		cleanup = nil
 	}
 	if cleanup == nil {
-		cleanup, err = r.resolveCurrentInstanceCleanupByAddress(plan, candidate)
+		cleanup, err = r.resolveCurrentInstanceCleanupByAddress(r.ctx, plan, candidate)
 		if err != nil {
-			return nil, err
+			return nil, normalizeExecutionStopError(err)
 		}
 	}
 	if cleanup == nil && staleCurrentOutlet {
@@ -1933,7 +2213,7 @@ func (r *executionRunner) recycleCurrentOutletForCandidate(plan models.FailoverP
 		"entry_id": candidate.EntryID,
 		"ref":      cleanup.Ref,
 	})
-	if err := cleanup.Cleanup(); err != nil {
+	if err := normalizeExecutionStopError(cleanup.Cleanup(r.ctx)); err != nil {
 		r.finishStep(reclaimStep, models.FailoverStepStatusFailed, err.Error(), map[string]interface{}{
 			"label": cleanup.Label,
 			"ref":   cleanup.Ref,
@@ -1962,7 +2242,7 @@ func (r *executionRunner) clearCurrentOutletTracking() {
 	})
 }
 
-func resolveDigitalOceanCurrentInstanceCleanupForToken(userUUID, address string, tokenAddition *digitalocean.Addition, token *digitalocean.TokenRecord, entryID, entryName string) (*currentInstanceCleanup, error) {
+func resolveDigitalOceanCurrentInstanceCleanupForToken(ctx context.Context, userUUID, address string, tokenAddition *digitalocean.Addition, token *digitalocean.TokenRecord, entryID, entryName string) (*currentInstanceCleanup, error) {
 	if tokenAddition == nil || token == nil {
 		return nil, nil
 	}
@@ -1970,9 +2250,9 @@ func resolveDigitalOceanCurrentInstanceCleanupForToken(userUUID, address string,
 	if err != nil {
 		return nil, err
 	}
-	droplets, err := client.ListDroplets(context.Background())
+	droplets, err := client.ListDroplets(contextOrBackground(ctx))
 	if err != nil {
-		return nil, err
+		return nil, normalizeExecutionStopError(err)
 	}
 	for _, droplet := range droplets {
 		if !sameAddress(address, digitalOceanPublicIPv4(&droplet), digitalOceanPublicIPv6(&droplet)) {
@@ -1993,13 +2273,13 @@ func resolveDigitalOceanCurrentInstanceCleanupForToken(userUUID, address string,
 				"ipv6": droplet.Networks.V6,
 			},
 			Label: fmt.Sprintf("delete digitalocean droplet %d", droplet.ID),
-			Cleanup: func() error {
-				if err := client.DeleteDroplet(context.Background(), droplet.ID); err != nil {
+			Cleanup: func(ctx context.Context) error {
+				if err := client.DeleteDroplet(contextOrBackground(ctx), droplet.ID); err != nil {
 					if isDigitalOceanNotFoundError(err) {
 						removeSavedDigitalOceanRootPassword(userUUID, tokenAddition, token, droplet.ID)
 						return nil
 					}
-					return err
+					return normalizeExecutionStopError(err)
 				}
 				removeSavedDigitalOceanRootPassword(userUUID, tokenAddition, token, droplet.ID)
 				return nil
@@ -2009,7 +2289,7 @@ func resolveDigitalOceanCurrentInstanceCleanupForToken(userUUID, address string,
 	return nil, nil
 }
 
-func resolveLinodeCurrentInstanceCleanupForToken(userUUID, address string, tokenAddition *linodecloud.Addition, token *linodecloud.TokenRecord, entryID, entryName string) (*currentInstanceCleanup, error) {
+func resolveLinodeCurrentInstanceCleanupForToken(ctx context.Context, userUUID, address string, tokenAddition *linodecloud.Addition, token *linodecloud.TokenRecord, entryID, entryName string) (*currentInstanceCleanup, error) {
 	if tokenAddition == nil || token == nil {
 		return nil, nil
 	}
@@ -2017,9 +2297,9 @@ func resolveLinodeCurrentInstanceCleanupForToken(userUUID, address string, token
 	if err != nil {
 		return nil, err
 	}
-	instances, err := client.ListInstances(context.Background())
+	instances, err := client.ListInstances(contextOrBackground(ctx))
 	if err != nil {
-		return nil, err
+		return nil, normalizeExecutionStopError(err)
 	}
 	for _, instance := range instances {
 		if !sameAddress(address, append(append([]string(nil), instance.IPv4...), strings.TrimSpace(instance.IPv6))...) {
@@ -2040,13 +2320,13 @@ func resolveLinodeCurrentInstanceCleanupForToken(userUUID, address string, token
 				"ipv6": instance.IPv6,
 			},
 			Label: fmt.Sprintf("delete linode instance %d", instance.ID),
-			Cleanup: func() error {
-				if err := client.DeleteInstance(context.Background(), instance.ID); err != nil {
+			Cleanup: func(ctx context.Context) error {
+				if err := client.DeleteInstance(contextOrBackground(ctx), instance.ID); err != nil {
 					if isLinodeNotFoundError(err) {
 						removeSavedLinodeRootPassword(userUUID, tokenAddition, token, instance.ID)
 						return nil
 					}
-					return err
+					return normalizeExecutionStopError(err)
 				}
 				removeSavedLinodeRootPassword(userUUID, tokenAddition, token, instance.ID)
 				return nil
@@ -2056,7 +2336,7 @@ func resolveLinodeCurrentInstanceCleanupForToken(userUUID, address string, token
 	return nil, nil
 }
 
-func (r *executionRunner) resolveCurrentInstanceCleanupByAddress(plan models.FailoverPlan, candidate providerPoolCandidate) (*currentInstanceCleanup, error) {
+func (r *executionRunner) resolveCurrentInstanceCleanupByAddress(ctx context.Context, plan models.FailoverPlan, candidate providerPoolCandidate) (*currentInstanceCleanup, error) {
 	address := strings.TrimSpace(r.task.CurrentAddress)
 	if address == "" {
 		return nil, nil
@@ -2068,7 +2348,7 @@ func (r *executionRunner) resolveCurrentInstanceCleanupByAddress(plan models.Fai
 		if err != nil {
 			return nil, err
 		}
-		cleanup, err := resolveDigitalOceanCurrentInstanceCleanupForToken(r.task.UserID, address, addition, token, candidate.EntryID, candidate.EntryName)
+		cleanup, err := resolveDigitalOceanCurrentInstanceCleanupForToken(ctx, r.task.UserID, address, addition, token, candidate.EntryID, candidate.EntryName)
 		if err != nil {
 			return nil, err
 		}
@@ -2081,7 +2361,7 @@ func (r *executionRunner) resolveCurrentInstanceCleanupByAddress(plan models.Fai
 		if err != nil {
 			return nil, err
 		}
-		cleanup, err := resolveLinodeCurrentInstanceCleanupForToken(r.task.UserID, address, addition, token, candidate.EntryID, candidate.EntryName)
+		cleanup, err := resolveLinodeCurrentInstanceCleanupForToken(ctx, r.task.UserID, address, addition, token, candidate.EntryID, candidate.EntryName)
 		if err != nil {
 			return nil, err
 		}
@@ -2097,9 +2377,9 @@ func (r *executionRunner) resolveCurrentInstanceCleanupByAddress(plan models.Fai
 		region := resolveAWSPlanRegion(plan, addition, credential)
 		service := resolveAWSPlanService(plan)
 		if service == "lightsail" {
-			instances, err := awscloud.ListLightsailInstances(context.Background(), credential, region)
+			instances, err := awscloud.ListLightsailInstances(contextOrBackground(ctx), credential, region)
 			if err != nil {
-				return nil, err
+				return nil, normalizeExecutionStopError(err)
 			}
 			for _, instance := range instances {
 				if !sameAddress(address, append([]string{strings.TrimSpace(instance.PublicIP), strings.TrimSpace(instance.PrivateIP)}, instance.IPv6Addresses...)...) {
@@ -2121,16 +2401,16 @@ func (r *executionRunner) resolveCurrentInstanceCleanupByAddress(plan models.Fai
 						"ipv6_addresses": instance.IPv6Addresses,
 					},
 					Label: "delete aws lightsail instance " + instance.Name,
-					Cleanup: func() error {
-						return awscloud.DeleteLightsailInstance(context.Background(), credential, region, instance.Name)
+					Cleanup: func(ctx context.Context) error {
+						return normalizeExecutionStopError(awscloud.DeleteLightsailInstance(contextOrBackground(ctx), credential, region, instance.Name))
 					},
 				}, nil
 			}
 			return nil, nil
 		}
-		instances, err := awscloud.ListInstances(context.Background(), credential, region)
+		instances, err := awscloud.ListInstances(contextOrBackground(ctx), credential, region)
 		if err != nil {
-			return nil, err
+			return nil, normalizeExecutionStopError(err)
 		}
 		for _, instance := range instances {
 			if !sameAddress(address, append([]string{instance.PublicIP, instance.PrivateIP}, instance.IPv6Addresses...)...) {
@@ -2153,8 +2433,8 @@ func (r *executionRunner) resolveCurrentInstanceCleanupByAddress(plan models.Fai
 					"ipv6_addresses": instance.IPv6Addresses,
 				},
 				Label: "terminate aws ec2 instance " + instance.InstanceID,
-				Cleanup: func() error {
-					return awscloud.TerminateInstance(context.Background(), credential, region, instance.InstanceID)
+				Cleanup: func(ctx context.Context) error {
+					return normalizeExecutionStopError(awscloud.TerminateInstance(contextOrBackground(ctx), credential, region, instance.InstanceID))
 				},
 			}, nil
 		}
@@ -2164,7 +2444,7 @@ func (r *executionRunner) resolveCurrentInstanceCleanupByAddress(plan models.Fai
 	}
 }
 
-func resolveCurrentInstanceCleanupFromRef(userUUID string, ref map[string]interface{}) (*currentInstanceCleanup, error) {
+func resolveCurrentInstanceCleanupFromRef(ctx context.Context, userUUID string, ref map[string]interface{}) (*currentInstanceCleanup, error) {
 	if len(ref) == 0 {
 		return nil, nil
 	}
@@ -2184,8 +2464,8 @@ func resolveCurrentInstanceCleanupFromRef(userUUID string, ref map[string]interf
 		resolvedRef := resolvedCurrentInstanceRef(ref, "digitalocean", entryID)
 		addition, token, err := loadDigitalOceanToken(userUUID, entryID)
 		if err != nil {
-			if isProviderEntryNotFoundError(err) {
-				return missingCurrentInstanceCleanup(ref, "digitalocean", entryID, fmt.Sprintf("delete digitalocean droplet %d", dropletID)), nil
+			if isCurrentInstanceCredentialMissingError("digitalocean", err) {
+				return providerEntryMissingCurrentInstanceCleanup(ref, "digitalocean", entryID, fmt.Sprintf("delete digitalocean droplet %d", dropletID)), nil
 			}
 			return nil, err
 		}
@@ -2193,9 +2473,13 @@ func resolveCurrentInstanceCleanupFromRef(userUUID string, ref map[string]interf
 		if err != nil {
 			return nil, err
 		}
-		droplets, err := client.ListDroplets(context.Background())
+		droplets, err := client.ListDroplets(contextOrBackground(ctx))
 		if err != nil {
-			return nil, err
+			err = normalizeExecutionStopError(err)
+			if errors.Is(err, errExecutionStopped) {
+				return nil, err
+			}
+			return providerEntryQueryCurrentInstanceCleanup(ref, "digitalocean", entryID, fmt.Sprintf("delete digitalocean droplet %d", dropletID), err), nil
 		}
 		exists := false
 		for _, droplet := range droplets {
@@ -2205,22 +2489,18 @@ func resolveCurrentInstanceCleanupFromRef(userUUID string, ref map[string]interf
 			}
 		}
 		if !exists {
-			return &currentInstanceCleanup{
-				Ref:     resolvedRef,
-				Label:   fmt.Sprintf("delete digitalocean droplet %d", dropletID),
-				Missing: true,
-			}, nil
+			return instanceMissingCurrentInstanceCleanup(ref, "digitalocean", entryID, fmt.Sprintf("delete digitalocean droplet %d", dropletID)), nil
 		}
 		return &currentInstanceCleanup{
 			Ref:   resolvedRef,
 			Label: fmt.Sprintf("delete digitalocean droplet %d", dropletID),
-			Cleanup: func() error {
-				if err := client.DeleteDroplet(context.Background(), dropletID); err != nil {
+			Cleanup: func(ctx context.Context) error {
+				if err := client.DeleteDroplet(contextOrBackground(ctx), dropletID); err != nil {
 					if isDigitalOceanNotFoundError(err) {
 						removeSavedDigitalOceanRootPassword(userUUID, addition, token, dropletID)
 						return nil
 					}
-					return err
+					return normalizeExecutionStopError(err)
 				}
 				removeSavedDigitalOceanRootPassword(userUUID, addition, token, dropletID)
 				return nil
@@ -2234,8 +2514,8 @@ func resolveCurrentInstanceCleanupFromRef(userUUID string, ref map[string]interf
 		resolvedRef := resolvedCurrentInstanceRef(ref, "linode", entryID)
 		addition, token, err := loadLinodeToken(userUUID, entryID)
 		if err != nil {
-			if isProviderEntryNotFoundError(err) {
-				return missingCurrentInstanceCleanup(ref, "linode", entryID, fmt.Sprintf("delete linode instance %d", instanceID)), nil
+			if isCurrentInstanceCredentialMissingError("linode", err) {
+				return providerEntryMissingCurrentInstanceCleanup(ref, "linode", entryID, fmt.Sprintf("delete linode instance %d", instanceID)), nil
 			}
 			return nil, err
 		}
@@ -2243,26 +2523,26 @@ func resolveCurrentInstanceCleanupFromRef(userUUID string, ref map[string]interf
 		if err != nil {
 			return nil, err
 		}
-		if _, err := client.GetInstance(context.Background(), instanceID); err != nil {
+		if _, err := client.GetInstance(contextOrBackground(ctx), instanceID); err != nil {
 			if isLinodeNotFoundError(err) {
-				return &currentInstanceCleanup{
-					Ref:     resolvedRef,
-					Label:   fmt.Sprintf("delete linode instance %d", instanceID),
-					Missing: true,
-				}, nil
+				return instanceMissingCurrentInstanceCleanup(ref, "linode", entryID, fmt.Sprintf("delete linode instance %d", instanceID)), nil
 			}
-			return nil, err
+			err = normalizeExecutionStopError(err)
+			if errors.Is(err, errExecutionStopped) {
+				return nil, err
+			}
+			return providerEntryQueryCurrentInstanceCleanup(ref, "linode", entryID, fmt.Sprintf("delete linode instance %d", instanceID), err), nil
 		}
 		return &currentInstanceCleanup{
 			Ref:   resolvedRef,
 			Label: fmt.Sprintf("delete linode instance %d", instanceID),
-			Cleanup: func() error {
-				if err := client.DeleteInstance(context.Background(), instanceID); err != nil {
+			Cleanup: func(ctx context.Context) error {
+				if err := client.DeleteInstance(contextOrBackground(ctx), instanceID); err != nil {
 					if isLinodeNotFoundError(err) {
 						removeSavedLinodeRootPassword(userUUID, addition, token, instanceID)
 						return nil
 					}
-					return err
+					return normalizeExecutionStopError(err)
 				}
 				removeSavedLinodeRootPassword(userUUID, addition, token, instanceID)
 				return nil
@@ -2277,20 +2557,20 @@ func resolveCurrentInstanceCleanupFromRef(userUUID string, ref map[string]interf
 		resolvedRef := resolvedCurrentInstanceRef(ref, "aws", entryID)
 		_, credential, err := loadAWSCredential(userUUID, entryID)
 		if err != nil {
-			if isProviderEntryNotFoundError(err) {
+			if isCurrentInstanceCredentialMissingError("aws", err) {
 				switch service {
 				case "lightsail":
 					instanceName := strings.TrimSpace(stringMapValue(ref, "instance_name"))
 					if instanceName == "" {
 						return nil, nil
 					}
-					return missingCurrentInstanceCleanup(ref, "aws", entryID, "delete aws lightsail instance "+instanceName), nil
+					return providerEntryMissingCurrentInstanceCleanup(ref, "aws", entryID, "delete aws lightsail instance "+instanceName), nil
 				default:
 					instanceID := strings.TrimSpace(stringMapValue(ref, "instance_id"))
 					if instanceID == "" {
 						return nil, nil
 					}
-					return missingCurrentInstanceCleanup(ref, "aws", entryID, "terminate aws ec2 instance "+instanceID), nil
+					return providerEntryMissingCurrentInstanceCleanup(ref, "aws", entryID, "terminate aws ec2 instance "+instanceID), nil
 				}
 			}
 			return nil, err
@@ -2301,11 +2581,29 @@ func resolveCurrentInstanceCleanupFromRef(userUUID string, ref map[string]interf
 			if instanceName == "" {
 				return nil, nil
 			}
+			instances, err := awscloud.ListLightsailInstances(contextOrBackground(ctx), credential, region)
+			if err != nil {
+				err = normalizeExecutionStopError(err)
+				if errors.Is(err, errExecutionStopped) {
+					return nil, err
+				}
+				return providerEntryQueryCurrentInstanceCleanup(ref, "aws", entryID, "delete aws lightsail instance "+instanceName, err), nil
+			}
+			exists := false
+			for _, instance := range instances {
+				if strings.TrimSpace(instance.Name) == instanceName {
+					exists = true
+					break
+				}
+			}
+			if !exists {
+				return instanceMissingCurrentInstanceCleanup(ref, "aws", entryID, "delete aws lightsail instance "+instanceName), nil
+			}
 			return &currentInstanceCleanup{
 				Ref:   resolvedRef,
 				Label: "delete aws lightsail instance " + instanceName,
-				Cleanup: func() error {
-					return awscloud.DeleteLightsailInstance(context.Background(), credential, region, instanceName)
+				Cleanup: func(ctx context.Context) error {
+					return normalizeExecutionStopError(awscloud.DeleteLightsailInstance(contextOrBackground(ctx), credential, region, instanceName))
 				},
 			}, nil
 		default:
@@ -2314,11 +2612,29 @@ func resolveCurrentInstanceCleanupFromRef(userUUID string, ref map[string]interf
 				return nil, nil
 			}
 			resolvedRef["service"] = "ec2"
+			instances, err := awscloud.ListInstances(contextOrBackground(ctx), credential, region)
+			if err != nil {
+				err = normalizeExecutionStopError(err)
+				if errors.Is(err, errExecutionStopped) {
+					return nil, err
+				}
+				return providerEntryQueryCurrentInstanceCleanup(ref, "aws", entryID, "terminate aws ec2 instance "+instanceID, err), nil
+			}
+			exists := false
+			for _, instance := range instances {
+				if strings.TrimSpace(instance.InstanceID) == instanceID {
+					exists = true
+					break
+				}
+			}
+			if !exists {
+				return instanceMissingCurrentInstanceCleanup(ref, "aws", entryID, "terminate aws ec2 instance "+instanceID), nil
+			}
 			return &currentInstanceCleanup{
 				Ref:   resolvedRef,
 				Label: "terminate aws ec2 instance " + instanceID,
-				Cleanup: func() error {
-					return awscloud.TerminateInstance(context.Background(), credential, region, instanceID)
+				Cleanup: func(ctx context.Context) error {
+					return normalizeExecutionStopError(awscloud.TerminateInstance(contextOrBackground(ctx), credential, region, instanceID))
 				},
 			}, nil
 		}
@@ -2378,7 +2694,7 @@ func firstMeaningfulOutputLine(output string) string {
 	return ""
 }
 
-func dispatchScriptToClient(userUUID, clientUUID, command string, timeout time.Duration) (*commandResult, error) {
+func dispatchScriptToClient(ctx context.Context, userUUID, clientUUID, command string, timeout time.Duration) (*commandResult, error) {
 	command = strings.TrimSpace(command)
 	if command == "" {
 		return nil, errors.New("script content is empty")
@@ -2402,11 +2718,21 @@ func dispatchScriptToClient(userUUID, clientUUID, command string, timeout time.D
 	if err != nil {
 		return nil, err
 	}
-	if err := client.WriteMessage(websocket.TextMessage, payload); err != nil {
+	writeTimeout := 10 * time.Second
+	if timeout > 0 && timeout < writeTimeout {
+		writeTimeout = timeout
+	}
+	if err := client.WriteMessageWithDeadline(websocket.TextMessage, payload, time.Now().Add(writeTimeout)); err != nil {
 		return &commandResult{TaskID: taskID}, err
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	ctx = contextOrBackground(ctx)
+	var cancel context.CancelFunc
+	if timeout > 0 {
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+	} else {
+		ctx, cancel = context.WithCancel(ctx)
+	}
 	defer cancel()
 
 	ticker := time.NewTicker(2 * time.Second)
@@ -2414,7 +2740,7 @@ func dispatchScriptToClient(userUUID, clientUUID, command string, timeout time.D
 	for {
 		select {
 		case <-ctx.Done():
-			return &commandResult{TaskID: taskID}, ctx.Err()
+			return &commandResult{TaskID: taskID}, normalizeExecutionStopError(ctx.Err())
 		case <-ticker.C:
 			result, err := tasks.GetSpecificTaskResultForUser(userUUID, taskID, clientUUID)
 			if err != nil {
@@ -2727,6 +3053,23 @@ func waitContextOrDelay(ctx context.Context, delay time.Duration) error {
 	}
 }
 
+func contextOrBackground(ctx context.Context) context.Context {
+	if ctx != nil {
+		return ctx
+	}
+	return context.Background()
+}
+
+func normalizeExecutionStopError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, errExecutionStopped) || errors.Is(err, context.Canceled) {
+		return errExecutionStopped
+	}
+	return err
+}
+
 func ptrLocalTime(t time.Time) *models.LocalTime {
 	value := models.FromTime(t)
 	return &value
@@ -2847,8 +3190,8 @@ func provisionAWSInstance(ctx context.Context, userUUID string, plan models.Fail
 				"addresses":      detail.Addresses,
 			},
 			RollbackLabel: "terminate failed aws ec2 instance " + strings.TrimSpace(instance.InstanceID),
-			Rollback: func() error {
-				return awscloud.TerminateInstance(context.Background(), credential, region, strings.TrimSpace(instance.InstanceID))
+			Rollback: func(ctx context.Context) error {
+				return normalizeExecutionStopError(awscloud.TerminateInstance(contextOrBackground(ctx), credential, region, strings.TrimSpace(instance.InstanceID)))
 			},
 		}
 		if cleanupInstanceID := strings.TrimSpace(payload.CleanupInstanceID); cleanupInstanceID != "" {
@@ -2861,8 +3204,8 @@ func provisionAWSInstance(ctx context.Context, userUUID string, plan models.Fail
 				"instance_id":         cleanupInstanceID,
 			}
 			outcome.CleanupLabel = "terminate aws ec2 instance " + cleanupInstanceID
-			outcome.Cleanup = func() error {
-				return awscloud.TerminateInstance(context.Background(), credential, region, cleanupInstanceID)
+			outcome.Cleanup = func(ctx context.Context) error {
+				return normalizeExecutionStopError(awscloud.TerminateInstance(contextOrBackground(ctx), credential, region, cleanupInstanceID))
 			}
 		}
 		return outcome, nil
@@ -2921,8 +3264,8 @@ func provisionAWSInstance(ctx context.Context, userUUID string, plan models.Fail
 				"ipv6_addresses": detail.Instance.IPv6Addresses,
 			},
 			RollbackLabel: "delete failed aws lightsail instance " + name,
-			Rollback: func() error {
-				return awscloud.DeleteLightsailInstance(context.Background(), credential, region, name)
+			Rollback: func(ctx context.Context) error {
+				return normalizeExecutionStopError(awscloud.DeleteLightsailInstance(contextOrBackground(ctx), credential, region, name))
 			},
 		}
 		if cleanupName := strings.TrimSpace(payload.CleanupInstanceName); cleanupName != "" {
@@ -2935,8 +3278,8 @@ func provisionAWSInstance(ctx context.Context, userUUID string, plan models.Fail
 				"instance_name":       cleanupName,
 			}
 			outcome.CleanupLabel = "delete aws lightsail instance " + cleanupName
-			outcome.Cleanup = func() error {
-				return awscloud.DeleteLightsailInstance(context.Background(), credential, region, cleanupName)
+			outcome.Cleanup = func(ctx context.Context) error {
+				return normalizeExecutionStopError(awscloud.DeleteLightsailInstance(contextOrBackground(ctx), credential, region, cleanupName))
 			}
 		}
 		return outcome, nil
@@ -3021,11 +3364,11 @@ func provisionDigitalOceanDroplet(ctx context.Context, userUUID string, plan mod
 		VPCUUID:    strings.TrimSpace(payload.VPCUUID),
 	})
 	if err != nil {
-		return nil, err
+		return nil, normalizeExecutionStopError(err)
 	}
 	droplet, err = waitForDigitalOceanDroplet(ctx, client, droplet.ID)
 	if err != nil {
-		return nil, err
+		return nil, normalizeExecutionStopError(err)
 	}
 	passwordSaveErr := persistDigitalOceanRootPassword(userUUID, addition, token, droplet.ID, droplet.Name, passwordMode, rootPassword)
 	newInstanceRef := map[string]interface{}{
@@ -3053,9 +3396,9 @@ func provisionDigitalOceanDroplet(ctx context.Context, userUUID string, plan mod
 			"ipv6": droplet.Networks.V6,
 		},
 		RollbackLabel: fmt.Sprintf("delete failed digitalocean droplet %d", droplet.ID),
-		Rollback: func() error {
-			if err := client.DeleteDroplet(context.Background(), droplet.ID); err != nil {
-				return err
+		Rollback: func(ctx context.Context) error {
+			if err := client.DeleteDroplet(contextOrBackground(ctx), droplet.ID); err != nil {
+				return normalizeExecutionStopError(err)
 			}
 			removeSavedDigitalOceanRootPassword(userUUID, addition, token, droplet.ID)
 			return nil
@@ -3069,9 +3412,9 @@ func provisionDigitalOceanDroplet(ctx context.Context, userUUID string, plan mod
 			"droplet_id":          payload.CleanupDropletID,
 		}
 		outcome.CleanupLabel = fmt.Sprintf("delete digitalocean droplet %d", payload.CleanupDropletID)
-		outcome.Cleanup = func() error {
-			if err := client.DeleteDroplet(context.Background(), payload.CleanupDropletID); err != nil {
-				return err
+		outcome.Cleanup = func(ctx context.Context) error {
+			if err := client.DeleteDroplet(contextOrBackground(ctx), payload.CleanupDropletID); err != nil {
+				return normalizeExecutionStopError(err)
 			}
 			removeSavedDigitalOceanRootPassword(userUUID, addition, token, payload.CleanupDropletID)
 			return nil
@@ -3154,11 +3497,11 @@ func provisionLinodeInstance(ctx context.Context, userUUID string, plan models.F
 
 	instance, err := client.CreateInstance(ctx, request)
 	if err != nil {
-		return nil, err
+		return nil, normalizeExecutionStopError(err)
 	}
 	instance, err = waitForLinodeInstance(ctx, client, instance.ID)
 	if err != nil {
-		return nil, err
+		return nil, normalizeExecutionStopError(err)
 	}
 	passwordSaveErr := persistLinodeRootPassword(
 		userUUID,
@@ -3194,9 +3537,9 @@ func provisionLinodeInstance(ctx context.Context, userUUID string, plan models.F
 			"ipv6": instance.IPv6,
 		},
 		RollbackLabel: fmt.Sprintf("delete failed linode instance %d", instance.ID),
-		Rollback: func() error {
-			if err := client.DeleteInstance(context.Background(), instance.ID); err != nil {
-				return err
+		Rollback: func(ctx context.Context) error {
+			if err := client.DeleteInstance(contextOrBackground(ctx), instance.ID); err != nil {
+				return normalizeExecutionStopError(err)
 			}
 			removeSavedLinodeRootPassword(userUUID, addition, token, instance.ID)
 			return nil
@@ -3210,9 +3553,9 @@ func provisionLinodeInstance(ctx context.Context, userUUID string, plan models.F
 			"instance_id":         payload.CleanupInstanceID,
 		}
 		outcome.CleanupLabel = fmt.Sprintf("delete linode instance %d", payload.CleanupInstanceID)
-		outcome.Cleanup = func() error {
-			if err := client.DeleteInstance(context.Background(), payload.CleanupInstanceID); err != nil {
-				return err
+		outcome.Cleanup = func(ctx context.Context) error {
+			if err := client.DeleteInstance(contextOrBackground(ctx), payload.CleanupInstanceID); err != nil {
+				return normalizeExecutionStopError(err)
 			}
 			removeSavedLinodeRootPassword(userUUID, addition, token, payload.CleanupInstanceID)
 			return nil
@@ -3221,7 +3564,7 @@ func provisionLinodeInstance(ctx context.Context, userUUID string, plan models.F
 	return outcome, nil
 }
 
-func rebindAWSIPAddress(task models.FailoverTask, plan models.FailoverPlan) (*actionOutcome, error) {
+func rebindAWSIPAddress(ctx context.Context, task models.FailoverTask, plan models.FailoverPlan) (*actionOutcome, error) {
 	var payload awsRebindPayload
 	if err := json.Unmarshal([]byte(plan.Payload), &payload); err != nil {
 		return nil, fmt.Errorf("invalid aws rebind payload: %w", err)
@@ -3253,13 +3596,13 @@ func rebindAWSIPAddress(task models.FailoverTask, plan models.FailoverPlan) (*ac
 		if instanceID == "" {
 			return nil, errors.New("aws ec2 rebind requires instance_id")
 		}
-		detail, err := awscloud.GetInstanceDetail(context.Background(), credential, region, instanceID)
+		detail, err := awscloud.GetInstanceDetail(contextOrBackground(ctx), credential, region, instanceID)
 		if err != nil {
-			return nil, err
+			return nil, normalizeExecutionStopError(err)
 		}
-		address, err := awscloud.AllocateAndAssociateAddress(context.Background(), credential, region, instanceID, strings.TrimSpace(payload.PrivateIP))
+		address, err := awscloud.AllocateAndAssociateAddress(contextOrBackground(ctx), credential, region, instanceID, strings.TrimSpace(payload.PrivateIP))
 		if err != nil {
-			return nil, err
+			return nil, normalizeExecutionStopError(err)
 		}
 		return &actionOutcome{
 			IPv4:             strings.TrimSpace(address.PublicIP),
@@ -3292,19 +3635,19 @@ func rebindAWSIPAddress(task models.FailoverTask, plan models.FailoverPlan) (*ac
 		if staticIPName == "" {
 			staticIPName = fmt.Sprintf("%s-ip-%d", instanceName, time.Now().Unix())
 		}
-		detail, err := awscloud.GetLightsailInstanceDetail(context.Background(), credential, region, instanceName)
+		detail, err := awscloud.GetLightsailInstanceDetail(contextOrBackground(ctx), credential, region, instanceName)
 		if err != nil {
-			return nil, err
+			return nil, normalizeExecutionStopError(err)
 		}
-		if err := awscloud.AllocateLightsailStaticIP(context.Background(), credential, region, staticIPName); err != nil {
-			return nil, err
+		if err := awscloud.AllocateLightsailStaticIP(contextOrBackground(ctx), credential, region, staticIPName); err != nil {
+			return nil, normalizeExecutionStopError(err)
 		}
-		if err := awscloud.AttachLightsailStaticIP(context.Background(), credential, region, staticIPName, instanceName); err != nil {
-			return nil, err
+		if err := awscloud.AttachLightsailStaticIP(contextOrBackground(ctx), credential, region, staticIPName, instanceName); err != nil {
+			return nil, normalizeExecutionStopError(err)
 		}
-		detail, err = waitForLightsailInstance(context.Background(), region, credential, instanceName)
+		detail, err = waitForLightsailInstance(ctx, region, credential, instanceName)
 		if err != nil {
-			return nil, err
+			return nil, normalizeExecutionStopError(err)
 		}
 		return &actionOutcome{
 			IPv4:             strings.TrimSpace(detail.Instance.PublicIP),
@@ -3337,9 +3680,17 @@ func waitForAWSEC2Instance(ctx context.Context, region string, credential *awscl
 			return nil, nil, err
 		}
 		instance, err := awscloud.GetInstance(ctx, credential, region, instanceID)
+		if err != nil {
+			if normalizedErr := normalizeExecutionStopError(err); errors.Is(normalizedErr, errExecutionStopped) {
+				return nil, nil, normalizedErr
+			}
+		}
 		if err == nil && instance != nil && strings.TrimSpace(instance.PublicIP) != "" {
 			detail, detailErr := awscloud.GetInstanceDetail(ctx, credential, region, instanceID)
 			if detailErr != nil {
+				if normalizedErr := normalizeExecutionStopError(detailErr); errors.Is(normalizedErr, errExecutionStopped) {
+					return nil, nil, normalizedErr
+				}
 				return instance, nil, nil
 			}
 			return instance, detail, nil
@@ -3350,7 +3701,7 @@ func waitForAWSEC2Instance(ctx context.Context, region string, credential *awscl
 	}
 	instance, err := awscloud.GetInstance(ctx, credential, region, instanceID)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, normalizeExecutionStopError(err)
 	}
 	detail, _ := awscloud.GetInstanceDetail(ctx, credential, region, instanceID)
 	return instance, detail, nil
@@ -3363,6 +3714,11 @@ func waitForLightsailInstance(ctx context.Context, region string, credential *aw
 			return nil, err
 		}
 		detail, err := awscloud.GetLightsailInstanceDetail(ctx, credential, region, instanceName)
+		if err != nil {
+			if normalizedErr := normalizeExecutionStopError(err); errors.Is(normalizedErr, errExecutionStopped) {
+				return nil, normalizedErr
+			}
+		}
 		if err == nil && detail != nil && strings.TrimSpace(detail.Instance.PublicIP) != "" {
 			return detail, nil
 		}
@@ -3370,7 +3726,8 @@ func waitForLightsailInstance(ctx context.Context, region string, credential *aw
 			return nil, err
 		}
 	}
-	return awscloud.GetLightsailInstanceDetail(ctx, credential, region, instanceName)
+	detail, err := awscloud.GetLightsailInstanceDetail(ctx, credential, region, instanceName)
+	return detail, normalizeExecutionStopError(err)
 }
 
 func waitForDigitalOceanDroplet(ctx context.Context, client *digitalocean.Client, dropletID int) (*digitalocean.Droplet, error) {
@@ -3381,7 +3738,7 @@ func waitForDigitalOceanDroplet(ctx context.Context, client *digitalocean.Client
 		}
 		droplets, err := client.ListDroplets(ctx)
 		if err != nil {
-			return nil, err
+			return nil, normalizeExecutionStopError(err)
 		}
 		for _, droplet := range droplets {
 			if droplet.ID == dropletID && digitalOceanPublicIPv4(&droplet) != "" {
@@ -3394,7 +3751,7 @@ func waitForDigitalOceanDroplet(ctx context.Context, client *digitalocean.Client
 	}
 	droplets, err := client.ListDroplets(ctx)
 	if err != nil {
-		return nil, err
+		return nil, normalizeExecutionStopError(err)
 	}
 	for _, droplet := range droplets {
 		if droplet.ID == dropletID {
@@ -3411,6 +3768,11 @@ func waitForLinodeInstance(ctx context.Context, client *linodecloud.Client, inst
 			return nil, err
 		}
 		instance, err := client.GetInstance(ctx, instanceID)
+		if err != nil {
+			if normalizedErr := normalizeExecutionStopError(err); errors.Is(normalizedErr, errExecutionStopped) {
+				return nil, normalizedErr
+			}
+		}
 		if err == nil && instance != nil && firstString(instance.IPv4) != "" {
 			return instance, nil
 		}
@@ -3418,7 +3780,8 @@ func waitForLinodeInstance(ctx context.Context, client *linodecloud.Client, inst
 			return nil, err
 		}
 	}
-	return client.GetInstance(ctx, instanceID)
+	instance, err := client.GetInstance(ctx, instanceID)
+	return instance, normalizeExecutionStopError(err)
 }
 
 func digitalOceanPublicIPv4(droplet *digitalocean.Droplet) string {

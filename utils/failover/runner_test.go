@@ -13,6 +13,7 @@ import (
 	"github.com/komari-monitor/komari/database"
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
+	"github.com/komari-monitor/komari/utils/cloudprovider/digitalocean"
 )
 
 func configureRunnerSQLiteDB(t *testing.T) {
@@ -419,7 +420,7 @@ func TestInvalidateProvisionedEntrySnapshotClearsTrackedCapacity(t *testing.T) {
 	}
 }
 
-func TestResolveCurrentInstanceCleanupFromRefTreatsMissingDigitalOceanTokenAsStale(t *testing.T) {
+func TestResolveCurrentInstanceCleanupFromRefTreatsMissingDigitalOceanTokenAsManualReview(t *testing.T) {
 	configureRunnerSQLiteDB(t)
 
 	if err := database.SaveCloudProviderConfigForUser(&models.CloudProvider{
@@ -435,31 +436,71 @@ func TestResolveCurrentInstanceCleanupFromRefTreatsMissingDigitalOceanTokenAsSta
 		t.Fatalf("failed to seed digitalocean provider config: %v", err)
 	}
 
-	cleanup, err := resolveCurrentInstanceCleanupFromRef("user-stale", map[string]interface{}{
+	cleanup, err := resolveCurrentInstanceCleanupFromRef(context.Background(), "user-stale", map[string]interface{}{
 		"provider":            "digitalocean",
 		"provider_entry_id":   "token-deleted",
 		"provider_entry_name": "Token 1",
 		"droplet_id":          12345,
 	})
 	if err != nil {
-		t.Fatalf("expected stale provider entry to be tolerated, got %v", err)
+		t.Fatalf("expected missing provider entry to be tolerated, got %v", err)
 	}
 	if cleanup == nil {
-		t.Fatal("expected stale cleanup metadata to be returned")
+		t.Fatal("expected cleanup metadata to be returned")
 	}
-	if !cleanup.Missing {
-		t.Fatal("expected stale cleanup to be marked missing")
+	if cleanup.Missing {
+		t.Fatal("expected missing credential to require manual review instead of missing-instance classification")
 	}
 	if cleanup.Cleanup != nil {
 		t.Fatal("expected no cleanup callback when provider entry is missing")
 	}
+	if cleanup.Assessment == nil {
+		t.Fatal("expected cleanup assessment for missing provider entry")
+	}
+	if cleanup.Assessment.Status != models.FailoverCleanupStatusWarning {
+		t.Fatalf("expected warning cleanup status, got %q", cleanup.Assessment.Status)
+	}
+	if got := stringMapValue(cleanup.Assessment.Result, "classification"); got != cleanupClassificationProviderEntryMissing {
+		t.Fatalf("expected classification %q, got %q", cleanupClassificationProviderEntryMissing, got)
+	}
 	if got := providerEntryIDFromRef(cleanup.Ref); got != "token-deleted" {
-		t.Fatalf("expected stale ref entry id token-deleted, got %q", got)
+		t.Fatalf("expected ref entry id token-deleted, got %q", got)
 	}
 	if got := providerEntryNameFromRef(cleanup.Ref); got != "Token 1" {
-		t.Fatalf("expected stale ref entry name Token 1, got %q", got)
+		t.Fatalf("expected ref entry name Token 1, got %q", got)
 	}
 	if cleanup.Label != "delete digitalocean droplet 12345" {
-		t.Fatalf("unexpected stale cleanup label %q", cleanup.Label)
+		t.Fatalf("unexpected cleanup label %q", cleanup.Label)
+	}
+}
+
+func TestBuildProviderEntryQueryCleanupAssessmentMarksAuthInvalidAsWarning(t *testing.T) {
+	assessment := buildProviderEntryQueryCleanupAssessment(
+		"digitalocean",
+		map[string]interface{}{
+			"provider":          "digitalocean",
+			"provider_entry_id": "token-old",
+			"droplet_id":        42,
+		},
+		"delete digitalocean droplet 42",
+		&digitalocean.APIError{StatusCode: 401, Message: "unauthorized"},
+	)
+	if assessment == nil {
+		t.Fatal("expected cleanup assessment")
+	}
+	if assessment.Status != models.FailoverCleanupStatusWarning {
+		t.Fatalf("expected warning cleanup status, got %q", assessment.Status)
+	}
+	if assessment.StepStatus != models.FailoverStepStatusSkipped {
+		t.Fatalf("expected skipped step status, got %q", assessment.StepStatus)
+	}
+	if assessment.StepMessage != cleanupStepMessageProviderEntryUnhealthy {
+		t.Fatalf("unexpected step message %q", assessment.StepMessage)
+	}
+	if got := stringMapValue(assessment.Result, "classification"); got != cleanupClassificationProviderEntryUnhealthy {
+		t.Fatalf("expected classification %q, got %q", cleanupClassificationProviderEntryUnhealthy, got)
+	}
+	if got := stringMapValue(assessment.Result, "provider_failure_class"); got != "auth_invalid" {
+		t.Fatalf("expected provider failure class auth_invalid, got %q", got)
 	}
 }

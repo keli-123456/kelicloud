@@ -51,12 +51,8 @@ type providerEntryLease struct {
 
 type providerEntryRuntimeState struct {
 	mu               sync.Mutex
-	cond             *sync.Cond
-	nextTicket       uint64
-	servingTicket    uint64
-	nextOpTicket     uint64
-	servingOpTicket  uint64
-	opInFlight       bool
+	turnReady        chan struct{}
+	opReady          chan struct{}
 	nextAllowedAt    time.Time
 	reserved         int
 	provisionedDelta int
@@ -93,24 +89,51 @@ func (scheduler *providerEntryScheduler) stateFor(key string) *providerEntryRunt
 		return state
 	}
 
-	state := &providerEntryRuntimeState{}
-	state.cond = sync.NewCond(&state.mu)
+	state := &providerEntryRuntimeState{
+		turnReady: make(chan struct{}, 1),
+		opReady:   make(chan struct{}, 1),
+	}
+	state.turnReady <- struct{}{}
+	state.opReady <- struct{}{}
 	scheduler.states[key] = state
 	return state
 }
 
-func (state *providerEntryRuntimeState) beginTurn() func() {
+func waitForProviderEntrySignal(ctx context.Context, signal chan struct{}) error {
+	if signal == nil {
+		return nil
+	}
+	if ctx == nil {
+		<-signal
+		return nil
+	}
+	select {
+	case <-ctx.Done():
+		return errExecutionStopped
+	case <-signal:
+		return nil
+	}
+}
+
+func releaseProviderEntrySignal(signal chan struct{}) {
+	if signal == nil {
+		return
+	}
+	select {
+	case signal <- struct{}{}:
+	default:
+	}
+}
+
+func (state *providerEntryRuntimeState) beginTurn(ctx context.Context) (func(), error) {
+	if err := waitForProviderEntrySignal(ctx, state.turnReady); err != nil {
+		return nil, err
+	}
 	state.mu.Lock()
-	ticket := state.nextTicket
-	state.nextTicket++
-	for ticket != state.servingTicket {
-		state.cond.Wait()
-	}
 	return func() {
-		state.servingTicket++
-		state.cond.Broadcast()
 		state.mu.Unlock()
-	}
+		releaseProviderEntrySignal(state.turnReady)
+	}, nil
 }
 
 func (lease *providerEntryLease) Release(provisioned bool) {
@@ -129,24 +152,20 @@ func (lease *providerEntryLease) Release(provisioned bool) {
 	}
 }
 
-func (lease *providerEntryLease) BeginSerializedOperation(spacing time.Duration) (func(), error) {
+func (lease *providerEntryLease) BeginSerializedOperation(ctx context.Context, spacing time.Duration) (func(), error) {
 	if lease == nil || lease.state == nil {
 		return func() {}, nil
 	}
 
 	state := lease.state
-	state.mu.Lock()
-	ticket := state.nextOpTicket
-	state.nextOpTicket++
-	for ticket != state.servingOpTicket || state.opInFlight {
-		state.cond.Wait()
+	if err := waitForProviderEntrySignal(ctx, state.opReady); err != nil {
+		return nil, err
 	}
-
+	state.mu.Lock()
 	now := time.Now()
 	if !state.cooldownUntil.IsZero() && state.cooldownUntil.After(now) {
-		state.servingOpTicket++
-		state.cond.Broadcast()
 		state.mu.Unlock()
+		releaseProviderEntrySignal(state.opReady)
 		return nil, fmt.Errorf("provider entry is cooling down until %s", state.cooldownUntil.UTC().Format(time.RFC3339))
 	}
 
@@ -157,20 +176,17 @@ func (lease *providerEntryLease) BeginSerializedOperation(spacing time.Duration)
 	if spacing > 0 {
 		state.nextAllowedAt = startAt.Add(spacing)
 	}
-
-	state.opInFlight = true
 	state.mu.Unlock()
 
 	if delay := time.Until(startAt); delay > 0 {
-		time.Sleep(delay)
+		if err := waitContextOrDelay(ctx, delay); err != nil {
+			releaseProviderEntrySignal(state.opReady)
+			return nil, err
+		}
 	}
 
 	return func() {
-		state.mu.Lock()
-		state.opInFlight = false
-		state.servingOpTicket++
-		state.cond.Broadcast()
-		state.mu.Unlock()
+		releaseProviderEntrySignal(state.opReady)
 	}, nil
 }
 
@@ -340,10 +356,13 @@ func candidateRank(candidate providerPoolCandidate) int {
 	}
 }
 
-func acquireProviderEntryLease(userUUID string, plan models.FailoverPlan, candidate providerPoolCandidate) (*providerEntryLease, map[string]interface{}, error) {
+func acquireProviderEntryLease(ctx context.Context, userUUID string, plan models.FailoverPlan, candidate providerPoolCandidate) (*providerEntryLease, map[string]interface{}, error) {
 	key := providerEntryStateKey(userUUID, plan.Provider, candidate.EntryID)
 	state := failoverProviderEntryScheduler.stateFor(key)
-	finishTurn := state.beginTurn()
+	finishTurn, err := state.beginTurn(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
 	defer finishTurn()
 
 	now := time.Now()
@@ -355,7 +374,7 @@ func acquireProviderEntryLease(userUUID string, plan models.FailoverPlan, candid
 		return nil, availability, fmt.Errorf("provider entry is cooling down until %s", state.cooldownUntil.UTC().Format(time.RFC3339))
 	}
 
-	snapshot, err := state.loadSnapshot(userUUID, plan, candidate, now)
+	snapshot, err := state.loadSnapshot(ctx, userUUID, plan, candidate, now)
 	if err != nil {
 		return nil, state.buildAvailability(snapshot, plan), err
 	}
@@ -374,7 +393,7 @@ func acquireProviderEntryLease(userUUID string, plan models.FailoverPlan, candid
 	return &providerEntryLease{state: state}, availability, nil
 }
 
-func (state *providerEntryRuntimeState) loadSnapshot(userUUID string, plan models.FailoverPlan, candidate providerPoolCandidate, now time.Time) (*providerEntryCapacitySnapshot, error) {
+func (state *providerEntryRuntimeState) loadSnapshot(ctx context.Context, userUUID string, plan models.FailoverPlan, candidate providerPoolCandidate, now time.Time) (*providerEntryCapacitySnapshot, error) {
 	if !shouldCheckProviderCapacity(plan) {
 		return &providerEntryCapacitySnapshot{
 			FetchedAt: now,
@@ -390,14 +409,14 @@ func (state *providerEntryRuntimeState) loadSnapshot(userUUID string, plan model
 		return state.snapshot, nil
 	}
 
-	snapshot, err := state.refreshSnapshot(userUUID, plan, candidate, now)
+	snapshot, err := state.refreshSnapshot(ctx, userUUID, plan, candidate, now)
 	if err != nil {
 		return nil, err
 	}
 	return snapshot, nil
 }
 
-func (state *providerEntryRuntimeState) refreshSnapshot(userUUID string, plan models.FailoverPlan, candidate providerPoolCandidate, now time.Time) (*providerEntryCapacitySnapshot, error) {
+func (state *providerEntryRuntimeState) refreshSnapshot(ctx context.Context, userUUID string, plan models.FailoverPlan, candidate providerPoolCandidate, now time.Time) (*providerEntryCapacitySnapshot, error) {
 	if !shouldCheckProviderCapacity(plan) {
 		snapshot := &providerEntryCapacitySnapshot{
 			FetchedAt: now,
@@ -412,7 +431,7 @@ func (state *providerEntryRuntimeState) refreshSnapshot(userUUID string, plan mo
 		return snapshot, nil
 	}
 
-	snapshot, err := providerEntryCapacitySnapshotLoader(userUUID, plan, candidate)
+	snapshot, err := providerEntryCapacitySnapshotLoader(ctx, userUUID, plan, candidate)
 	if err != nil {
 		return nil, err
 	}
@@ -422,10 +441,13 @@ func (state *providerEntryRuntimeState) refreshSnapshot(userUUID string, plan mo
 	return snapshot, nil
 }
 
-func refreshProviderEntryAvailability(userUUID string, plan models.FailoverPlan, candidate providerPoolCandidate) (map[string]interface{}, error) {
+func refreshProviderEntryAvailability(ctx context.Context, userUUID string, plan models.FailoverPlan, candidate providerPoolCandidate) (map[string]interface{}, error) {
 	key := providerEntryStateKey(userUUID, plan.Provider, candidate.EntryID)
 	state := failoverProviderEntryScheduler.stateFor(key)
-	finishTurn := state.beginTurn()
+	finishTurn, err := state.beginTurn(ctx)
+	if err != nil {
+		return nil, err
+	}
 	defer finishTurn()
 
 	now := time.Now()
@@ -437,7 +459,7 @@ func refreshProviderEntryAvailability(userUUID string, plan models.FailoverPlan,
 		return availability, fmt.Errorf("provider entry is cooling down until %s", state.cooldownUntil.UTC().Format(time.RFC3339))
 	}
 
-	snapshot, err := state.refreshSnapshot(userUUID, plan, candidate, now)
+	snapshot, err := state.refreshSnapshot(ctx, userUUID, plan, candidate, now)
 	availability := state.buildAvailability(snapshot, plan)
 	if err != nil {
 		return availability, err
@@ -467,7 +489,7 @@ func waitForProviderEntryCapacityAfterRecycle(ctx context.Context, userUUID stri
 	deadline := time.Now().Add(timeout)
 	var lastAvailability map[string]interface{}
 	for {
-		availability, err := refreshProviderEntryAvailability(userUUID, plan, candidate)
+		availability, err := refreshProviderEntryAvailability(ctx, userUUID, plan, candidate)
 		if len(availability) > 0 {
 			lastAvailability = availability
 		}
@@ -600,14 +622,14 @@ func resolveAWSPlanService(plan models.FailoverPlan) string {
 	}
 }
 
-func loadProviderEntryCapacitySnapshot(userUUID string, plan models.FailoverPlan, candidate providerPoolCandidate) (*providerEntryCapacitySnapshot, error) {
+func loadProviderEntryCapacitySnapshot(ctx context.Context, userUUID string, plan models.FailoverPlan, candidate providerPoolCandidate) (*providerEntryCapacitySnapshot, error) {
 	switch strings.ToLower(strings.TrimSpace(plan.Provider)) {
 	case "aws":
-		return loadAWSCapacitySnapshot(userUUID, plan, candidate.EntryID)
+		return loadAWSCapacitySnapshot(ctx, userUUID, plan, candidate.EntryID)
 	case "digitalocean":
-		return loadDigitalOceanCapacitySnapshot(userUUID, candidate.EntryID)
+		return loadDigitalOceanCapacitySnapshot(ctx, userUUID, candidate.EntryID)
 	case "linode":
-		return loadLinodeCapacitySnapshot(userUUID, candidate.EntryID)
+		return loadLinodeCapacitySnapshot(ctx, userUUID, candidate.EntryID)
 	default:
 		return &providerEntryCapacitySnapshot{
 			FetchedAt: time.Now(),
@@ -617,19 +639,19 @@ func loadProviderEntryCapacitySnapshot(userUUID string, plan models.FailoverPlan
 	}
 }
 
-func loadAWSCapacitySnapshot(userUUID string, plan models.FailoverPlan, entryID string) (*providerEntryCapacitySnapshot, error) {
+func loadAWSCapacitySnapshot(ctx context.Context, userUUID string, plan models.FailoverPlan, entryID string) (*providerEntryCapacitySnapshot, error) {
 	addition, credential, err := loadAWSCredential(userUUID, entryID)
 	if err != nil {
 		return nil, err
 	}
 
 	region := resolveAWSPlanRegion(plan, addition, credential)
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(contextOrBackground(ctx), 20*time.Second)
 	defer cancel()
 
 	instances, err := awscloud.ListInstances(ctx, credential, region)
 	if err != nil {
-		return nil, err
+		return nil, normalizeExecutionStopError(err)
 	}
 
 	activeInstances := 0
@@ -699,7 +721,7 @@ func resolveAWSPlanRegion(plan models.FailoverPlan, addition *awscloud.Addition,
 	return awscloud.DefaultRegion
 }
 
-func loadDigitalOceanCapacitySnapshot(userUUID, entryID string) (*providerEntryCapacitySnapshot, error) {
+func loadDigitalOceanCapacitySnapshot(ctx context.Context, userUUID, entryID string) (*providerEntryCapacitySnapshot, error) {
 	_, token, err := loadDigitalOceanToken(userUUID, entryID)
 	if err != nil {
 		return nil, err
@@ -710,12 +732,12 @@ func loadDigitalOceanCapacitySnapshot(userUUID, entryID string) (*providerEntryC
 		return nil, err
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(contextOrBackground(ctx), 20*time.Second)
 	defer cancel()
 
 	account, err := client.GetAccount(ctx)
 	if err != nil {
-		return nil, err
+		return nil, normalizeExecutionStopError(err)
 	}
 
 	tokenCopy := *token
@@ -726,7 +748,7 @@ func loadDigitalOceanCapacitySnapshot(userUUID, entryID string) (*providerEntryC
 
 	droplets, err := client.ListDroplets(ctx)
 	if err != nil {
-		return nil, err
+		return nil, normalizeExecutionStopError(err)
 	}
 
 	limit := token.DropletLimit
@@ -764,7 +786,7 @@ func loadDigitalOceanCapacitySnapshot(userUUID, entryID string) (*providerEntryC
 	}, nil
 }
 
-func loadLinodeCapacitySnapshot(userUUID, entryID string) (*providerEntryCapacitySnapshot, error) {
+func loadLinodeCapacitySnapshot(ctx context.Context, userUUID, entryID string) (*providerEntryCapacitySnapshot, error) {
 	_, token, err := loadLinodeToken(userUUID, entryID)
 	if err != nil {
 		return nil, err
@@ -775,12 +797,12 @@ func loadLinodeCapacitySnapshot(userUUID, entryID string) (*providerEntryCapacit
 		return nil, err
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(contextOrBackground(ctx), 20*time.Second)
 	defer cancel()
 
 	instances, err := client.ListInstances(ctx)
 	if err != nil {
-		return nil, err
+		return nil, normalizeExecutionStopError(err)
 	}
 
 	return &providerEntryCapacitySnapshot{

@@ -477,7 +477,11 @@ func ListExecutionsByIDs(executionIDs []uint) (map[uint]*models.FailoverExecutio
 
 	var executions []models.FailoverExecution
 	db := dbcore.GetDBInstance()
-	if err := db.Where("id IN ?", normalized).Find(&executions).Error; err != nil {
+	if err := db.Where("id IN ?", normalized).
+		Preload("Steps", func(tx *gorm.DB) *gorm.DB {
+			return tx.Order("sort ASC").Order("id ASC")
+		}).
+		Find(&executions).Error; err != nil {
 		return nil, err
 	}
 	for i := range executions {

@@ -2,12 +2,22 @@ package failover
 
 import (
 	"context"
-	"sync"
+	"errors"
 	"testing"
 	"time"
 
 	"github.com/komari-monitor/komari/database/models"
 )
+
+func newTestProviderEntryRuntimeState() *providerEntryRuntimeState {
+	state := &providerEntryRuntimeState{
+		turnReady: make(chan struct{}, 1),
+		opReady:   make(chan struct{}, 1),
+	}
+	state.turnReady <- struct{}{}
+	state.opReady <- struct{}{}
+	return state
+}
 
 func TestSortProviderPoolCandidates(t *testing.T) {
 	candidates := []providerPoolCandidate{
@@ -88,13 +98,11 @@ func TestAvailableSlotsAllowsQueuedSerializedProvisioning(t *testing.T) {
 }
 
 func TestBeginSerializedOperationQueuesRequests(t *testing.T) {
-	state := &providerEntryRuntimeState{}
-	state.cond = sync.NewCond(&state.mu)
-
+	state := newTestProviderEntryRuntimeState()
 	firstLease := &providerEntryLease{state: state}
 	secondLease := &providerEntryLease{state: state}
 
-	finishFirst, err := firstLease.BeginSerializedOperation(0)
+	finishFirst, err := firstLease.BeginSerializedOperation(context.Background(), 5*time.Second)
 	if err != nil {
 		t.Fatalf("expected first operation to start, got %v", err)
 	}
@@ -102,7 +110,7 @@ func TestBeginSerializedOperationQueuesRequests(t *testing.T) {
 	startedSecond := make(chan struct{})
 	secondDone := make(chan struct{})
 	go func() {
-		finishSecond, beginErr := secondLease.BeginSerializedOperation(0)
+		finishSecond, beginErr := secondLease.BeginSerializedOperation(context.Background(), 0)
 		if beginErr != nil {
 			t.Errorf("expected second operation to wait instead of failing: %v", beginErr)
 			close(secondDone)
@@ -135,21 +143,19 @@ func TestBeginSerializedOperationQueuesRequests(t *testing.T) {
 }
 
 func TestBeginSerializedOperationAppliesMinimumSpacing(t *testing.T) {
-	state := &providerEntryRuntimeState{}
-	state.cond = sync.NewCond(&state.mu)
-
+	state := newTestProviderEntryRuntimeState()
 	firstLease := &providerEntryLease{state: state}
 	secondLease := &providerEntryLease{state: state}
 	spacing := 90 * time.Millisecond
 
-	finishFirst, err := firstLease.BeginSerializedOperation(spacing)
+	finishFirst, err := firstLease.BeginSerializedOperation(context.Background(), spacing)
 	if err != nil {
 		t.Fatalf("expected first operation to start, got %v", err)
 	}
 	finishFirst()
 
 	startedAt := time.Now()
-	finishSecond, err := secondLease.BeginSerializedOperation(spacing)
+	finishSecond, err := secondLease.BeginSerializedOperation(context.Background(), spacing)
 	if err != nil {
 		t.Fatalf("expected second operation to start, got %v", err)
 	}
@@ -159,6 +165,83 @@ func TestBeginSerializedOperationAppliesMinimumSpacing(t *testing.T) {
 	if elapsed < 70*time.Millisecond {
 		t.Fatalf("expected serialized spacing to delay the second operation, got %s", elapsed)
 	}
+}
+
+func TestBeginSerializedOperationSkipsCancelledWaiters(t *testing.T) {
+	state := newTestProviderEntryRuntimeState()
+	firstLease := &providerEntryLease{state: state}
+	secondLease := &providerEntryLease{state: state}
+	thirdLease := &providerEntryLease{state: state}
+
+	finishFirst, err := firstLease.BeginSerializedOperation(context.Background(), 5*time.Second)
+	if err != nil {
+		t.Fatalf("expected first operation to start, got %v", err)
+	}
+
+	secondCtx, cancelSecond := context.WithCancel(context.Background())
+	secondDone := make(chan error, 1)
+	go func() {
+		_, beginErr := secondLease.BeginSerializedOperation(secondCtx, 0)
+		secondDone <- beginErr
+	}()
+
+	time.Sleep(40 * time.Millisecond)
+	cancelSecond()
+
+	select {
+	case err := <-secondDone:
+		if !errors.Is(err, errExecutionStopped) {
+			t.Fatalf("expected errExecutionStopped for cancelled waiter, got %v", err)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("expected cancelled waiter to return promptly")
+	}
+
+	finishFirst()
+
+	finishThird, err := thirdLease.BeginSerializedOperation(context.Background(), 0)
+	if err != nil {
+		t.Fatalf("expected third operation to start after cancelled waiter, got %v", err)
+	}
+	finishThird()
+}
+
+func TestBeginSerializedOperationReleasesSlotWhenSpacingWaitIsCancelled(t *testing.T) {
+	state := newTestProviderEntryRuntimeState()
+	firstLease := &providerEntryLease{state: state}
+	secondLease := &providerEntryLease{state: state}
+	thirdLease := &providerEntryLease{state: state}
+
+	finishFirst, err := firstLease.BeginSerializedOperation(context.Background(), 5*time.Second)
+	if err != nil {
+		t.Fatalf("expected first operation to start, got %v", err)
+	}
+	finishFirst()
+
+	secondCtx, cancelSecond := context.WithCancel(context.Background())
+	cancelResult := make(chan error, 1)
+	go func() {
+		_, beginErr := secondLease.BeginSerializedOperation(secondCtx, 5*time.Second)
+		cancelResult <- beginErr
+	}()
+
+	time.Sleep(40 * time.Millisecond)
+	cancelSecond()
+
+	select {
+	case err := <-cancelResult:
+		if !errors.Is(err, errExecutionStopped) {
+			t.Fatalf("expected errExecutionStopped for cancelled spacing wait, got %v", err)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("expected spacing wait cancellation to return promptly")
+	}
+
+	finishThird, err := thirdLease.BeginSerializedOperation(context.Background(), 0)
+	if err != nil {
+		t.Fatalf("expected third operation to acquire released slot, got %v", err)
+	}
+	finishThird()
 }
 
 func TestWaitForProviderEntryCapacityAfterRecyclePollsUntilFree(t *testing.T) {
@@ -179,7 +262,7 @@ func TestWaitForProviderEntryCapacityAfterRecyclePollsUntilFree(t *testing.T) {
 	}()
 
 	loadCalls := 0
-	providerEntryCapacitySnapshotLoader = func(userUUID string, plan models.FailoverPlan, candidate providerPoolCandidate) (*providerEntryCapacitySnapshot, error) {
+	providerEntryCapacitySnapshotLoader = func(ctx context.Context, userUUID string, plan models.FailoverPlan, candidate providerPoolCandidate) (*providerEntryCapacitySnapshot, error) {
 		loadCalls++
 		used := 3
 		if loadCalls >= 3 {

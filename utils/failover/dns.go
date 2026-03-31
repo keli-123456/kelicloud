@@ -22,15 +22,15 @@ import (
 )
 
 type dnsUpdateResult struct {
-	Provider string `json:"provider"`
-	ID       string `json:"id,omitempty"`
-	Name     string `json:"name,omitempty"`
-	Type     string `json:"type,omitempty"`
-	Value    string `json:"value,omitempty"`
-	ZoneID   string `json:"zone_id,omitempty"`
-	ZoneName string `json:"zone_name,omitempty"`
-	Domain   string `json:"domain,omitempty"`
-	RR       string `json:"rr,omitempty"`
+	Provider     string            `json:"provider"`
+	ID           string            `json:"id,omitempty"`
+	Name         string            `json:"name,omitempty"`
+	Type         string            `json:"type,omitempty"`
+	Value        string            `json:"value,omitempty"`
+	ZoneID       string            `json:"zone_id,omitempty"`
+	ZoneName     string            `json:"zone_name,omitempty"`
+	Domain       string            `json:"domain,omitempty"`
+	RR           string            `json:"rr,omitempty"`
 	Records      []dnsUpdateResult `json:"records,omitempty"`
 	SkippedTypes []string          `json:"skipped_types,omitempty"`
 }
@@ -199,19 +199,19 @@ func LoadDNSCatalog(userUUID, providerName, entryID, zoneName, domainName string
 	)
 }
 
-func applyDNSRecord(userUUID, providerName, entryID, payloadJSON, ipv4, ipv6 string) (*dnsUpdateResult, error) {
+func applyDNSRecord(ctx context.Context, userUUID, providerName, entryID, payloadJSON, ipv4, ipv6 string) (*dnsUpdateResult, error) {
 	switch strings.ToLower(strings.TrimSpace(providerName)) {
 	case cloudflareProviderName:
-		return applyCloudflareDNSRecord(userUUID, entryID, payloadJSON, ipv4, ipv6)
+		return applyCloudflareDNSRecord(ctx, userUUID, entryID, payloadJSON, ipv4, ipv6)
 	case aliyunProviderName:
-		return applyAliyunDNSRecord(userUUID, entryID, payloadJSON, ipv4, ipv6)
+		return applyAliyunDNSRecord(ctx, userUUID, entryID, payloadJSON, ipv4, ipv6)
 	default:
 		return nil, fmt.Errorf("unsupported dns provider: %s", providerName)
 	}
 }
 
 func ApplyDNSRecord(userUUID, providerName, entryID, payloadJSON, ipv4, ipv6 string) (*DNSUpdateResult, error) {
-	return applyDNSRecord(userUUID, providerName, entryID, payloadJSON, ipv4, ipv6)
+	return applyDNSRecord(context.Background(), userUUID, providerName, entryID, payloadJSON, ipv4, ipv6)
 }
 
 type dnsApplyPlan struct {
@@ -430,7 +430,7 @@ func loadAliyunDNSCatalog(userUUID, entryID, domainName string) (*DNSCatalog, er
 	return catalog, nil
 }
 
-func applyCloudflareDNSRecord(userUUID, entryID, payloadJSON, ipv4, ipv6 string) (*dnsUpdateResult, error) {
+func applyCloudflareDNSRecord(ctx context.Context, userUUID, entryID, payloadJSON, ipv4, ipv6 string) (*dnsUpdateResult, error) {
 	entry, err := loadGenericProviderEntry(userUUID, cloudflareProviderName, entryID)
 	if err != nil {
 		return nil, err
@@ -487,18 +487,18 @@ func applyCloudflareDNSRecord(userUUID, entryID, payloadJSON, ipv4, ipv6 string)
 		if zoneName == "" {
 			return nil, errors.New("cloudflare zone_id or zone_name is required")
 		}
-		zoneID, err = client.resolveZoneID(context.Background(), zoneName)
+		zoneID, err = client.resolveZoneID(contextOrBackground(ctx), zoneName)
 		if err != nil {
-			return nil, err
+			return nil, normalizeExecutionStopError(err)
 		}
 	}
 
 	results := make([]dnsUpdateResult, 0, len(plan.RecordTypes))
 	for _, currentRecordType := range plan.RecordTypes {
 		recordValue, _ := selectRecordValue(currentRecordType, ipv4, ipv6)
-		record, err := client.upsertRecord(context.Background(), zoneID, recordName, currentRecordType, recordValue, ttl, proxied)
+		record, err := client.upsertRecord(contextOrBackground(ctx), zoneID, recordName, currentRecordType, recordValue, ttl, proxied)
 		if err != nil {
-			return nil, err
+			return nil, normalizeExecutionStopError(err)
 		}
 		results = append(results, dnsUpdateResult{
 			Provider: cloudflareProviderName,
@@ -525,7 +525,7 @@ func normalizeCloudflareRecordName(recordName, zoneName string) string {
 	return recordName
 }
 
-func applyAliyunDNSRecord(userUUID, entryID, payloadJSON, ipv4, ipv6 string) (*dnsUpdateResult, error) {
+func applyAliyunDNSRecord(ctx context.Context, userUUID, entryID, payloadJSON, ipv4, ipv6 string) (*dnsUpdateResult, error) {
 	entry, err := loadGenericProviderEntry(userUUID, aliyunProviderName, entryID)
 	if err != nil {
 		return nil, err
@@ -573,9 +573,9 @@ func applyAliyunDNSRecord(userUUID, entryID, payloadJSON, ipv4, ipv6 string) (*d
 		recordValue, _ := selectRecordValue(currentRecordType, ipv4, ipv6)
 		recordIDs := make([]string, 0, len(lines))
 		for _, line := range lines {
-			recordID, err := client.upsertRecord(context.Background(), domainName, rr, currentRecordType, recordValue, ttl, line)
+			recordID, err := client.upsertRecord(contextOrBackground(ctx), domainName, rr, currentRecordType, recordValue, ttl, line)
 			if err != nil {
-				return nil, err
+				return nil, normalizeExecutionStopError(err)
 			}
 			recordIDs = append(recordIDs, recordID)
 		}
