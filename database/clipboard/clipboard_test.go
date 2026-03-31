@@ -189,3 +189,44 @@ func TestListClipboardPageByUserSearchesFuzzilyAndKeepsStableOrderAfterEdit(t *t
 		t.Fatalf("expected stable id-based order after edit, got %+v", page)
 	}
 }
+
+func TestListClipboardPageByUserSearchTreatsLikeWildcardsLiterally(t *testing.T) {
+	db := openClipboardTestDB(t)
+
+	if err := db.AutoMigrate(&models.Clipboard{}); err != nil {
+		t.Fatalf("failed to migrate test schema: %v", err)
+	}
+
+	items := []models.Clipboard{
+		{
+			UserID: "user-a",
+			Name:   "100% rollout_script",
+			Text:   "echo percent underscore",
+			Remark: "literal wildcard sample",
+			Weight: 3,
+		},
+		{
+			UserID: "user-a",
+			Name:   "100 rollout script",
+			Text:   "echo plain text",
+			Remark: "control sample",
+			Weight: 2,
+		},
+	}
+	for i := range items {
+		if err := db.Create(&items[i]).Error; err != nil {
+			t.Fatalf("failed to create clipboard entry: %v", err)
+		}
+	}
+
+	searchResult, total, err := listClipboardPageByUserWithDB(db, "user-a", 1, 20, "% _")
+	if err != nil {
+		t.Fatalf("failed to search clipboard entries with literal wildcard characters: %v", err)
+	}
+	if total != 1 {
+		t.Fatalf("expected exactly one literal wildcard search match, got %d", total)
+	}
+	if len(searchResult) != 1 || searchResult[0].Id != items[0].Id {
+		t.Fatalf("unexpected literal wildcard search result: %+v", searchResult)
+	}
+}

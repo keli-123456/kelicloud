@@ -9,6 +9,8 @@ import (
 	"gorm.io/gorm"
 )
 
+const clipboardLikeEscapeChar = '!'
+
 func normalizeClipboardUserID(userUUID string) (string, error) {
 	userUUID = strings.TrimSpace(userUUID)
 	if userUUID == "" {
@@ -85,8 +87,8 @@ func buildClipboardFuzzyPattern(token string) string {
 	builder.WriteByte('%')
 	for _, char := range token {
 		switch char {
-		case '\\', '%', '_':
-			builder.WriteByte('\\')
+		case clipboardLikeEscapeChar, '%', '_':
+			builder.WriteByte(clipboardLikeEscapeChar)
 		}
 		builder.WriteRune(char)
 		builder.WriteByte('%')
@@ -99,9 +101,9 @@ func applyClipboardSearchQuery(query *gorm.DB, rawSearch string) *gorm.DB {
 		pattern := buildClipboardFuzzyPattern(token)
 		query = query.Where(
 			`(
-				LOWER(name) LIKE ? ESCAPE '\'
-				OR LOWER(COALESCE(remark, '')) LIKE ? ESCAPE '\'
-				OR LOWER(text) LIKE ? ESCAPE '\'
+				LOWER(name) LIKE ? ESCAPE '!'
+				OR LOWER(COALESCE(remark, '')) LIKE ? ESCAPE '!'
+				OR LOWER(text) LIKE ? ESCAPE '!'
 			)`,
 			pattern,
 			pattern,
