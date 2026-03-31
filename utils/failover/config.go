@@ -24,6 +24,39 @@ const (
 	aliyunProviderName               = "aliyun"
 )
 
+type providerEntryNotFoundError struct {
+	Provider string
+	EntryID  string
+}
+
+func (e *providerEntryNotFoundError) Error() string {
+	if e == nil {
+		return "provider entry not found"
+	}
+
+	entryID := strings.TrimSpace(e.EntryID)
+	switch strings.ToLower(strings.TrimSpace(e.Provider)) {
+	case "aws":
+		return fmt.Sprintf("AWS credential not found: %s", entryID)
+	case "linode":
+		return fmt.Sprintf("Linode token not found: %s", entryID)
+	default:
+		return fmt.Sprintf("DigitalOcean token not found: %s", entryID)
+	}
+}
+
+func newProviderEntryNotFoundError(provider, entryID string) error {
+	return &providerEntryNotFoundError{
+		Provider: strings.ToLower(strings.TrimSpace(provider)),
+		EntryID:  strings.TrimSpace(entryID),
+	}
+}
+
+func isProviderEntryNotFoundError(err error) bool {
+	var target *providerEntryNotFoundError
+	return errors.As(err, &target)
+}
+
 type genericProviderEntry struct {
 	ID     string                 `json:"id"`
 	Name   string                 `json:"name"`
@@ -101,7 +134,7 @@ func loadAWSCredentialSelection(userUUID, entryID, entryGroup string) (*awscloud
 		if entryID != "" && entryID != activeProviderEntryID {
 			credential := addition.FindCredential(entryID)
 			if credential == nil {
-				return nil, nil, fmt.Errorf("AWS credential not found: %s", entryID)
+				return nil, nil, newProviderEntryNotFoundError("aws", entryID)
 			}
 			if normalizeProviderEntryGroup(credential.Group) != entryGroup {
 				return nil, nil, fmt.Errorf("AWS credential %s is not in group %s", entryID, entryGroup)
@@ -130,7 +163,7 @@ func loadAWSCredentialSelection(userUUID, entryID, entryGroup string) (*awscloud
 
 	credential := addition.FindCredential(entryID)
 	if credential == nil {
-		return nil, nil, fmt.Errorf("AWS credential not found: %s", entryID)
+		return nil, nil, newProviderEntryNotFoundError("aws", entryID)
 	}
 	return addition, credential, nil
 }
@@ -168,7 +201,7 @@ func loadDigitalOceanTokenSelection(userUUID, entryID, entryGroup string) (*digi
 		if entryID != "" && entryID != activeProviderEntryID {
 			token := addition.FindToken(entryID)
 			if token == nil {
-				return nil, nil, fmt.Errorf("DigitalOcean token not found: %s", entryID)
+				return nil, nil, newProviderEntryNotFoundError("digitalocean", entryID)
 			}
 			if normalizeProviderEntryGroup(token.Group) != entryGroup {
 				return nil, nil, fmt.Errorf("DigitalOcean token %s is not in group %s", entryID, entryGroup)
@@ -197,7 +230,7 @@ func loadDigitalOceanTokenSelection(userUUID, entryID, entryGroup string) (*digi
 
 	token := addition.FindToken(entryID)
 	if token == nil {
-		return nil, nil, fmt.Errorf("DigitalOcean token not found: %s", entryID)
+		return nil, nil, newProviderEntryNotFoundError("digitalocean", entryID)
 	}
 	return addition, token, nil
 }
@@ -248,7 +281,7 @@ func loadLinodeTokenSelection(userUUID, entryID, entryGroup string) (*linode.Add
 		if entryID != "" && entryID != activeProviderEntryID {
 			token := addition.FindToken(entryID)
 			if token == nil {
-				return nil, nil, fmt.Errorf("Linode token not found: %s", entryID)
+				return nil, nil, newProviderEntryNotFoundError("linode", entryID)
 			}
 			if normalizeProviderEntryGroup(token.Group) != entryGroup {
 				return nil, nil, fmt.Errorf("Linode token %s is not in group %s", entryID, entryGroup)
@@ -277,7 +310,7 @@ func loadLinodeTokenSelection(userUUID, entryID, entryGroup string) (*linode.Add
 
 	token := addition.FindToken(entryID)
 	if token == nil {
-		return nil, nil, fmt.Errorf("Linode token not found: %s", entryID)
+		return nil, nil, newProviderEntryNotFoundError("linode", entryID)
 	}
 	return addition, token, nil
 }

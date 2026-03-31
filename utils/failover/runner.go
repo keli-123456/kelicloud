@@ -1772,6 +1772,27 @@ func providerEntryNameFromRef(ref map[string]interface{}) string {
 	return firstNonEmpty(stringMapValue(ref, "provider_entry_name"), stringMapValue(ref, "entry_name"))
 }
 
+func resolvedCurrentInstanceRef(ref map[string]interface{}, provider, entryID string) map[string]interface{} {
+	resolvedRef := cloneJSONMap(ref)
+	if len(resolvedRef) == 0 {
+		resolvedRef = map[string]interface{}{}
+	}
+	resolvedRef["provider"] = strings.TrimSpace(provider)
+	resolvedRef["provider_entry_id"] = strings.TrimSpace(entryID)
+	if name := providerEntryNameFromRef(ref); name != "" {
+		resolvedRef["provider_entry_name"] = name
+	}
+	return resolvedRef
+}
+
+func missingCurrentInstanceCleanup(ref map[string]interface{}, provider, entryID, label string) *currentInstanceCleanup {
+	return &currentInstanceCleanup{
+		Ref:     resolvedCurrentInstanceRef(ref, provider, entryID),
+		Label:   strings.TrimSpace(label),
+		Missing: true,
+	}
+}
+
 func sameAddress(target string, values ...string) bool {
 	target = strings.TrimSpace(target)
 	if target == "" {
@@ -2160,19 +2181,17 @@ func resolveCurrentInstanceCleanupFromRef(userUUID string, ref map[string]interf
 		if dropletID <= 0 {
 			return nil, nil
 		}
+		resolvedRef := resolvedCurrentInstanceRef(ref, "digitalocean", entryID)
 		addition, token, err := loadDigitalOceanToken(userUUID, entryID)
 		if err != nil {
+			if isProviderEntryNotFoundError(err) {
+				return missingCurrentInstanceCleanup(ref, "digitalocean", entryID, fmt.Sprintf("delete digitalocean droplet %d", dropletID)), nil
+			}
 			return nil, err
 		}
 		client, err := digitalocean.NewClientFromToken(token.Token)
 		if err != nil {
 			return nil, err
-		}
-		resolvedRef := cloneJSONMap(ref)
-		resolvedRef["provider"] = "digitalocean"
-		resolvedRef["provider_entry_id"] = entryID
-		if name := providerEntryNameFromRef(ref); name != "" {
-			resolvedRef["provider_entry_name"] = name
 		}
 		droplets, err := client.ListDroplets(context.Background())
 		if err != nil {
@@ -2212,19 +2231,17 @@ func resolveCurrentInstanceCleanupFromRef(userUUID string, ref map[string]interf
 		if instanceID <= 0 {
 			return nil, nil
 		}
+		resolvedRef := resolvedCurrentInstanceRef(ref, "linode", entryID)
 		addition, token, err := loadLinodeToken(userUUID, entryID)
 		if err != nil {
+			if isProviderEntryNotFoundError(err) {
+				return missingCurrentInstanceCleanup(ref, "linode", entryID, fmt.Sprintf("delete linode instance %d", instanceID)), nil
+			}
 			return nil, err
 		}
 		client, err := linodecloud.NewClientFromToken(token.Token)
 		if err != nil {
 			return nil, err
-		}
-		resolvedRef := cloneJSONMap(ref)
-		resolvedRef["provider"] = "linode"
-		resolvedRef["provider_entry_id"] = entryID
-		if name := providerEntryNameFromRef(ref); name != "" {
-			resolvedRef["provider_entry_name"] = name
 		}
 		if _, err := client.GetInstance(context.Background(), instanceID); err != nil {
 			if isLinodeNotFoundError(err) {
@@ -2257,15 +2274,26 @@ func resolveCurrentInstanceCleanupFromRef(userUUID string, ref map[string]interf
 		if region == "" {
 			return nil, nil
 		}
+		resolvedRef := resolvedCurrentInstanceRef(ref, "aws", entryID)
 		_, credential, err := loadAWSCredential(userUUID, entryID)
 		if err != nil {
+			if isProviderEntryNotFoundError(err) {
+				switch service {
+				case "lightsail":
+					instanceName := strings.TrimSpace(stringMapValue(ref, "instance_name"))
+					if instanceName == "" {
+						return nil, nil
+					}
+					return missingCurrentInstanceCleanup(ref, "aws", entryID, "delete aws lightsail instance "+instanceName), nil
+				default:
+					instanceID := strings.TrimSpace(stringMapValue(ref, "instance_id"))
+					if instanceID == "" {
+						return nil, nil
+					}
+					return missingCurrentInstanceCleanup(ref, "aws", entryID, "terminate aws ec2 instance "+instanceID), nil
+				}
+			}
 			return nil, err
-		}
-		resolvedRef := cloneJSONMap(ref)
-		resolvedRef["provider"] = "aws"
-		resolvedRef["provider_entry_id"] = entryID
-		if name := providerEntryNameFromRef(ref); name != "" {
-			resolvedRef["provider_entry_name"] = name
 		}
 		switch service {
 		case "lightsail":

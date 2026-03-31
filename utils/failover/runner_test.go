@@ -3,12 +3,30 @@ package failover
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/komari-monitor/komari/cmd/flags"
 	"github.com/komari-monitor/komari/common"
+	"github.com/komari-monitor/komari/database"
+	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
 )
+
+func configureRunnerSQLiteDB(t *testing.T) {
+	t.Helper()
+
+	flags.DatabaseType = "sqlite"
+	flags.DatabaseFile = filepath.Join(os.TempDir(), "komari-failover-runner-tests.db")
+	_ = os.Remove(flags.DatabaseFile)
+
+	db := dbcore.GetDBInstance()
+	if err := db.AutoMigrate(&models.CloudProvider{}); err != nil {
+		t.Fatalf("failed to migrate cloud provider schema: %v", err)
+	}
+}
 
 func TestEvaluateTaskHealthRetriesMissingReportBeforeTriggering(t *testing.T) {
 	now := time.Now()
@@ -398,5 +416,50 @@ func TestInvalidateProvisionedEntrySnapshotClearsTrackedCapacity(t *testing.T) {
 	}
 	if state.provisionedDelta != 0 {
 		t.Fatalf("expected provisioned delta reset to 0, got %d", state.provisionedDelta)
+	}
+}
+
+func TestResolveCurrentInstanceCleanupFromRefTreatsMissingDigitalOceanTokenAsStale(t *testing.T) {
+	configureRunnerSQLiteDB(t)
+
+	if err := database.SaveCloudProviderConfigForUser(&models.CloudProvider{
+		UserID: "user-stale",
+		Name:   "digitalocean",
+		Addition: `{
+			"active_token_id":"token-live",
+			"tokens":[
+				{"id":"token-live","name":"Token Live","token":"dop_v1_live"}
+			]
+		}`,
+	}); err != nil {
+		t.Fatalf("failed to seed digitalocean provider config: %v", err)
+	}
+
+	cleanup, err := resolveCurrentInstanceCleanupFromRef("user-stale", map[string]interface{}{
+		"provider":            "digitalocean",
+		"provider_entry_id":   "token-deleted",
+		"provider_entry_name": "Token 1",
+		"droplet_id":          12345,
+	})
+	if err != nil {
+		t.Fatalf("expected stale provider entry to be tolerated, got %v", err)
+	}
+	if cleanup == nil {
+		t.Fatal("expected stale cleanup metadata to be returned")
+	}
+	if !cleanup.Missing {
+		t.Fatal("expected stale cleanup to be marked missing")
+	}
+	if cleanup.Cleanup != nil {
+		t.Fatal("expected no cleanup callback when provider entry is missing")
+	}
+	if got := providerEntryIDFromRef(cleanup.Ref); got != "token-deleted" {
+		t.Fatalf("expected stale ref entry id token-deleted, got %q", got)
+	}
+	if got := providerEntryNameFromRef(cleanup.Ref); got != "Token 1" {
+		t.Fatalf("expected stale ref entry name Token 1, got %q", got)
+	}
+	if cleanup.Label != "delete digitalocean droplet 12345" {
+		t.Fatalf("unexpected stale cleanup label %q", cleanup.Label)
 	}
 }
