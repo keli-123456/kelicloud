@@ -81,7 +81,7 @@ func RunServer() {
 	}
 	go geoip.InitGeoIp()
 	go DoScheduledWork()
-	go messageSender.Initialize()
+	messageSender.Initialize()
 	if err := oauth.Initialize(); err != nil {
 		log.Printf("Failed to initialize OIDC provider: %v", err)
 		auditlog.EventLog("error", fmt.Sprintf("Failed to initialize OIDC provider: %v", err))
@@ -144,7 +144,7 @@ func RunServer() {
 		}
 
 		if event.IsChanged(config.NotificationMethodKey) {
-			go messageSender.Initialize()
+			messageSender.Initialize()
 		}
 
 	})

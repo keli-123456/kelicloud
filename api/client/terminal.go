@@ -6,11 +6,14 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	"github.com/komari-monitor/komari/api"
+	wsconn "github.com/komari-monitor/komari/ws"
 )
 
 func EstablishConnection(c *gin.Context) {
 	session_id := c.Query("id")
+	api.TerminalSessionsMutex.Lock()
 	session, exists := api.TerminalSessions[session_id]
+	api.TerminalSessionsMutex.Unlock()
 	if !exists || session == nil || session.Browser == nil {
 		c.JSON(404, gin.H{"status": "error", "error": "Session not found"})
 		return
@@ -35,9 +38,14 @@ func EstablishConnection(c *gin.Context) {
 		api.TerminalSessionsMutex.Unlock()
 		return
 	}
-	session.Agent = conn
+	agentConn := wsconn.NewSafeConn(conn)
+	api.TerminalSessionsMutex.Lock()
+	session.Agent = agentConn
+	api.TerminalSessionsMutex.Unlock()
 	conn.SetCloseHandler(func(code int, text string) error {
+		api.TerminalSessionsMutex.Lock()
 		delete(api.TerminalSessions, session_id)
+		api.TerminalSessionsMutex.Unlock()
 		// 通知 Browser 关闭终端连接
 		if session.Browser != nil {
 			session.Browser.Close()

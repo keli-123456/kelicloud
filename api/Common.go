@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/gorilla/websocket"
 	"github.com/komari-monitor/komari/common"
 	"github.com/patrickmn/go-cache"
 
@@ -17,6 +16,7 @@ import (
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/utils"
+	wsconn "github.com/komari-monitor/komari/ws"
 )
 
 var (
@@ -26,8 +26,8 @@ var (
 type TerminalSession struct {
 	UUID        string
 	UserUUID    string
-	Browser     *websocket.Conn
-	Agent       *websocket.Conn
+	Browser     *wsconn.SafeConn
+	Agent       *wsconn.SafeConn
 	RequesterIp string
 }
 

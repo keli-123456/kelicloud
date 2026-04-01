@@ -43,6 +43,16 @@ func (sc *SafeConn) WriteJSON(v interface{}) error {
 	return sc.conn.WriteJSON(v)
 }
 
+func (sc *SafeConn) WriteJSONWithDeadline(v interface{}, deadline time.Time) error {
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+	if err := sc.conn.SetWriteDeadline(deadline); err != nil {
+		return err
+	}
+	defer sc.conn.SetWriteDeadline(time.Time{})
+	return sc.conn.WriteJSON(v)
+}
+
 func (sc *SafeConn) Close() error {
 	sc.mu.Lock()
 	defer sc.mu.Unlock()
@@ -56,6 +66,18 @@ func (sc *SafeConn) ReadJSON(v interface{}) error {
 }
 func (sc *SafeConn) SetReadDeadline(t time.Time) error {
 	return sc.conn.SetReadDeadline(t)
+}
+
+func (sc *SafeConn) SetPongHandler(h func(string) error) {
+	sc.conn.SetPongHandler(h)
+}
+
+func (sc *SafeConn) SetPingHandler(h func(string) error) {
+	sc.conn.SetPingHandler(h)
+}
+
+func (sc *SafeConn) SetCloseHandler(h func(code int, text string) error) {
+	sc.conn.SetCloseHandler(h)
 }
 func (sc *SafeConn) GetConn() *websocket.Conn {
 	sc.mu.Lock()

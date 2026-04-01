@@ -12,6 +12,46 @@ import (
 	"github.com/komari-monitor/komari/ws"
 )
 
+const (
+	terminalWriteTimeout = 15 * time.Second
+	terminalReadTimeout  = 2 * time.Minute
+	terminalPingInterval = 30 * time.Second
+)
+
+func terminalWrite(conn *ws.SafeConn, messageType int, data []byte) error {
+	if conn == nil {
+		return nil
+	}
+	return conn.WriteMessageWithDeadline(messageType, data, time.Now().Add(terminalWriteTimeout))
+}
+
+func extendTerminalReadDeadline(conn *ws.SafeConn) error {
+	if conn == nil {
+		return nil
+	}
+	return conn.SetReadDeadline(time.Now().Add(terminalReadTimeout))
+}
+
+func configureTerminalConn(conn *ws.SafeConn) error {
+	if err := extendTerminalReadDeadline(conn); err != nil {
+		return err
+	}
+	conn.SetPongHandler(func(string) error {
+		return extendTerminalReadDeadline(conn)
+	})
+	return nil
+}
+
+func sendTerminalErr(errChan chan<- error, err error) {
+	if err == nil {
+		return
+	}
+	select {
+	case errChan <- err:
+	default:
+	}
+}
+
 func RequestTerminal(c *gin.Context) {
 	uuid := c.Param("uuid")
 	userID, ok := RequireUserScopeFromSession(c)
@@ -38,12 +78,13 @@ func RequestTerminal(c *gin.Context) {
 	if err != nil {
 		return
 	}
+	browserConn := ws.NewSafeConn(conn)
 	// 新建一个终端连接
 	id := utils.GenerateRandomString(32)
 	session := &TerminalSession{
 		UserUUID:    userID,
 		UUID:        uuid,
-		Browser:     conn,
+		Browser:     browserConn,
 		Agent:       nil,
 		RequesterIp: c.ClientIP(),
 	}
@@ -64,34 +105,33 @@ func RequestTerminal(c *gin.Context) {
 	})
 
 	if ws.GetConnectedClients()[uuid] == nil {
-		conn.WriteMessage(1, []byte("Client offline!\n被控端离线!"))
-		conn.Close()
+		_ = terminalWrite(browserConn, websocket.TextMessage, []byte("Client offline!\n被控端离线!"))
+		browserConn.Close()
 		TerminalSessionsMutex.Lock()
 		delete(TerminalSessions, id)
 		TerminalSessionsMutex.Unlock()
 		return
 	}
-	err = ws.GetConnectedClients()[uuid].WriteJSON(gin.H{
+	err = ws.GetConnectedClients()[uuid].WriteJSONWithDeadline(gin.H{
 		"message":    "terminal",
 		"request_id": id,
-	})
+	}, time.Now().Add(terminalWriteTimeout))
 	if err != nil {
-		conn.Close()
+		browserConn.Close()
 		TerminalSessionsMutex.Lock()
 		delete(TerminalSessions, id)
 		TerminalSessionsMutex.Unlock()
 		return
 	}
-	conn.WriteMessage(1, []byte("等待被控端连接 waiting for agent..."))
+	_ = terminalWrite(browserConn, websocket.TextMessage, []byte("等待被控端连接 waiting for agent..."))
 	// 如果没有连接上，则关闭连接
 	time.AfterFunc(30*time.Second, func() {
 		TerminalSessionsMutex.Lock()
 		if session.Agent == nil {
 			if session.Browser != nil {
-				session.Browser.WriteMessage(1, []byte("被控端连接超时 timeout"))
+				_ = terminalWrite(session.Browser, websocket.TextMessage, []byte("被控端连接超时 timeout"))
 				session.Browser.Close()
 			}
-			conn.Close()
 			delete(TerminalSessions, id)
 		}
 		TerminalSessionsMutex.Unlock()
@@ -100,36 +140,53 @@ func RequestTerminal(c *gin.Context) {
 }
 
 func ForwardTerminal(id string) {
+	TerminalSessionsMutex.Lock()
 	session, exists := TerminalSessions[id]
+	TerminalSessionsMutex.Unlock()
 
 	if !exists || session == nil || session.Agent == nil || session.Browser == nil {
 		return
 	}
+
+	browserConn := session.Browser
+	agentConn := session.Agent
+	if err := configureTerminalConn(browserConn); err != nil {
+		_ = browserConn.Close()
+		_ = agentConn.Close()
+		return
+	}
+	if err := configureTerminalConn(agentConn); err != nil {
+		_ = browserConn.Close()
+		_ = agentConn.Close()
+		return
+	}
+
 	AuditLogForUser(session.RequesterIp, session.UserUUID, "established, terminal id:"+id, "terminal")
 	established_time := time.Now()
 	errChan := make(chan error, 1)
+	done := make(chan struct{})
 
 	go func() {
 		for {
-			messageType, data, err := session.Browser.ReadMessage()
+			messageType, data, err := browserConn.ReadMessage()
 			if err != nil {
-				errChan <- err
+				sendTerminalErr(errChan, err)
 				return
 			}
 
 			if messageType == websocket.TextMessage {
-				if session.Agent != nil && string(data[0:1]) == "{" {
-					err = session.Agent.WriteMessage(websocket.TextMessage, data)
-				} else if session.Agent != nil {
-					err = session.Agent.WriteMessage(websocket.BinaryMessage, data)
+				if len(data) > 0 && data[0] == '{' {
+					err = terminalWrite(agentConn, websocket.TextMessage, data)
+				} else {
+					err = terminalWrite(agentConn, websocket.BinaryMessage, data)
 				}
-			} else if session.Agent != nil {
+			} else {
 				// 二进制消息，原样传递
-				err = session.Agent.WriteMessage(websocket.BinaryMessage, data)
+				err = terminalWrite(agentConn, websocket.BinaryMessage, data)
 			}
 
 			if err != nil {
-				errChan <- err
+				sendTerminalErr(errChan, err)
 				return
 			}
 		}
@@ -137,15 +194,33 @@ func ForwardTerminal(id string) {
 
 	go func() {
 		for {
-			_, data, err := session.Agent.ReadMessage()
+			_, data, err := agentConn.ReadMessage()
 			if err != nil {
-				errChan <- err
+				sendTerminalErr(errChan, err)
 				return
 			}
-			if session.Browser != nil {
-				err = session.Browser.WriteMessage(websocket.BinaryMessage, data)
-				if err != nil {
-					errChan <- err
+			err = terminalWrite(browserConn, websocket.BinaryMessage, data)
+			if err != nil {
+				sendTerminalErr(errChan, err)
+				return
+			}
+		}
+	}()
+
+	go func() {
+		ticker := time.NewTicker(terminalPingInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				if err := terminalWrite(browserConn, websocket.PingMessage, nil); err != nil {
+					sendTerminalErr(errChan, err)
+					return
+				}
+				if err := terminalWrite(agentConn, websocket.PingMessage, nil); err != nil {
+					sendTerminalErr(errChan, err)
 					return
 				}
 			}
@@ -154,13 +229,10 @@ func ForwardTerminal(id string) {
 
 	// 等待错误或主动关闭
 	<-errChan
+	close(done)
 	// 关闭连接
-	if session.Agent != nil {
-		session.Agent.Close()
-	}
-	if session.Browser != nil {
-		session.Browser.Close()
-	}
+	_ = agentConn.Close()
+	_ = browserConn.Close()
 	disconnect_time := time.Now()
 	AuditLogForUser(session.RequesterIp, session.UserUUID, "disconnected, terminal id:"+id+", duration:"+disconnect_time.Sub(established_time).String(), "terminal")
 	TerminalSessionsMutex.Lock()

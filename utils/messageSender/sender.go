@@ -28,34 +28,40 @@ func CurrentProvider() factory.IMessageSender {
 }
 
 func Initialize() {
-	go func() {
-		once.Do(func() {
-			all := factory.GetAllMessageSenders()
-			for _, provider := range all {
-				if _, err := database.GetMessageSenderConfigByName(provider.GetName()); err == nil {
-					continue
-				}
-				// 如果数据库中没有该提供者的配置，则保存默认配置
-				config := provider.GetConfiguration()
-				configBytes, err := json.Marshal(config)
-				if err != nil {
-					log.Printf("Failed to marshal config for provider %s: %v", provider.GetName(), err)
-					return
-				}
-				if err := database.SaveMessageSenderConfig(&models.MessageSenderProvider{
-					Name:     provider.GetName(),
-					Addition: string(configBytes),
-				}); err != nil {
-					log.Printf("Failed to save default config for provider %s: %v", provider.GetName(), err)
-					return
-				}
+	var initErr error
+	once.Do(func() {
+		all := factory.GetAllMessageSenders()
+		for _, provider := range all {
+			if _, err := database.GetMessageSenderConfigByName(provider.GetName()); err == nil {
+				continue
 			}
-		})
-	}()
+			// 如果数据库中没有该提供者的配置，则保存默认配置
+			config := provider.GetConfiguration()
+			configBytes, err := json.Marshal(config)
+			if err != nil {
+				initErr = fmt.Errorf("failed to marshal config for provider %s: %w", provider.GetName(), err)
+				log.Print(initErr)
+				return
+			}
+			if err := database.SaveMessageSenderConfig(&models.MessageSenderProvider{
+				Name:     provider.GetName(),
+				Addition: string(configBytes),
+			}); err != nil {
+				initErr = fmt.Errorf("failed to save default config for provider %s: %w", provider.GetName(), err)
+				log.Print(initErr)
+				return
+			}
+		}
+	})
+	if initErr != nil {
+		log.Printf("Failed to initialize message sender providers: %v", initErr)
+		_ = LoadProvider("empty", "{}")
+		return
+	}
 	NotificationMethod, _ := config.GetAs[string](config.NotificationMethodKey, "none")
 
 	if NotificationMethod == "" || NotificationMethod == "none" {
-		LoadProvider("empty", "{}")
+		_ = LoadProvider("empty", "{}")
 		return
 	}
 
@@ -63,10 +69,13 @@ func Initialize() {
 	senderConfig, err := database.GetMessageSenderConfigByName(NotificationMethod)
 	if err != nil {
 		// 如果没有找到配置，使用empty provider
-		LoadProvider("empty", "{}")
+		_ = LoadProvider("empty", "{}")
 		return
 	}
-	LoadProvider(NotificationMethod, senderConfig.Addition)
+	if err := LoadProvider(NotificationMethod, senderConfig.Addition); err != nil {
+		log.Printf("Failed to load message sender provider %s: %v", NotificationMethod, err)
+		_ = LoadProvider("empty", "{}")
+	}
 }
 
 func SendTextMessage(message string, title string) error {
