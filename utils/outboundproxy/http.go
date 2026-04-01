@@ -27,6 +27,10 @@ type Settings struct {
 }
 
 func LoadSettings() (*Settings, error) {
+	if !config.IsInitialized() {
+		return &Settings{}, nil
+	}
+
 	legacy, err := config.GetManyAs[config.Legacy]()
 	if err != nil {
 		return nil, err

@@ -18,6 +18,10 @@ var (
 	once            = sync.Once{}
 )
 
+func loadDefaultProvider() error {
+	return LoadProvider("github", "{}")
+}
+
 func CurrentProvider() factory.IOidcProvider {
 	mu.Lock()
 	defer mu.Unlock()
@@ -48,6 +52,7 @@ func LoadProvider(name string, configJson string) error {
 }
 
 func Initialize() error {
+	var initErr error
 	once.Do(func() {
 		all := factory.GetAllOidcProviders()
 		for _, provider := range all {
@@ -58,33 +63,36 @@ func Initialize() error {
 			config := provider.GetConfiguration()
 			configBytes, err := json.Marshal(config)
 			if err != nil {
-				log.Printf("Failed to marshal config for provider %s: %v", provider.GetName(), err)
+				initErr = fmt.Errorf("failed to marshal config for provider %s: %w", provider.GetName(), err)
+				log.Print(initErr)
 				return
 			}
 			if err := database.SaveOidcConfig(&models.OidcProvider{
 				Name:     provider.GetName(),
 				Addition: string(configBytes),
 			}); err != nil {
-				log.Printf("Failed to save default config for provider %s: %v", provider.GetName(), err)
+				initErr = fmt.Errorf("failed to save default config for provider %s: %w", provider.GetName(), err)
+				log.Print(initErr)
 				return
 			}
 		}
 	})
+	if initErr != nil {
+		return initErr
+	}
 	cfg, _ := config.GetAs[string](config.OAuthProviderKey, "github")
 	if cfg == "" || cfg == "none" {
-		LoadProvider("github", "{}")
-		return nil
+		return loadDefaultProvider()
 	}
 	provider, err := database.GetOidcConfigByName(cfg)
 	if err != nil {
 		// 如果没有找到配置，使用github provider
-		LoadProvider("github", "{}")
-		return nil
+		return loadDefaultProvider()
 	}
 	err = LoadProvider(provider.Name, provider.Addition)
 	if err != nil {
 		log.Printf("Failed to load OIDC provider %s: %v", provider.Name, err)
-		return err
+		return loadDefaultProvider()
 	}
 	return nil
 }

@@ -177,6 +177,7 @@ func TestUserPolicyDefaultsAndPersistence(t *testing.T) {
 	expectedFeatures := []string{
 		UserFeatureClients,
 		UserFeatureCloudAWS,
+		UserFeatureCloudAzure,
 		UserFeatureCloudDigitalOcean,
 		UserFeatureCloudDNS,
 		UserFeatureCloudFailover,

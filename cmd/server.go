@@ -27,7 +27,6 @@ import (
 	"github.com/komari-monitor/komari/cmd/flags"
 
 	"github.com/komari-monitor/komari/config"
-	"github.com/komari-monitor/komari/database"
 	"github.com/komari-monitor/komari/database/accounts"
 	"github.com/komari-monitor/komari/database/auditlog"
 	"github.com/komari-monitor/komari/database/dbcore"
@@ -83,8 +82,10 @@ func RunServer() {
 	go geoip.InitGeoIp()
 	go DoScheduledWork()
 	go messageSender.Initialize()
-	// oidcInit
-	go oauth.Initialize()
+	if err := oauth.Initialize(); err != nil {
+		log.Printf("Failed to initialize OIDC provider: %v", err)
+		auditlog.EventLog("error", fmt.Sprintf("Failed to initialize OIDC provider: %v", err))
+	}
 
 	if conf.NezhaCompatEnabled {
 		go func() {
@@ -96,19 +97,10 @@ func RunServer() {
 	}
 
 	config.Subscribe(func(event config.ConfigEvent) {
-		if ok, t := config.IsChangedT[string](event, config.OAuthProviderKey); ok {
-			if t == "" || t == "none" {
-				t = "github"
-			}
-			oidcProvider, err := database.GetOidcConfigByName(t)
-			if err != nil {
-				log.Printf("Failed to get OIDC provider config: %v", err)
-			} else {
-				log.Printf("Using %s as OIDC provider", oidcProvider.Name)
-			}
-			err = oauth.LoadProvider(oidcProvider.Name, oidcProvider.Addition)
-			if err != nil {
-				auditlog.EventLog("error", fmt.Sprintf("Failed to load OIDC provider: %v", err))
+		if event.IsChanged(config.OAuthProviderKey) {
+			if err := oauth.Initialize(); err != nil {
+				log.Printf("Failed to reload OIDC provider: %v", err)
+				auditlog.EventLog("error", fmt.Sprintf("Failed to reload OIDC provider: %v", err))
 			}
 		}
 
@@ -158,11 +150,17 @@ func RunServer() {
 	})
 	r.Use(func(c *gin.Context) {
 		if DynamicCorsEnabled {
-			c.Header("Access-Control-Allow-Origin", "*")
+			origin := c.GetHeader("Origin")
+			if origin != "" {
+				c.Header("Access-Control-Allow-Origin", origin)
+				c.Header("Vary", "Origin")
+				c.Header("Access-Control-Allow-Credentials", "true")
+			} else {
+				c.Header("Access-Control-Allow-Origin", "*")
+			}
 			c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS")
 			c.Header("Access-Control-Allow-Headers", "Origin, Content-Length, Content-Type, Authorization, Accept, X-CSRF-Token, X-Requested-With, Set-Cookie")
 			c.Header("Access-Control-Expose-Headers", "Content-Length, Authorization, Set-Cookie")
-			c.Header("Access-Control-Allow-Credentials", "true")
 			c.Header("Access-Control-Max-Age", "43200") // 12 hours
 			if c.Request.Method == "OPTIONS" {
 				c.AbortWithStatus(204)

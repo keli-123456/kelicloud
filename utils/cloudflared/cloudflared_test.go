@@ -1,21 +1,28 @@
-package cloudflared_test
+package cloudflared
 
 import (
-	"os"
+	"strings"
 	"testing"
-	"time"
-
-	"github.com/komari-monitor/komari/utils/cloudflared"
 )
 
-func TestRunCloudflared(t *testing.T) {
-	os.Setenv("KOMARI_CLOUDFLARED_TOKEN", "test-token")
+func TestRunCloudflaredRequiresToken(t *testing.T) {
+	t.Setenv("KOMARI_CLOUDFLARED_TOKEN", "")
 
-	err := cloudflared.RunCloudflared()
-	if err != nil {
-		t.Fatalf("RunCloudflared failed: %v", err)
+	err := RunCloudflared()
+	if err == nil {
+		t.Fatal("expected missing token error")
 	}
+	if !strings.Contains(err.Error(), "KOMARI_CLOUDFLARED_TOKEN") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
 
-	// 等待一段时间，确保子进程已启动
-	time.Sleep(2 * time.Second)
+func TestResolveCloudflaredBinarySupportsCurrentPlatform(t *testing.T) {
+	fileName, downloadURL, err := resolveCloudflaredBinary()
+	if err != nil {
+		t.Fatalf("expected current platform to be supported: %v", err)
+	}
+	if fileName == "" || downloadURL == "" {
+		t.Fatalf("expected non-empty binary spec, got file=%q url=%q", fileName, downloadURL)
+	}
 }

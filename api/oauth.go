@@ -20,7 +20,13 @@ func OAuth(c *gin.Context) {
 		return
 	}
 
-	authURL, state := oauth.CurrentProvider().GetAuthorizationURL(utils.GetCallbackURL(c))
+	provider := oauth.CurrentProvider()
+	if provider == nil {
+		c.JSON(503, gin.H{"status": "error", "error": "OAuth provider is not initialized"})
+		return
+	}
+
+	authURL, state := provider.GetAuthorizationURL(utils.GetCallbackURL(c))
 
 	c.SetCookie("oauth_state", state, 3600, "/", "", false, true)
 
@@ -29,13 +35,18 @@ func OAuth(c *gin.Context) {
 
 // /api/oauth_callback
 func OAuthCallback(c *gin.Context) {
+	provider := oauth.CurrentProvider()
+	if provider == nil {
+		c.JSON(503, gin.H{"status": "error", "error": "OAuth provider is not initialized"})
+		return
+	}
 
 	// 验证state防止CSRF攻击
 	state, _ := c.Cookie("oauth_state")
 	c.SetCookie("oauth_state", "", -1, "/", "", false, true)
 
 	// 获取当前OAuth提供商名称
-	providerName := oauth.CurrentProvider().GetName()
+	providerName := provider.GetName()
 
 	providersSkipStateCheck := []string{"qq"}
 	if slices.Contains(providersSkipStateCheck, providerName) {
@@ -59,14 +70,14 @@ func OAuthCallback(c *gin.Context) {
 			queries[key] = values[0]
 		}
 	}
-	oidcUser, err := oauth.CurrentProvider().OnCallback(c, state, queries, utils.GetCallbackURL(c))
+	oidcUser, err := provider.OnCallback(c, state, queries, utils.GetCallbackURL(c))
 	if err != nil {
 		c.JSON(500, gin.H{"status": "error", "error": "Failed to get user info: " + err.Error()})
 		return
 	}
 
 	// ID作为SSO ID
-	sso_id := fmt.Sprintf("%s_%s", oauth.CurrentProvider().GetName(), oidcUser.UserId)
+	sso_id := fmt.Sprintf("%s_%s", provider.GetName(), oidcUser.UserId)
 
 	// 如果cookie中有binding_external_account，说明是绑定外部账号
 	// 否则是登录

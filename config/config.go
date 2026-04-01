@@ -29,6 +29,10 @@ var (
 	}
 )
 
+func IsInitialized() bool {
+	return db != nil
+}
+
 func configKeyEquals(key string) clause.Expression {
 	return clause.Eq{Column: clause.Column{Name: "key"}, Value: key}
 }
