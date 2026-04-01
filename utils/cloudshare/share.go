@@ -25,6 +25,14 @@ const (
 	ResourceTypeInstance  = "instance"
 	ResourceTypeEC2       = "ec2"
 	ResourceTypeLightsail = "lightsail"
+
+	AccessPolicyPublic    = "public"
+	AccessPolicySingleUse = "single_use"
+
+	ShareStatusNotShared = "not_shared"
+	ShareStatusActive    = "active"
+	ShareStatusExpired   = "expired"
+	ShareStatusConsumed  = "consumed"
 )
 
 var (
@@ -33,6 +41,9 @@ var (
 	ErrInstanceNotFound      = errors.New("cloud instance not found")
 	ErrCredentialNotFound    = errors.New("cloud credential not found")
 	ErrProviderNotConfigured = errors.New("cloud provider is not configured")
+	ErrInvalidAccessPolicy   = errors.New("invalid cloud share access policy")
+	ErrShareExpired          = errors.New("cloud share has expired")
+	ErrShareConsumed         = errors.New("cloud share has already been used")
 )
 
 type AdminResourceState struct {
@@ -57,6 +68,14 @@ type AdminShareView struct {
 	Region                string `json:"region,omitempty"`
 	Title                 string `json:"title,omitempty"`
 	Note                  string `json:"note,omitempty"`
+	AccessPolicy          string `json:"access_policy"`
+	Status                string `json:"status"`
+	ExpiresAt             string `json:"expires_at,omitempty"`
+	LastAccessedAt        string `json:"last_accessed_at,omitempty"`
+	ConsumedAt            string `json:"consumed_at,omitempty"`
+	AccessCount           int    `json:"access_count"`
+	IsExpired             bool   `json:"is_expired"`
+	IsConsumed            bool   `json:"is_consumed"`
 	SharePassword         bool   `json:"share_password"`
 	ShareManagedSSHKey    bool   `json:"share_managed_ssh_key"`
 	CanSharePassword      bool   `json:"can_share_password"`
@@ -89,6 +108,8 @@ type PublicShareView struct {
 	Region             string                                  `json:"region,omitempty"`
 	Title              string                                  `json:"title,omitempty"`
 	Note               string                                  `json:"note,omitempty"`
+	AccessPolicy       string                                  `json:"access_policy"`
+	ExpiresAt          string                                  `json:"expires_at,omitempty"`
 	SharePassword      bool                                    `json:"share_password"`
 	ShareManagedSSHKey bool                                    `json:"share_managed_ssh_key"`
 	CreatedAt          string                                  `json:"created_at,omitempty"`
@@ -137,8 +158,66 @@ func NormalizeReference(provider, resourceType, resourceID string) (string, stri
 	return provider, resourceType, resourceID, nil
 }
 
+func NormalizeAccessPolicy(policy string) (string, error) {
+	policy = strings.ToLower(strings.TrimSpace(policy))
+	if policy == "" {
+		return AccessPolicyPublic, nil
+	}
+
+	switch policy {
+	case AccessPolicyPublic, AccessPolicySingleUse:
+		return policy, nil
+	default:
+		return "", ErrInvalidAccessPolicy
+	}
+}
+
+func IsExpired(share *models.CloudInstanceShare, now time.Time) bool {
+	if share == nil || share.ExpiresAt == nil {
+		return false
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	return !share.ExpiresAt.After(now.UTC())
+}
+
+func IsConsumed(share *models.CloudInstanceShare) bool {
+	return share != nil && share.ConsumedAt != nil && !share.ConsumedAt.IsZero()
+}
+
+func ShareStatus(share *models.CloudInstanceShare, now time.Time) string {
+	if share == nil || strings.TrimSpace(share.ShareToken) == "" {
+		return ShareStatusNotShared
+	}
+	if IsConsumed(share) {
+		return ShareStatusConsumed
+	}
+	if IsExpired(share, now) {
+		return ShareStatusExpired
+	}
+	return ShareStatusActive
+}
+
+func ValidatePublicAccess(share *models.CloudInstanceShare, now time.Time) error {
+	if share == nil {
+		return ErrInstanceNotFound
+	}
+	if IsConsumed(share) {
+		return ErrShareConsumed
+	}
+	if IsExpired(share, now) {
+		return ErrShareExpired
+	}
+	return nil
+}
+
 func BuildAdminShareView(share *models.CloudInstanceShare, state *AdminResourceState) *AdminShareView {
-	view := &AdminShareView{}
+	now := time.Now().UTC()
+	view := &AdminShareView{
+		AccessPolicy: AccessPolicyPublic,
+		Status:       ShareStatusNotShared,
+	}
 	if state != nil {
 		view.Provider = state.Provider
 		view.ResourceType = state.ResourceType
@@ -153,6 +232,10 @@ func BuildAdminShareView(share *models.CloudInstanceShare, state *AdminResourceS
 		return view
 	}
 
+	accessPolicy, err := NormalizeAccessPolicy(share.AccessPolicy)
+	if err != nil {
+		accessPolicy = AccessPolicyPublic
+	}
 	view.Token = strings.TrimSpace(share.ShareToken)
 	if view.Provider == "" {
 		view.Provider = strings.TrimSpace(share.Provider)
@@ -171,6 +254,14 @@ func BuildAdminShareView(share *models.CloudInstanceShare, state *AdminResourceS
 	}
 	view.Title = strings.TrimSpace(share.Title)
 	view.Note = strings.TrimSpace(share.Note)
+	view.AccessPolicy = accessPolicy
+	view.Status = ShareStatus(share, now)
+	view.ExpiresAt = formatOptionalTime(share.ExpiresAt)
+	view.LastAccessedAt = formatOptionalTime(share.LastAccessedAt)
+	view.ConsumedAt = formatOptionalTime(share.ConsumedAt)
+	view.AccessCount = share.AccessCount
+	view.IsExpired = IsExpired(share, now)
+	view.IsConsumed = IsConsumed(share)
 	view.SharePassword = share.SharePassword
 	view.ShareManagedSSHKey = share.ShareManagedSSHKey
 	view.CreatedAt = formatTime(share.CreatedAt)
@@ -203,25 +294,44 @@ func ResolvePublicShare(share *models.CloudInstanceShare) (*PublicShareView, err
 	if share == nil {
 		return nil, ErrInstanceNotFound
 	}
+	if err := ValidatePublicAccess(share, time.Now().UTC()); err != nil {
+		return nil, err
+	}
 
 	provider, resourceType, resourceID, err := NormalizeReference(share.Provider, share.ResourceType, share.ResourceID)
 	if err != nil {
 		return nil, err
 	}
 
+	var view *PublicShareView
 	switch provider {
 	case ProviderDigitalOcean:
-		return resolvePublicDigitalOceanShare(share, resourceID)
+		view, err = resolvePublicDigitalOceanShare(share, resourceID)
 	case ProviderLinode:
-		return resolvePublicLinodeShare(share, resourceID)
+		view, err = resolvePublicLinodeShare(share, resourceID)
 	case ProviderAWS:
 		if resourceType == ResourceTypeEC2 {
-			return resolvePublicAWSEC2Share(share, resourceID)
+			view, err = resolvePublicAWSEC2Share(share, resourceID)
+		} else {
+			view, err = resolvePublicAWSLightsailShare(share, resourceID)
 		}
-		return resolvePublicAWSLightsailShare(share, resourceID)
 	default:
 		return nil, ErrInvalidReference
 	}
+	if err != nil {
+		return nil, err
+	}
+
+	consume := normalizedAccessPolicy(share) == AccessPolicySingleUse
+	recorded, err := database.RecordCloudInstanceShareAccess(share, consume, time.Now().UTC())
+	if err != nil {
+		return nil, err
+	}
+	if consume && !recorded {
+		return nil, ErrShareConsumed
+	}
+
+	return view, nil
 }
 
 func resolveDigitalOceanActiveResource(userID, resourceID string) (*AdminResourceState, error) {
@@ -407,6 +517,8 @@ func resolvePublicDigitalOceanShare(share *models.CloudInstanceShare, resourceID
 		CredentialName:     token.Name,
 		Title:              strings.TrimSpace(share.Title),
 		Note:               strings.TrimSpace(share.Note),
+		AccessPolicy:       normalizedAccessPolicy(share),
+		ExpiresAt:          formatOptionalTime(share.ExpiresAt),
 		SharePassword:      share.SharePassword,
 		ShareManagedSSHKey: share.ShareManagedSSHKey,
 		CreatedAt:          formatTime(share.CreatedAt),
@@ -490,6 +602,8 @@ func resolvePublicLinodeShare(share *models.CloudInstanceShare, resourceID strin
 		CredentialName:     token.Name,
 		Title:              strings.TrimSpace(share.Title),
 		Note:               strings.TrimSpace(share.Note),
+		AccessPolicy:       normalizedAccessPolicy(share),
+		ExpiresAt:          formatOptionalTime(share.ExpiresAt),
 		SharePassword:      share.SharePassword,
 		ShareManagedSSHKey: false,
 		CreatedAt:          formatTime(share.CreatedAt),
@@ -552,6 +666,8 @@ func resolvePublicAWSEC2Share(share *models.CloudInstanceShare, resourceID strin
 		Region:             region,
 		Title:              strings.TrimSpace(share.Title),
 		Note:               strings.TrimSpace(share.Note),
+		AccessPolicy:       normalizedAccessPolicy(share),
+		ExpiresAt:          formatOptionalTime(share.ExpiresAt),
 		SharePassword:      false,
 		ShareManagedSSHKey: false,
 		CreatedAt:          formatTime(share.CreatedAt),
@@ -596,6 +712,8 @@ func resolvePublicAWSLightsailShare(share *models.CloudInstanceShare, resourceID
 		Region:             region,
 		Title:              strings.TrimSpace(share.Title),
 		Note:               strings.TrimSpace(share.Note),
+		AccessPolicy:       normalizedAccessPolicy(share),
+		ExpiresAt:          formatOptionalTime(share.ExpiresAt),
 		SharePassword:      false,
 		ShareManagedSSHKey: false,
 		CreatedAt:          formatTime(share.CreatedAt),
@@ -694,6 +812,24 @@ func formatTime(value time.Time) string {
 		return ""
 	}
 	return value.UTC().Format(time.RFC3339)
+}
+
+func formatOptionalTime(value *time.Time) string {
+	if value == nil {
+		return ""
+	}
+	return formatTime(value.UTC())
+}
+
+func normalizedAccessPolicy(share *models.CloudInstanceShare) string {
+	if share == nil {
+		return AccessPolicyPublic
+	}
+	policy, err := NormalizeAccessPolicy(share.AccessPolicy)
+	if err != nil {
+		return AccessPolicyPublic
+	}
+	return policy
 }
 
 func firstNonEmpty(values ...string) string {

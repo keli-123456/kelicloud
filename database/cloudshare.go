@@ -3,6 +3,7 @@ package database
 import (
 	"errors"
 	"strings"
+	"time"
 
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
@@ -73,6 +74,27 @@ func saveCloudInstanceShareWithDB(db *gorm.DB, share *models.CloudInstanceShare)
 	share.Provider = strings.TrimSpace(share.Provider)
 	share.ResourceType = strings.TrimSpace(share.ResourceType)
 	share.ResourceID = strings.TrimSpace(share.ResourceID)
+	share.ResourceName = strings.TrimSpace(share.ResourceName)
+	share.CredentialID = strings.TrimSpace(share.CredentialID)
+	share.Region = strings.TrimSpace(share.Region)
+	share.Title = strings.TrimSpace(share.Title)
+	share.Note = strings.TrimSpace(share.Note)
+	share.AccessPolicy = strings.TrimSpace(share.AccessPolicy)
+	if share.AccessPolicy == "" {
+		share.AccessPolicy = "public"
+	}
+	if share.AccessCount < 0 {
+		share.AccessCount = 0
+	}
+	if share.ExpiresAt != nil && share.ExpiresAt.IsZero() {
+		share.ExpiresAt = nil
+	}
+	if share.LastAccessedAt != nil && share.LastAccessedAt.IsZero() {
+		share.LastAccessedAt = nil
+	}
+	if share.ConsumedAt != nil && share.ConsumedAt.IsZero() {
+		share.ConsumedAt = nil
+	}
 	return db.Save(share).Error
 }
 
@@ -84,4 +106,46 @@ func SaveCloudInstanceShareForUser(share *models.CloudInstanceShare) error {
 func DeleteCloudInstanceShare(share *models.CloudInstanceShare) error {
 	db := dbcore.GetDBInstance()
 	return db.Delete(share).Error
+}
+
+func RecordCloudInstanceShareAccess(share *models.CloudInstanceShare, consume bool, accessedAt time.Time) (bool, error) {
+	db := dbcore.GetDBInstance()
+	return recordCloudInstanceShareAccessWithDB(db, share, consume, accessedAt)
+}
+
+func recordCloudInstanceShareAccessWithDB(db *gorm.DB, share *models.CloudInstanceShare, consume bool, accessedAt time.Time) (bool, error) {
+	if share == nil {
+		return false, nil
+	}
+	if accessedAt.IsZero() {
+		accessedAt = time.Now().UTC()
+	} else {
+		accessedAt = accessedAt.UTC()
+	}
+
+	updates := map[string]interface{}{
+		"last_accessed_at": accessedAt,
+		"access_count":     gorm.Expr("access_count + ?", 1),
+	}
+	query := db.Model(&models.CloudInstanceShare{})
+	query = query.Where("id = ?", share.ID)
+	if consume {
+		query = query.Where("consumed_at IS NULL")
+		updates["consumed_at"] = accessedAt
+	}
+
+	result := query.Updates(updates)
+	if result.Error != nil {
+		return false, result.Error
+	}
+	if result.RowsAffected == 0 {
+		return false, nil
+	}
+
+	share.LastAccessedAt = &accessedAt
+	if consume {
+		share.ConsumedAt = &accessedAt
+	}
+	share.AccessCount++
+	return true, nil
 }

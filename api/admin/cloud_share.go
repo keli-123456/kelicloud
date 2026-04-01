@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -16,10 +17,12 @@ import (
 )
 
 type upsertCloudInstanceSharePayload struct {
-	Title              string `json:"title"`
-	Note               string `json:"note"`
-	SharePassword      bool   `json:"share_password"`
-	ShareManagedSSHKey bool   `json:"share_managed_ssh_key"`
+	Title              string     `json:"title"`
+	Note               string     `json:"note"`
+	AccessPolicy       string     `json:"access_policy"`
+	ExpiresAt          *time.Time `json:"expires_at"`
+	SharePassword      bool       `json:"share_password"`
+	ShareManagedSSHKey bool       `json:"share_managed_ssh_key"`
 }
 
 func GetCloudInstanceShare(c *gin.Context) {
@@ -99,6 +102,20 @@ func UpsertCloudInstanceShare(c *gin.Context) {
 		api.RespondError(c, http.StatusBadRequest, "This instance does not have a managed SSH key to share")
 		return
 	}
+	accessPolicy, err := cloudshare.NormalizeAccessPolicy(payload.AccessPolicy)
+	if err != nil {
+		api.RespondError(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	now := time.Now().UTC()
+	if payload.ExpiresAt != nil {
+		expiresAt := payload.ExpiresAt.UTC()
+		if !expiresAt.After(now) {
+			api.RespondError(c, http.StatusBadRequest, "Cloud share expiration must be in the future")
+			return
+		}
+		payload.ExpiresAt = &expiresAt
+	}
 
 	share, err := getCloudInstanceShareForScope(scope, provider, resourceType, resourceID)
 	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
@@ -108,11 +125,16 @@ func UpsertCloudInstanceShare(c *gin.Context) {
 	if errors.Is(err, gorm.ErrRecordNotFound) || share == nil {
 		share = &models.CloudInstanceShare{
 			UserID:       scope.UserUUID,
-			ShareToken:   uuid.NewString(),
 			Provider:     provider,
 			ResourceType: resourceType,
 			ResourceID:   resourceID,
 		}
+	}
+	if strings.TrimSpace(share.ShareToken) == "" || cloudshare.IsConsumed(share) || cloudshare.IsExpired(share, now) {
+		share.ShareToken = uuid.NewString()
+		share.ConsumedAt = nil
+		share.LastAccessedAt = nil
+		share.AccessCount = 0
 	}
 
 	share.UserID = scope.UserUUID
@@ -124,6 +146,8 @@ func UpsertCloudInstanceShare(c *gin.Context) {
 	share.Region = strings.TrimSpace(state.Region)
 	share.Title = strings.TrimSpace(payload.Title)
 	share.Note = strings.TrimSpace(payload.Note)
+	share.AccessPolicy = accessPolicy
+	share.ExpiresAt = payload.ExpiresAt
 	share.SharePassword = payload.SharePassword
 	share.ShareManagedSSHKey = payload.ShareManagedSSHKey
 
@@ -176,7 +200,7 @@ func DeleteCloudInstanceShare(c *gin.Context) {
 
 func respondCloudShareError(c *gin.Context, err error) {
 	switch {
-	case errors.Is(err, cloudshare.ErrInvalidReference), errors.Is(err, cloudshare.ErrUnsupportedCapability):
+	case errors.Is(err, cloudshare.ErrInvalidReference), errors.Is(err, cloudshare.ErrUnsupportedCapability), errors.Is(err, cloudshare.ErrInvalidAccessPolicy):
 		api.RespondError(c, http.StatusBadRequest, err.Error())
 	case errors.Is(err, cloudshare.ErrInstanceNotFound), errors.Is(err, cloudshare.ErrCredentialNotFound):
 		api.RespondError(c, http.StatusNotFound, err.Error())

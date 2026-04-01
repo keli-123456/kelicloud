@@ -33,6 +33,8 @@ func GetPublicCloudInstanceShare(c *gin.Context) {
 		switch {
 		case errors.Is(err, cloudshare.ErrInvalidReference):
 			RespondError(c, http.StatusBadRequest, err.Error())
+		case errors.Is(err, cloudshare.ErrShareExpired), errors.Is(err, cloudshare.ErrShareConsumed):
+			RespondError(c, http.StatusGone, err.Error())
 		case errors.Is(err, cloudshare.ErrInstanceNotFound), errors.Is(err, cloudshare.ErrCredentialNotFound):
 			RespondError(c, http.StatusNotFound, err.Error())
 		default:
