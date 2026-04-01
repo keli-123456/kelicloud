@@ -453,6 +453,7 @@ func RunServer() {
 			failoverGroup.GET("/dns/catalog", admin.GetFailoverDNSCatalog)
 			failoverGroup.GET("/plans/catalog", admin.GetFailoverPlanCatalog)
 			failoverGroup.POST("/tasks", admin.CreateFailoverTask)
+			failoverGroup.POST("/tasks/preview", admin.PreviewFailoverTask)
 			failoverGroup.GET("/tasks/:id", admin.GetFailoverTask)
 			failoverGroup.POST("/tasks/:id", admin.UpdateFailoverTask)
 			failoverGroup.POST("/tasks/:id/toggle", admin.ToggleFailoverTask)

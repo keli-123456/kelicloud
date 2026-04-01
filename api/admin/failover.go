@@ -1315,6 +1315,33 @@ func CreateFailoverTask(c *gin.Context) {
 	api.RespondSuccess(c, buildFailoverTaskView(created, nil, failoverProbeView{Status: "unavailable", Stale: true}, time.Now()))
 }
 
+func PreviewFailoverTask(c *gin.Context) {
+	scope, ok := requireCurrentOwnerScope(c)
+	if !ok {
+		return
+	}
+
+	var req failoverTaskRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		api.RespondError(c, http.StatusBadRequest, "Invalid failover request: "+err.Error())
+		return
+	}
+
+	task, plans, err := validateFailoverTaskRequest(scope, &req)
+	if err != nil {
+		api.RespondError(c, http.StatusBadRequest, "Invalid failover request: "+err.Error())
+		return
+	}
+
+	preview, err := failoversvc.PreviewTask(scope.UserUUID, *task, plans)
+	if err != nil {
+		api.RespondError(c, http.StatusBadRequest, "Failed to preview failover task: "+err.Error())
+		return
+	}
+
+	api.RespondSuccess(c, preview)
+}
+
 func GetFailoverTask(c *gin.Context) {
 	scope, ok := requireCurrentOwnerScope(c)
 	if !ok {
