@@ -462,6 +462,8 @@ func RunServer() {
 			failoverGroup.GET("/tasks/:id/executions", admin.GetFailoverExecutions)
 			failoverGroup.GET("/executions/:id", admin.GetFailoverExecution)
 			failoverGroup.POST("/executions/:id/stop", admin.StopFailoverExecution)
+			failoverGroup.POST("/executions/:id/retry-dns", admin.RetryFailoverExecutionDNS)
+			failoverGroup.POST("/executions/:id/retry-cleanup", admin.RetryFailoverExecutionCleanup)
 		}
 
 	}

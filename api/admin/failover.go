@@ -1521,6 +1521,54 @@ func StopFailoverExecution(c *gin.Context) {
 	api.RespondSuccess(c, buildFailoverExecutionView(execution, true))
 }
 
+func RetryFailoverExecutionDNS(c *gin.Context) {
+	scope, ok := requireCurrentOwnerScope(c)
+	if !ok {
+		return
+	}
+
+	executionID, ok := parseFailoverExecutionID(c)
+	if !ok {
+		return
+	}
+
+	execution, err := failoversvc.RetryDNSForUser(scope.UserUUID, executionID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			api.RespondError(c, http.StatusNotFound, "Failover execution not found")
+			return
+		}
+		api.RespondError(c, http.StatusBadRequest, "Failed to retry failover DNS: "+err.Error())
+		return
+	}
+
+	api.RespondSuccess(c, buildFailoverExecutionView(execution, true))
+}
+
+func RetryFailoverExecutionCleanup(c *gin.Context) {
+	scope, ok := requireCurrentOwnerScope(c)
+	if !ok {
+		return
+	}
+
+	executionID, ok := parseFailoverExecutionID(c)
+	if !ok {
+		return
+	}
+
+	execution, err := failoversvc.RetryCleanupForUser(scope.UserUUID, executionID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			api.RespondError(c, http.StatusNotFound, "Failover execution not found")
+			return
+		}
+		api.RespondError(c, http.StatusBadRequest, "Failed to retry failover cleanup: "+err.Error())
+		return
+	}
+
+	api.RespondSuccess(c, buildFailoverExecutionView(execution, true))
+}
+
 func GetFailoverExecutions(c *gin.Context) {
 	scope, ok := requireCurrentOwnerScope(c)
 	if !ok {
