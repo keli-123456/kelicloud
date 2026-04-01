@@ -859,9 +859,9 @@ func applyAliyunDNSRecord(ctx context.Context, userUUID, entryID, payloadJSON, i
 		return nil, errors.New("aliyun domain_name is required")
 	}
 
-	rr := strings.TrimSpace(payload.RR)
-	if rr == "" {
-		rr = "@"
+	rr, err := validateAliyunRR(domainName, payload.RR)
+	if err != nil {
+		return nil, err
 	}
 	ttl := payload.TTL
 	if ttl <= 0 {
@@ -1112,9 +1112,9 @@ func evaluateAliyunDNSVerification(ctx context.Context, userUUID, entryID, paylo
 		return nil, errors.New("aliyun domain_name is required")
 	}
 
-	rr := strings.TrimSpace(payload.RR)
-	if rr == "" {
-		rr = "@"
+	rr, err := validateAliyunRR(domainName, payload.RR)
+	if err != nil {
+		return nil, err
 	}
 	lines := normalizeAliyunLines(payload.Line, payload.Lines)
 	client := newAliyunDNSClient(configValue.AccessKeyID, configValue.AccessKeySecret, configValue.RegionID)
@@ -1186,6 +1186,41 @@ func normalizeAliyunLines(primary string, values []string) []string {
 		normalized = append(normalized, "default")
 	}
 	return normalized
+}
+
+func normalizeAliyunRR(domainName, rr string) string {
+	normalizedDomain := strings.Trim(strings.TrimSpace(domainName), ".")
+	normalizedRR := strings.Trim(strings.TrimSpace(rr), ".")
+	if normalizedRR == "" || normalizedRR == "@" {
+		return "@"
+	}
+	if normalizedDomain == "" {
+		return normalizedRR
+	}
+	if strings.EqualFold(normalizedRR, normalizedDomain) {
+		return "@"
+	}
+	if len(normalizedRR) > len(normalizedDomain)+1 && normalizedRR[len(normalizedRR)-len(normalizedDomain)-1] == '.' && strings.EqualFold(normalizedRR[len(normalizedRR)-len(normalizedDomain):], normalizedDomain) {
+		normalizedRR = strings.TrimSpace(normalizedRR[:len(normalizedRR)-len(normalizedDomain)-1])
+		if normalizedRR == "" || normalizedRR == "@" {
+			return "@"
+		}
+	}
+	return normalizedRR
+}
+
+func validateAliyunRR(domainName, rr string) (string, error) {
+	normalizedRR := normalizeAliyunRR(domainName, rr)
+	if strings.Contains(normalizedRR, "://") {
+		return "", errors.New("aliyun rr must be a host record like @, www, or api; do not enter a URL")
+	}
+	if strings.ContainsAny(normalizedRR, "/\\ \t\r\n") {
+		return "", errors.New("aliyun rr must be a host record like @, www, or api; do not include spaces or path separators")
+	}
+	if strings.HasPrefix(normalizedRR, ".") || strings.HasSuffix(normalizedRR, ".") || strings.Contains(normalizedRR, "..") {
+		return "", errors.New("aliyun rr is invalid; use only the host record such as @, www, or api")
+	}
+	return normalizedRR, nil
 }
 
 func canonicalAliyunLineValue(value string) string {

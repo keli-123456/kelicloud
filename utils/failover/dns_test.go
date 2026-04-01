@@ -84,6 +84,27 @@ func TestNormalizeAliyunLinesCanonicalizesKnownLabels(t *testing.T) {
 	}
 }
 
+func TestNormalizeAliyunRR(t *testing.T) {
+	if got := normalizeAliyunRR("example.com", ""); got != "@" {
+		t.Fatalf("expected apex rr, got %q", got)
+	}
+	if got := normalizeAliyunRR("example.com", "example.com"); got != "@" {
+		t.Fatalf("expected apex rr, got %q", got)
+	}
+	if got := normalizeAliyunRR("example.com", "www.example.com"); got != "www" {
+		t.Fatalf("expected host rr, got %q", got)
+	}
+	if got := normalizeAliyunRR("example.com", "api.internal"); got != "api.internal" {
+		t.Fatalf("expected relative rr to stay unchanged, got %q", got)
+	}
+}
+
+func TestValidateAliyunRRRejectsURLs(t *testing.T) {
+	if _, err := validateAliyunRR("example.com", "https://example.com"); err == nil {
+		t.Fatal("expected url rr to be rejected")
+	}
+}
+
 func TestEvaluateDNSVerificationRecordsDetectsUnexpectedPrunedRecord(t *testing.T) {
 	proxied := false
 	result := evaluateDNSVerificationRecords(cloudflareProviderName, []dnsUpdateResult{

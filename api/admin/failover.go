@@ -818,6 +818,41 @@ type failoverAliyunDNSPayload struct {
 	Lines      []string `json:"lines,omitempty"`
 }
 
+func normalizeAliyunRRInput(domainName, rr string) string {
+	normalizedDomain := strings.Trim(strings.TrimSpace(domainName), ".")
+	normalizedRR := strings.Trim(strings.TrimSpace(rr), ".")
+	if normalizedRR == "" || normalizedRR == "@" {
+		return "@"
+	}
+	if normalizedDomain == "" {
+		return normalizedRR
+	}
+	if strings.EqualFold(normalizedRR, normalizedDomain) {
+		return "@"
+	}
+	if len(normalizedRR) > len(normalizedDomain)+1 && normalizedRR[len(normalizedRR)-len(normalizedDomain)-1] == '.' && strings.EqualFold(normalizedRR[len(normalizedRR)-len(normalizedDomain):], normalizedDomain) {
+		normalizedRR = strings.TrimSpace(normalizedRR[:len(normalizedRR)-len(normalizedDomain)-1])
+		if normalizedRR == "" || normalizedRR == "@" {
+			return "@"
+		}
+	}
+	return normalizedRR
+}
+
+func validateAliyunRRInput(domainName, rr string) error {
+	normalizedRR := normalizeAliyunRRInput(domainName, rr)
+	if strings.Contains(normalizedRR, "://") {
+		return fmt.Errorf("aliyun rr must be a host record like @, www, or api; do not enter a URL")
+	}
+	if strings.ContainsAny(normalizedRR, "/\\ \t\r\n") {
+		return fmt.Errorf("aliyun rr must be a host record like @, www, or api; do not include spaces or path separators")
+	}
+	if strings.HasPrefix(normalizedRR, ".") || strings.HasSuffix(normalizedRR, ".") || strings.Contains(normalizedRR, "..") {
+		return fmt.Errorf("aliyun rr is invalid; use only the host record such as @, www, or api")
+	}
+	return nil
+}
+
 func trimEntryValue(values map[string]interface{}, key string) string {
 	if len(values) == 0 {
 		return ""
@@ -892,6 +927,9 @@ func validateFailoverDNSPayload(scope ownerScope, providerName, entryID, payload
 		domainName := firstNonEmpty(strings.TrimSpace(payload.DomainName), trimEntryValue(entry.Values, "domain_name"))
 		if domainName == "" {
 			return fmt.Errorf("aliyun domain_name is required")
+		}
+		if err := validateAliyunRRInput(domainName, payload.RR); err != nil {
+			return err
 		}
 		for _, line := range payload.Lines {
 			if strings.TrimSpace(line) == "" {
