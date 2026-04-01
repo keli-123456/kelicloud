@@ -474,6 +474,47 @@ func TestResolveCurrentInstanceCleanupFromRefTreatsMissingDigitalOceanTokenAsMan
 	}
 }
 
+func TestResolveCurrentInstanceCleanupByRefAddressTreatsMissingDigitalOceanTokenAsManualReview(t *testing.T) {
+	configureRunnerSQLiteDB(t)
+
+	if err := database.SaveCloudProviderConfigForUser(&models.CloudProvider{
+		UserID: "user-stale-address",
+		Name:   "digitalocean",
+		Addition: `{
+			"active_token_id":"token-live",
+			"tokens":[
+				{"id":"token-live","name":"Token Live","token":"dop_v1_live"}
+			]
+		}`,
+	}); err != nil {
+		t.Fatalf("failed to seed digitalocean provider config: %v", err)
+	}
+
+	cleanup, err := resolveCurrentInstanceCleanupByRefAddress(context.Background(), "user-stale-address", map[string]interface{}{
+		"provider":            "digitalocean",
+		"provider_entry_id":   "token-deleted",
+		"provider_entry_name": "Token 1",
+	}, "203.0.113.10")
+	if err != nil {
+		t.Fatalf("expected missing provider entry to be tolerated, got %v", err)
+	}
+	if cleanup == nil {
+		t.Fatal("expected cleanup metadata to be returned")
+	}
+	if cleanup.Cleanup != nil {
+		t.Fatal("expected no cleanup callback when provider entry is missing")
+	}
+	if cleanup.Assessment == nil {
+		t.Fatal("expected cleanup assessment for missing provider entry")
+	}
+	if got := stringMapValue(cleanup.Assessment.Result, "classification"); got != cleanupClassificationProviderEntryMissing {
+		t.Fatalf("expected classification %q, got %q", cleanupClassificationProviderEntryMissing, got)
+	}
+	if cleanup.Label != "delete digitalocean instance at 203.0.113.10" {
+		t.Fatalf("unexpected cleanup label %q", cleanup.Label)
+	}
+}
+
 func TestBuildProviderEntryQueryCleanupAssessmentMarksAuthInvalidAsWarning(t *testing.T) {
 	assessment := buildProviderEntryQueryCleanupAssessment(
 		"digitalocean",
@@ -502,5 +543,35 @@ func TestBuildProviderEntryQueryCleanupAssessmentMarksAuthInvalidAsWarning(t *te
 	}
 	if got := stringMapValue(assessment.Result, "provider_failure_class"); got != "auth_invalid" {
 		t.Fatalf("expected provider failure class auth_invalid, got %q", got)
+	}
+}
+
+func TestBuildUnresolvedCurrentInstanceCleanupAssessmentMarksManualReview(t *testing.T) {
+	assessment := buildUnresolvedCurrentInstanceCleanupAssessment(map[string]interface{}{
+		"provider":            "digitalocean",
+		"provider_entry_id":   "entry-1",
+		"provider_entry_name": "Token 1",
+		"droplet_id":          101,
+	}, "203.0.113.10")
+	if assessment == nil {
+		t.Fatal("expected cleanup assessment")
+	}
+	if assessment.Status != models.FailoverCleanupStatusWarning {
+		t.Fatalf("expected warning cleanup status, got %q", assessment.Status)
+	}
+	if assessment.StepStatus != models.FailoverStepStatusSkipped {
+		t.Fatalf("expected skipped step status, got %q", assessment.StepStatus)
+	}
+	if assessment.StepMessage != cleanupStepMessageCleanupStatusUnknown {
+		t.Fatalf("unexpected step message %q", assessment.StepMessage)
+	}
+	if got := stringMapValue(assessment.Result, "classification"); got != cleanupClassificationCleanupStatusUnknown {
+		t.Fatalf("expected classification %q, got %q", cleanupClassificationCleanupStatusUnknown, got)
+	}
+	if got := stringMapValue(assessment.Result, "billing_risk"); got != "unknown" {
+		t.Fatalf("expected billing risk unknown, got %q", got)
+	}
+	if got := stringMapValue(assessment.Result, "current_address"); got != "203.0.113.10" {
+		t.Fatalf("expected current address 203.0.113.10, got %q", got)
 	}
 }

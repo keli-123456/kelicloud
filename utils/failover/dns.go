@@ -22,20 +22,47 @@ import (
 )
 
 type dnsUpdateResult struct {
-	Provider     string            `json:"provider"`
-	ID           string            `json:"id,omitempty"`
-	Name         string            `json:"name,omitempty"`
-	Type         string            `json:"type,omitempty"`
-	Value        string            `json:"value,omitempty"`
-	ZoneID       string            `json:"zone_id,omitempty"`
-	ZoneName     string            `json:"zone_name,omitempty"`
-	Domain       string            `json:"domain,omitempty"`
-	RR           string            `json:"rr,omitempty"`
-	Records      []dnsUpdateResult `json:"records,omitempty"`
-	SkippedTypes []string          `json:"skipped_types,omitempty"`
+	Provider     string                 `json:"provider"`
+	ID           string                 `json:"id,omitempty"`
+	Name         string                 `json:"name,omitempty"`
+	Type         string                 `json:"type,omitempty"`
+	Value        string                 `json:"value,omitempty"`
+	ZoneID       string                 `json:"zone_id,omitempty"`
+	ZoneName     string                 `json:"zone_name,omitempty"`
+	Domain       string                 `json:"domain,omitempty"`
+	RR           string                 `json:"rr,omitempty"`
+	Line         string                 `json:"line,omitempty"`
+	Proxied      *bool                  `json:"proxied,omitempty"`
+	Records      []dnsUpdateResult      `json:"records,omitempty"`
+	SkippedTypes []string               `json:"skipped_types,omitempty"`
+	PrunedTypes  []string               `json:"pruned_types,omitempty"`
+	Removed      []dnsUpdateResult      `json:"removed_records,omitempty"`
+	Verification *dnsVerificationResult `json:"verification,omitempty"`
 }
 
 type DNSUpdateResult = dnsUpdateResult
+
+type dnsVerificationResult struct {
+	Provider   string            `json:"provider,omitempty"`
+	Success    bool              `json:"success"`
+	Attempts   int               `json:"attempts,omitempty"`
+	Expected   []dnsUpdateResult `json:"expected_records,omitempty"`
+	Observed   []dnsUpdateResult `json:"observed_records,omitempty"`
+	Missing    []dnsUpdateResult `json:"missing_records,omitempty"`
+	Unexpected []dnsUpdateResult `json:"unexpected_records,omitempty"`
+}
+
+type dnsVerificationError struct {
+	Result  *dnsVerificationResult
+	Message string
+}
+
+func (e *dnsVerificationError) Error() string {
+	if e == nil {
+		return ""
+	}
+	return strings.TrimSpace(e.Message)
+}
 
 type DNSCatalog struct {
 	Provider string             `json:"provider"`
@@ -214,9 +241,106 @@ func ApplyDNSRecord(userUUID, providerName, entryID, payloadJSON, ipv4, ipv6 str
 	return applyDNSRecord(context.Background(), userUUID, providerName, entryID, payloadJSON, ipv4, ipv6)
 }
 
+const (
+	dnsVerificationMaxAttempts = 3
+	dnsVerificationRetryDelay  = 2 * time.Second
+)
+
+func verifyDNSRecord(ctx context.Context, userUUID, providerName, entryID, payloadJSON, ipv4, ipv6 string) (*dnsVerificationResult, error) {
+	providerName = strings.ToLower(strings.TrimSpace(providerName))
+	var (
+		lastResult *dnsVerificationResult
+		lastErr    error
+	)
+
+	for attempt := 1; attempt <= dnsVerificationMaxAttempts; attempt++ {
+		var (
+			result *dnsVerificationResult
+			err    error
+		)
+		switch providerName {
+		case cloudflareProviderName:
+			result, err = evaluateCloudflareDNSVerification(ctx, userUUID, entryID, payloadJSON, ipv4, ipv6)
+		case aliyunProviderName:
+			result, err = evaluateAliyunDNSVerification(ctx, userUUID, entryID, payloadJSON, ipv4, ipv6)
+		default:
+			return nil, fmt.Errorf("unsupported dns provider: %s", providerName)
+		}
+
+		if result != nil {
+			result.Attempts = attempt
+			lastResult = result
+		}
+		if err == nil && result != nil && result.Success {
+			return result, nil
+		}
+		if err != nil {
+			lastErr = err
+		} else if result != nil {
+			lastErr = &dnsVerificationError{
+				Result:  result,
+				Message: buildDNSVerificationErrorMessage(result),
+			}
+		}
+		if attempt < dnsVerificationMaxAttempts {
+			if waitErr := waitContextOrDelay(ctx, dnsVerificationRetryDelay); waitErr != nil {
+				return lastResult, waitErr
+			}
+		}
+	}
+
+	if verifyErr, ok := lastErr.(*dnsVerificationError); ok {
+		verifyErr.Result = lastResult
+	}
+	return lastResult, lastErr
+}
+
+func buildDNSVerificationErrorMessage(result *dnsVerificationResult) string {
+	if result == nil {
+		return "dns verification failed"
+	}
+
+	parts := make([]string, 0, len(result.Missing)+len(result.Unexpected))
+	if len(result.Missing) > 0 {
+		parts = append(parts, "missing "+joinDNSRecordDescriptions(result.Missing))
+	}
+	if len(result.Unexpected) > 0 {
+		parts = append(parts, "unexpected "+joinDNSRecordDescriptions(result.Unexpected))
+	}
+	if len(parts) == 0 {
+		return "dns verification failed"
+	}
+	return "dns verification failed: " + strings.Join(parts, "; ")
+}
+
+func joinDNSRecordDescriptions(records []dnsUpdateResult) string {
+	if len(records) == 0 {
+		return ""
+	}
+	descriptions := make([]string, 0, len(records))
+	for _, record := range records {
+		description := strings.ToUpper(strings.TrimSpace(record.Type))
+		target := firstNonEmpty(strings.TrimSpace(record.Name), strings.TrimSpace(record.RR))
+		if target != "" {
+			description += " " + target
+		}
+		if line := strings.TrimSpace(record.Line); line != "" {
+			description += " [" + line + "]"
+		}
+		if value := strings.TrimSpace(record.Value); value != "" {
+			description += " -> " + value
+		}
+		if description != "" {
+			descriptions = append(descriptions, description)
+		}
+	}
+	return strings.Join(descriptions, ", ")
+}
+
 type dnsApplyPlan struct {
 	RecordTypes  []string
 	SkippedTypes []string
+	PrunedTypes  []string
 }
 
 func buildDNSApplyPlan(recordType string, syncIPv6 bool, ipv4, ipv6 string) (*dnsApplyPlan, error) {
@@ -224,21 +348,20 @@ func buildDNSApplyPlan(recordType string, syncIPv6 bool, ipv4, ipv6 string) (*dn
 	if normalized == "" {
 		normalized = "A"
 	}
+	counterpart := counterpartDNSRecordType(normalized)
 
 	if !syncIPv6 {
 		if _, err := selectRecordValue(normalized, ipv4, ipv6); err != nil {
 			return nil, err
 		}
-		return &dnsApplyPlan{RecordTypes: []string{normalized}}, nil
+		return &dnsApplyPlan{
+			RecordTypes: []string{normalized},
+			PrunedTypes: []string{counterpart},
+		}, nil
 	}
 
 	if _, err := selectRecordValue(normalized, ipv4, ipv6); err != nil {
 		return nil, err
-	}
-
-	counterpart := "AAAA"
-	if normalized == "AAAA" {
-		counterpart = "A"
 	}
 
 	plan := &dnsApplyPlan{
@@ -248,22 +371,148 @@ func buildDNSApplyPlan(recordType string, syncIPv6 bool, ipv4, ipv6 string) (*dn
 		plan.RecordTypes = append(plan.RecordTypes, counterpart)
 	} else {
 		plan.SkippedTypes = append(plan.SkippedTypes, counterpart)
+		plan.PrunedTypes = append(plan.PrunedTypes, counterpart)
 	}
 	return plan, nil
 }
 
-func summarizeDNSResults(results []dnsUpdateResult, skippedTypes []string) *dnsUpdateResult {
-	if len(results) == 0 {
+func counterpartDNSRecordType(recordType string) string {
+	if strings.EqualFold(strings.TrimSpace(recordType), "AAAA") {
+		return "A"
+	}
+	return "AAAA"
+}
+
+func summarizeDNSResults(results []dnsUpdateResult, skippedTypes, prunedTypes []string, removed []dnsUpdateResult) *dnsUpdateResult {
+	if len(results) == 0 && len(removed) == 0 {
 		return nil
 	}
-	if len(results) == 1 && len(skippedTypes) == 0 {
+	if len(results) == 1 && len(skippedTypes) == 0 && len(prunedTypes) == 0 && len(removed) == 0 {
 		result := results[0]
 		return &result
 	}
-	summary := results[0]
+	summary := dnsUpdateResult{}
+	if len(results) > 0 {
+		summary = results[0]
+	}
 	summary.Records = append([]dnsUpdateResult(nil), results...)
 	summary.SkippedTypes = append([]string(nil), skippedTypes...)
+	summary.PrunedTypes = append([]string(nil), prunedTypes...)
+	summary.Removed = append([]dnsUpdateResult(nil), removed...)
 	return &summary
+}
+
+func cloneDNSUpdateResults(records []dnsUpdateResult) []dnsUpdateResult {
+	if len(records) == 0 {
+		return nil
+	}
+	cloned := make([]dnsUpdateResult, len(records))
+	copy(cloned, records)
+	return cloned
+}
+
+func sortDNSUpdateResults(records []dnsUpdateResult) {
+	sort.Slice(records, func(i, j int) bool {
+		left := strings.Join([]string{
+			strings.ToLower(strings.TrimSpace(records[i].Name)),
+			strings.ToLower(strings.TrimSpace(records[i].Domain)),
+			strings.ToLower(strings.TrimSpace(records[i].RR)),
+			strings.ToLower(strings.TrimSpace(records[i].Type)),
+			strings.ToLower(strings.TrimSpace(records[i].Line)),
+			strings.TrimSpace(records[i].Value),
+			strings.TrimSpace(records[i].ID),
+		}, "|")
+		right := strings.Join([]string{
+			strings.ToLower(strings.TrimSpace(records[j].Name)),
+			strings.ToLower(strings.TrimSpace(records[j].Domain)),
+			strings.ToLower(strings.TrimSpace(records[j].RR)),
+			strings.ToLower(strings.TrimSpace(records[j].Type)),
+			strings.ToLower(strings.TrimSpace(records[j].Line)),
+			strings.TrimSpace(records[j].Value),
+			strings.TrimSpace(records[j].ID),
+		}, "|")
+		return left < right
+	})
+}
+
+func evaluateDNSVerificationRecords(provider string, expected, observed []dnsUpdateResult, match func(dnsUpdateResult, dnsUpdateResult) bool) *dnsVerificationResult {
+	expected = cloneDNSUpdateResults(expected)
+	observed = cloneDNSUpdateResults(observed)
+	sortDNSUpdateResults(expected)
+	sortDNSUpdateResults(observed)
+
+	matchedObserved := make([]bool, len(observed))
+	missing := make([]dnsUpdateResult, 0)
+	for _, expectedRecord := range expected {
+		found := false
+		for index, observedRecord := range observed {
+			if matchedObserved[index] {
+				continue
+			}
+			if !match(expectedRecord, observedRecord) {
+				continue
+			}
+			matchedObserved[index] = true
+			found = true
+			break
+		}
+		if !found {
+			missing = append(missing, expectedRecord)
+		}
+	}
+
+	unexpected := make([]dnsUpdateResult, 0)
+	for index, observedRecord := range observed {
+		if matchedObserved[index] {
+			continue
+		}
+		unexpected = append(unexpected, observedRecord)
+	}
+
+	return &dnsVerificationResult{
+		Provider:   strings.TrimSpace(provider),
+		Success:    len(missing) == 0 && len(unexpected) == 0,
+		Expected:   expected,
+		Observed:   observed,
+		Missing:    missing,
+		Unexpected: unexpected,
+	}
+}
+
+func cloudflareDNSRecordsMatch(expected, observed dnsUpdateResult) bool {
+	if !strings.EqualFold(strings.TrimSpace(expected.Name), strings.TrimSpace(observed.Name)) ||
+		!strings.EqualFold(strings.TrimSpace(expected.Type), strings.TrimSpace(observed.Type)) ||
+		strings.TrimSpace(expected.Value) != strings.TrimSpace(observed.Value) {
+		return false
+	}
+	if expected.Proxied != nil && observed.Proxied != nil && *expected.Proxied != *observed.Proxied {
+		return false
+	}
+	if expected.Proxied != nil && observed.Proxied == nil {
+		return false
+	}
+	return true
+}
+
+func aliyunDNSRecordsMatch(expected, observed dnsUpdateResult) bool {
+	return sameAliyunRecordRR(expected.RR, observed.RR) &&
+		strings.EqualFold(strings.TrimSpace(expected.Type), strings.TrimSpace(observed.Type)) &&
+		sameAliyunRecordLine(expected.Line, observed.Line) &&
+		strings.TrimSpace(expected.Value) == strings.TrimSpace(observed.Value)
+}
+
+func dnsRelevantRecordTypes(plan *dnsApplyPlan) map[string]struct{} {
+	relevant := make(map[string]struct{}, len(plan.RecordTypes)+len(plan.PrunedTypes))
+	if plan == nil {
+		return relevant
+	}
+	for _, recordType := range plan.RecordTypes {
+		relevant[strings.ToUpper(strings.TrimSpace(recordType))] = struct{}{}
+	}
+	for _, recordType := range plan.PrunedTypes {
+		relevant[strings.ToUpper(strings.TrimSpace(recordType))] = struct{}{}
+	}
+	return relevant
 }
 
 func loadCloudflareDNSCatalog(userUUID, entryID, zoneName string) (*DNSCatalog, error) {
@@ -493,10 +742,18 @@ func applyCloudflareDNSRecord(ctx context.Context, userUUID, entryID, payloadJSO
 		}
 	}
 
+	existingRecords, err := client.listRecords(contextOrBackground(ctx), zoneID)
+	if err != nil {
+		return nil, normalizeExecutionStopError(err)
+	}
+
 	results := make([]dnsUpdateResult, 0, len(plan.RecordTypes))
+	removed := make([]dnsUpdateResult, 0)
+	removedRecordIDs := map[string]struct{}{}
 	for _, currentRecordType := range plan.RecordTypes {
 		recordValue, _ := selectRecordValue(currentRecordType, ipv4, ipv6)
-		record, err := client.upsertRecord(contextOrBackground(ctx), zoneID, recordName, currentRecordType, recordValue, ttl, proxied)
+		existingMatches := filterCloudflareRecords(existingRecords, recordName, currentRecordType)
+		record, err := client.upsertRecord(contextOrBackground(ctx), zoneID, existingMatches, recordName, currentRecordType, recordValue, ttl, proxied)
 		if err != nil {
 			return nil, normalizeExecutionStopError(err)
 		}
@@ -509,8 +766,52 @@ func applyCloudflareDNSRecord(ctx context.Context, userUUID, entryID, payloadJSO
 			ZoneID:   zoneID,
 			ZoneName: zoneName,
 		})
+		for _, existingRecord := range existingMatches {
+			if strings.TrimSpace(existingRecord.ID) == "" || strings.TrimSpace(existingRecord.ID) == strings.TrimSpace(record.ID) {
+				continue
+			}
+			if _, ok := removedRecordIDs[strings.TrimSpace(existingRecord.ID)]; ok {
+				continue
+			}
+			if err := client.deleteRecord(contextOrBackground(ctx), zoneID, existingRecord.ID); err != nil {
+				return nil, normalizeExecutionStopError(err)
+			}
+			removedRecordIDs[strings.TrimSpace(existingRecord.ID)] = struct{}{}
+			removed = append(removed, dnsUpdateResult{
+				Provider: cloudflareProviderName,
+				ID:       existingRecord.ID,
+				Name:     existingRecord.Name,
+				Type:     existingRecord.Type,
+				Value:    existingRecord.Content,
+				ZoneID:   zoneID,
+				ZoneName: zoneName,
+			})
+		}
 	}
-	return summarizeDNSResults(results, plan.SkippedTypes), nil
+	for _, pruneType := range plan.PrunedTypes {
+		for _, existingRecord := range filterCloudflareRecords(existingRecords, recordName, pruneType) {
+			if strings.TrimSpace(existingRecord.ID) == "" {
+				continue
+			}
+			if _, ok := removedRecordIDs[strings.TrimSpace(existingRecord.ID)]; ok {
+				continue
+			}
+			if err := client.deleteRecord(contextOrBackground(ctx), zoneID, existingRecord.ID); err != nil {
+				return nil, normalizeExecutionStopError(err)
+			}
+			removedRecordIDs[strings.TrimSpace(existingRecord.ID)] = struct{}{}
+			removed = append(removed, dnsUpdateResult{
+				Provider: cloudflareProviderName,
+				ID:       existingRecord.ID,
+				Name:     existingRecord.Name,
+				Type:     existingRecord.Type,
+				Value:    existingRecord.Content,
+				ZoneID:   zoneID,
+				ZoneName: zoneName,
+			})
+		}
+	}
+	return summarizeDNSResults(results, plan.SkippedTypes, plan.PrunedTypes, removed), nil
 }
 
 func normalizeCloudflareRecordName(recordName, zoneName string) string {
@@ -568,16 +869,51 @@ func applyAliyunDNSRecord(ctx context.Context, userUUID, entryID, payloadJSON, i
 	}
 	client := newAliyunDNSClient(configValue.AccessKeyID, configValue.AccessKeySecret, configValue.RegionID)
 	lines := normalizeAliyunLines(payload.Line, payload.Lines)
+	existingRecords, err := client.listRecords(contextOrBackground(ctx), domainName)
+	if err != nil {
+		return nil, normalizeExecutionStopError(err)
+	}
 	results := make([]dnsUpdateResult, 0, len(plan.RecordTypes))
+	removed := make([]dnsUpdateResult, 0)
+	removedRecordIDs := map[string]struct{}{}
+	desiredLines := make(map[string]struct{}, len(lines))
+	for _, line := range lines {
+		desiredLines[normalizeAliyunLineIdentity(line)] = struct{}{}
+	}
 	for _, currentRecordType := range plan.RecordTypes {
 		recordValue, _ := selectRecordValue(currentRecordType, ipv4, ipv6)
 		recordIDs := make([]string, 0, len(lines))
 		for _, line := range lines {
-			recordID, err := client.upsertRecord(contextOrBackground(ctx), domainName, rr, currentRecordType, recordValue, ttl, line)
+			existingMatch := findAliyunDNSRecord(existingRecords, rr, currentRecordType, line)
+			recordID, err := client.upsertRecord(contextOrBackground(ctx), strings.TrimSpace(existingMatch.RecordID), domainName, rr, currentRecordType, recordValue, ttl, line)
 			if err != nil {
 				return nil, normalizeExecutionStopError(err)
 			}
 			recordIDs = append(recordIDs, recordID)
+			for _, existingRecord := range existingRecords {
+				if !sameAliyunRecordLine(existingRecord.Line, line) || !sameAliyunRecordIdentity(existingRecord, rr, currentRecordType) {
+					continue
+				}
+				if strings.TrimSpace(existingRecord.RecordID) == "" || strings.TrimSpace(existingRecord.RecordID) == strings.TrimSpace(recordID) {
+					continue
+				}
+				if _, ok := removedRecordIDs[strings.TrimSpace(existingRecord.RecordID)]; ok {
+					continue
+				}
+				if err := client.deleteRecord(contextOrBackground(ctx), existingRecord.RecordID); err != nil {
+					return nil, normalizeExecutionStopError(err)
+				}
+				removedRecordIDs[strings.TrimSpace(existingRecord.RecordID)] = struct{}{}
+				removed = append(removed, dnsUpdateResult{
+					Provider: aliyunProviderName,
+					ID:       existingRecord.RecordID,
+					Name:     joinAliyunRecordName(domainName, existingRecord.RR),
+					Type:     existingRecord.Type,
+					Value:    existingRecord.Value,
+					Domain:   domainName,
+					RR:       existingRecord.RR,
+				})
+			}
 		}
 		results = append(results, dnsUpdateResult{
 			Provider: aliyunProviderName,
@@ -588,21 +924,257 @@ func applyAliyunDNSRecord(ctx context.Context, userUUID, entryID, payloadJSON, i
 			RR:       rr,
 		})
 	}
-	return summarizeDNSResults(results, plan.SkippedTypes), nil
+	desiredTypes := make(map[string]struct{}, len(plan.RecordTypes))
+	for _, recordType := range plan.RecordTypes {
+		desiredTypes[strings.ToUpper(strings.TrimSpace(recordType))] = struct{}{}
+	}
+	prunedTypes := make(map[string]struct{}, len(plan.PrunedTypes))
+	for _, recordType := range plan.PrunedTypes {
+		prunedTypes[strings.ToUpper(strings.TrimSpace(recordType))] = struct{}{}
+	}
+	for _, existingRecord := range existingRecords {
+		if !sameAliyunRecordRR(existingRecord.RR, rr) || strings.TrimSpace(existingRecord.RecordID) == "" {
+			continue
+		}
+		recordID := strings.TrimSpace(existingRecord.RecordID)
+		if _, ok := removedRecordIDs[recordID]; ok {
+			continue
+		}
+		recordType := strings.ToUpper(strings.TrimSpace(existingRecord.Type))
+		if _, ok := prunedTypes[recordType]; ok {
+			if err := client.deleteRecord(contextOrBackground(ctx), recordID); err != nil {
+				return nil, normalizeExecutionStopError(err)
+			}
+			removedRecordIDs[recordID] = struct{}{}
+			removed = append(removed, dnsUpdateResult{
+				Provider: aliyunProviderName,
+				ID:       recordID,
+				Name:     joinAliyunRecordName(domainName, existingRecord.RR),
+				Type:     existingRecord.Type,
+				Value:    existingRecord.Value,
+				Domain:   domainName,
+				RR:       existingRecord.RR,
+			})
+			continue
+		}
+		if _, ok := desiredTypes[recordType]; ok {
+			if _, ok := desiredLines[normalizeAliyunLineIdentity(existingRecord.Line)]; ok {
+				continue
+			}
+			if err := client.deleteRecord(contextOrBackground(ctx), recordID); err != nil {
+				return nil, normalizeExecutionStopError(err)
+			}
+			removedRecordIDs[recordID] = struct{}{}
+			removed = append(removed, dnsUpdateResult{
+				Provider: aliyunProviderName,
+				ID:       recordID,
+				Name:     joinAliyunRecordName(domainName, existingRecord.RR),
+				Type:     existingRecord.Type,
+				Value:    existingRecord.Value,
+				Domain:   domainName,
+				RR:       existingRecord.RR,
+			})
+		}
+	}
+	return summarizeDNSResults(results, plan.SkippedTypes, plan.PrunedTypes, removed), nil
+}
+
+func evaluateCloudflareDNSVerification(ctx context.Context, userUUID, entryID, payloadJSON, ipv4, ipv6 string) (*dnsVerificationResult, error) {
+	entry, err := loadGenericProviderEntry(userUUID, cloudflareProviderName, entryID)
+	if err != nil {
+		return nil, err
+	}
+	configValue, err := decodeGenericEntryConfig[cloudflareConfig](entry)
+	if err != nil {
+		return nil, fmt.Errorf("cloudflare config is invalid: %w", err)
+	}
+	if strings.TrimSpace(configValue.APIToken) == "" {
+		return nil, errors.New("cloudflare api_token is required")
+	}
+
+	var payload cloudflareDNSPayload
+	if strings.TrimSpace(payloadJSON) != "" {
+		if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
+			return nil, fmt.Errorf("cloudflare dns payload is invalid: %w", err)
+		}
+	}
+
+	plan, err := buildDNSApplyPlan(payload.RecordType, payload.SyncIPv6, ipv4, ipv6)
+	if err != nil {
+		return nil, err
+	}
+
+	zoneID := strings.TrimSpace(payload.ZoneID)
+	zoneName := strings.TrimSpace(payload.ZoneName)
+	if zoneID == "" {
+		zoneID = strings.TrimSpace(configValue.ZoneID)
+	}
+	if zoneName == "" {
+		zoneName = strings.TrimSpace(configValue.ZoneName)
+	}
+
+	recordName := normalizeCloudflareRecordName(firstNonEmpty(strings.TrimSpace(payload.RecordName), zoneName), zoneName)
+	if recordName == "" {
+		return nil, errors.New("cloudflare record_name is required")
+	}
+
+	proxied := configValue.Proxied
+	if payload.Proxied != nil {
+		proxied = *payload.Proxied
+	}
+
+	client := newCloudflareDNSClient(configValue.APIToken)
+	if zoneID == "" {
+		if zoneName == "" {
+			return nil, errors.New("cloudflare zone_id or zone_name is required")
+		}
+		zoneID, err = client.resolveZoneID(contextOrBackground(ctx), zoneName)
+		if err != nil {
+			return nil, normalizeExecutionStopError(err)
+		}
+	}
+
+	records, err := client.listRecords(contextOrBackground(ctx), zoneID)
+	if err != nil {
+		return nil, normalizeExecutionStopError(err)
+	}
+
+	relevantTypes := dnsRelevantRecordTypes(plan)
+	expected := make([]dnsUpdateResult, 0, len(plan.RecordTypes))
+	for _, recordType := range plan.RecordTypes {
+		recordValue, _ := selectRecordValue(recordType, ipv4, ipv6)
+		expected = append(expected, dnsUpdateResult{
+			Provider: cloudflareProviderName,
+			Name:     recordName,
+			Type:     strings.ToUpper(strings.TrimSpace(recordType)),
+			Value:    recordValue,
+			ZoneID:   zoneID,
+			ZoneName: zoneName,
+			Proxied:  ptrBool(proxied),
+		})
+	}
+
+	observed := make([]dnsUpdateResult, 0)
+	for _, record := range records {
+		recordType := strings.ToUpper(strings.TrimSpace(record.Type))
+		if !strings.EqualFold(strings.TrimSpace(record.Name), recordName) {
+			continue
+		}
+		if _, ok := relevantTypes[recordType]; !ok {
+			continue
+		}
+		proxiedValue := record.Proxied
+		observed = append(observed, dnsUpdateResult{
+			Provider: cloudflareProviderName,
+			ID:       strings.TrimSpace(record.ID),
+			Name:     strings.TrimSpace(record.Name),
+			Type:     recordType,
+			Value:    strings.TrimSpace(record.Content),
+			ZoneID:   zoneID,
+			ZoneName: zoneName,
+			Proxied:  &proxiedValue,
+		})
+	}
+
+	return evaluateDNSVerificationRecords(cloudflareProviderName, expected, observed, cloudflareDNSRecordsMatch), nil
+}
+
+func evaluateAliyunDNSVerification(ctx context.Context, userUUID, entryID, payloadJSON, ipv4, ipv6 string) (*dnsVerificationResult, error) {
+	entry, err := loadGenericProviderEntry(userUUID, aliyunProviderName, entryID)
+	if err != nil {
+		return nil, err
+	}
+	configValue, err := decodeGenericEntryConfig[aliyunDNSConfig](entry)
+	if err != nil {
+		return nil, fmt.Errorf("aliyun dns config is invalid: %w", err)
+	}
+	if strings.TrimSpace(configValue.AccessKeyID) == "" || strings.TrimSpace(configValue.AccessKeySecret) == "" {
+		return nil, errors.New("aliyun access_key_id and access_key_secret are required")
+	}
+
+	var payload aliyunRecordPayload
+	if strings.TrimSpace(payloadJSON) != "" {
+		if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
+			return nil, fmt.Errorf("aliyun dns payload is invalid: %w", err)
+		}
+	}
+
+	plan, err := buildDNSApplyPlan(payload.RecordType, payload.SyncIPv6, ipv4, ipv6)
+	if err != nil {
+		return nil, err
+	}
+
+	domainName := strings.TrimSpace(payload.DomainName)
+	if domainName == "" {
+		domainName = strings.TrimSpace(configValue.DomainName)
+	}
+	if domainName == "" {
+		return nil, errors.New("aliyun domain_name is required")
+	}
+
+	rr := strings.TrimSpace(payload.RR)
+	if rr == "" {
+		rr = "@"
+	}
+	lines := normalizeAliyunLines(payload.Line, payload.Lines)
+	client := newAliyunDNSClient(configValue.AccessKeyID, configValue.AccessKeySecret, configValue.RegionID)
+	records, err := client.listRecords(contextOrBackground(ctx), domainName)
+	if err != nil {
+		return nil, normalizeExecutionStopError(err)
+	}
+
+	relevantTypes := dnsRelevantRecordTypes(plan)
+	expected := make([]dnsUpdateResult, 0, len(plan.RecordTypes)*len(lines))
+	for _, recordType := range plan.RecordTypes {
+		recordValue, _ := selectRecordValue(recordType, ipv4, ipv6)
+		for _, line := range lines {
+			expected = append(expected, dnsUpdateResult{
+				Provider: aliyunProviderName,
+				Domain:   domainName,
+				RR:       rr,
+				Line:     canonicalAliyunLineValue(line),
+				Type:     strings.ToUpper(strings.TrimSpace(recordType)),
+				Value:    recordValue,
+			})
+		}
+	}
+
+	observed := make([]dnsUpdateResult, 0)
+	for _, record := range records {
+		recordType := strings.ToUpper(strings.TrimSpace(record.Type))
+		if !sameAliyunRecordRR(record.RR, rr) {
+			continue
+		}
+		if _, ok := relevantTypes[recordType]; !ok {
+			continue
+		}
+		observed = append(observed, dnsUpdateResult{
+			Provider: aliyunProviderName,
+			ID:       strings.TrimSpace(record.RecordID),
+			Domain:   domainName,
+			RR:       strings.TrimSpace(record.RR),
+			Line:     strings.TrimSpace(record.Line),
+			Type:     recordType,
+			Value:    strings.TrimSpace(record.Value),
+		})
+	}
+
+	return evaluateDNSVerificationRecords(aliyunProviderName, expected, observed, aliyunDNSRecordsMatch), nil
 }
 
 func normalizeAliyunLines(primary string, values []string) []string {
 	normalized := make([]string, 0, len(values)+1)
 	seen := map[string]struct{}{}
 	appendValue := func(value string) {
-		value = strings.TrimSpace(value)
+		value = canonicalAliyunLineValue(value)
 		if value == "" {
 			return
 		}
-		if _, ok := seen[value]; ok {
+		identity := normalizeAliyunLineIdentity(value)
+		if _, ok := seen[identity]; ok {
 			return
 		}
-		seen[value] = struct{}{}
+		seen[identity] = struct{}{}
 		normalized = append(normalized, value)
 	}
 
@@ -614,6 +1186,86 @@ func normalizeAliyunLines(primary string, values []string) []string {
 		normalized = append(normalized, "default")
 	}
 	return normalized
+}
+
+func canonicalAliyunLineValue(value string) string {
+	value = strings.TrimSpace(value)
+	switch normalizeAliyunLineIdentity(value) {
+	case "default":
+		return "default"
+	case "telecom":
+		return "telecom"
+	case "unicom":
+		return "unicom"
+	case "mobile":
+		return "mobile"
+	case "edu":
+		return "edu"
+	case "oversea":
+		return "oversea"
+	case "search":
+		return "search"
+	case "school":
+		return "school"
+	default:
+		return value
+	}
+}
+
+func normalizeAliyunLineIdentity(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "default", "默认":
+		return "default"
+	case "telecom", "电信":
+		return "telecom"
+	case "unicom", "联通":
+		return "unicom"
+	case "mobile", "移动":
+		return "mobile"
+	case "edu", "教育网":
+		return "edu"
+	case "oversea", "境外":
+		return "oversea"
+	case "search", "搜索引擎":
+		return "search"
+	case "school", "校园网":
+		return "school"
+	default:
+		return strings.ToLower(strings.TrimSpace(value))
+	}
+}
+
+func sameAliyunRecordLine(left, right string) bool {
+	return normalizeAliyunLineIdentity(left) == normalizeAliyunLineIdentity(right)
+}
+
+func sameAliyunRecordRR(left, right string) bool {
+	return strings.EqualFold(strings.TrimSpace(left), strings.TrimSpace(right))
+}
+
+func sameAliyunRecordIdentity(record aliyunDNSRecord, rr, recordType string) bool {
+	return sameAliyunRecordRR(record.RR, rr) && strings.EqualFold(strings.TrimSpace(record.Type), strings.TrimSpace(recordType))
+}
+
+func findAliyunDNSRecord(records []aliyunDNSRecord, rr, recordType, line string) aliyunDNSRecord {
+	for _, record := range records {
+		if !sameAliyunRecordIdentity(record, rr, recordType) || !sameAliyunRecordLine(record.Line, line) {
+			continue
+		}
+		return record
+	}
+	return aliyunDNSRecord{}
+}
+
+func filterCloudflareRecords(records []cloudflareDNSRecord, name, recordType string) []cloudflareDNSRecord {
+	filtered := make([]cloudflareDNSRecord, 0)
+	for _, record := range records {
+		if !strings.EqualFold(strings.TrimSpace(record.Name), strings.TrimSpace(name)) || !strings.EqualFold(strings.TrimSpace(record.Type), strings.TrimSpace(recordType)) {
+			continue
+		}
+		filtered = append(filtered, record)
+	}
+	return filtered
 }
 
 func selectRecordValue(recordType, ipv4, ipv6 string) (string, error) {
@@ -709,17 +1361,7 @@ func (c *cloudflareDNSClient) listRecords(ctx context.Context, zoneID string) ([
 	return response.Result, nil
 }
 
-func (c *cloudflareDNSClient) upsertRecord(ctx context.Context, zoneID, name, recordType, content string, ttl int, proxied bool) (*cloudflareDNSRecord, error) {
-	query := url.Values{}
-	query.Set("name", name)
-	query.Set("type", recordType)
-	query.Set("per_page", "100")
-
-	var listResponse cloudflareAPIEnvelope[[]cloudflareDNSRecord]
-	if err := c.do(ctx, http.MethodGet, fmt.Sprintf("https://api.cloudflare.com/client/v4/zones/%s/dns_records?%s", strings.TrimSpace(zoneID), query.Encode()), nil, &listResponse); err != nil {
-		return nil, err
-	}
-
+func (c *cloudflareDNSClient) upsertRecord(ctx context.Context, zoneID string, existing []cloudflareDNSRecord, name, recordType, content string, ttl int, proxied bool) (*cloudflareDNSRecord, error) {
 	requestBody := map[string]interface{}{
 		"type":    recordType,
 		"name":    name,
@@ -728,8 +1370,8 @@ func (c *cloudflareDNSClient) upsertRecord(ctx context.Context, zoneID, name, re
 		"proxied": proxied,
 	}
 
-	if len(listResponse.Result) > 0 {
-		record := listResponse.Result[0]
+	if len(existing) > 0 {
+		record := existing[0]
 		var updateResponse cloudflareAPIEnvelope[cloudflareDNSRecord]
 		if err := c.do(ctx, http.MethodPut, fmt.Sprintf("https://api.cloudflare.com/client/v4/zones/%s/dns_records/%s", strings.TrimSpace(zoneID), record.ID), requestBody, &updateResponse); err != nil {
 			return nil, err
@@ -742,6 +1384,10 @@ func (c *cloudflareDNSClient) upsertRecord(ctx context.Context, zoneID, name, re
 		return nil, err
 	}
 	return &createResponse.Result, nil
+}
+
+func (c *cloudflareDNSClient) deleteRecord(ctx context.Context, zoneID, recordID string) error {
+	return c.do(ctx, http.MethodDelete, fmt.Sprintf("https://api.cloudflare.com/client/v4/zones/%s/dns_records/%s", strings.TrimSpace(zoneID), strings.TrimSpace(recordID)), nil, &cloudflareAPIEnvelope[map[string]interface{}]{})
 }
 
 func (c *cloudflareDNSClient) do(ctx context.Context, method, targetURL string, payload any, out any) error {
@@ -783,13 +1429,8 @@ func (c *cloudflareDNSClient) do(ctx context.Context, method, targetURL string, 
 		return fmt.Errorf("cloudflare api request failed: %s", response.Status)
 	}
 
-	if envelope, ok := out.(*cloudflareAPIEnvelope[[]cloudflareZone]); ok && !envelope.Success && len(envelope.Errors) > 0 {
-		return errors.New(envelope.Errors[0].Message)
-	}
-	if envelope, ok := out.(*cloudflareAPIEnvelope[[]cloudflareDNSRecord]); ok && !envelope.Success && len(envelope.Errors) > 0 {
-		return errors.New(envelope.Errors[0].Message)
-	}
-	if envelope, ok := out.(*cloudflareAPIEnvelope[cloudflareDNSRecord]); ok && !envelope.Success && len(envelope.Errors) > 0 {
+	var envelope cloudflareAPIEnvelope[json.RawMessage]
+	if err := json.Unmarshal(responseBody, &envelope); err == nil && !envelope.Success && len(envelope.Errors) > 0 {
 		return errors.New(envelope.Errors[0].Message)
 	}
 	return nil
@@ -804,15 +1445,17 @@ type aliyunDNSClient struct {
 
 type aliyunDescribeRecordsResponse struct {
 	DomainRecords struct {
-		Record []struct {
-			RecordID string `json:"RecordId"`
-			RR       string `json:"RR"`
-			Type     string `json:"Type"`
-			Value    string `json:"Value"`
-			TTL      int    `json:"TTL"`
-			Line     string `json:"Line"`
-		} `json:"Record"`
+		Record []aliyunDNSRecord `json:"Record"`
 	} `json:"DomainRecords"`
+}
+
+type aliyunDNSRecord struct {
+	RecordID string `json:"RecordId"`
+	RR       string `json:"RR"`
+	Type     string `json:"Type"`
+	Value    string `json:"Value"`
+	TTL      int    `json:"TTL"`
+	Line     string `json:"Line"`
 }
 
 type aliyunDescribeDomainLinesResponse struct {
@@ -857,19 +1500,14 @@ func newAliyunDNSClient(accessKeyID, accessKeySecret, regionID string) *aliyunDN
 	}
 }
 
-func (c *aliyunDNSClient) upsertRecord(ctx context.Context, domainName, rr, recordType, value string, ttl int, line string) (string, error) {
-	existingRecordID, err := c.findRecordID(ctx, domainName, rr, recordType)
-	if err != nil {
-		return "", err
-	}
-
+func (c *aliyunDNSClient) upsertRecord(ctx context.Context, existingRecordID, domainName, rr, recordType, value string, ttl int, line string) (string, error) {
 	values := url.Values{}
 	values.Set("DomainName", domainName)
 	values.Set("RR", rr)
 	values.Set("Type", recordType)
 	values.Set("Value", value)
 	values.Set("TTL", strconv.Itoa(ttl))
-	values.Set("Line", line)
+	values.Set("Line", canonicalAliyunLineValue(line))
 
 	if existingRecordID != "" {
 		values.Set("RecordId", existingRecordID)
@@ -890,34 +1528,13 @@ func (c *aliyunDNSClient) upsertRecord(ctx context.Context, domainName, rr, reco
 	return strings.TrimSpace(response.RecordID), nil
 }
 
-func (c *aliyunDNSClient) findRecordID(ctx context.Context, domainName, rr, recordType string) (string, error) {
+func (c *aliyunDNSClient) deleteRecord(ctx context.Context, recordID string) error {
 	values := url.Values{}
-	values.Set("DomainName", domainName)
-	values.Set("RRKeyWord", rr)
-	values.Set("TypeKeyWord", recordType)
-	values.Set("PageSize", "100")
-
-	var response aliyunDescribeRecordsResponse
-	if err := c.doRPC(ctx, "DescribeDomainRecords", values, &response); err != nil {
-		return "", err
-	}
-
-	for _, record := range response.DomainRecords.Record {
-		if strings.TrimSpace(record.RR) == rr && strings.EqualFold(strings.TrimSpace(record.Type), recordType) {
-			return strings.TrimSpace(record.RecordID), nil
-		}
-	}
-	return "", nil
+	values.Set("RecordId", strings.TrimSpace(recordID))
+	return c.doRPC(ctx, "DeleteDomainRecord", values, &aliyunRecordMutationResponse{})
 }
 
-func (c *aliyunDNSClient) listRecords(ctx context.Context, domainName string) ([]struct {
-	RecordID string `json:"RecordId"`
-	RR       string `json:"RR"`
-	Type     string `json:"Type"`
-	Value    string `json:"Value"`
-	TTL      int    `json:"TTL"`
-	Line     string `json:"Line"`
-}, error) {
+func (c *aliyunDNSClient) listRecords(ctx context.Context, domainName string) ([]aliyunDNSRecord, error) {
 	values := url.Values{}
 	values.Set("DomainName", domainName)
 	values.Set("PageSize", "100")
