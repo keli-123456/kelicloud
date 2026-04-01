@@ -214,6 +214,24 @@ func TestPickPreferredAutoConnectClientIgnoresOlderSameGroupClients(t *testing.T
 	}
 }
 
+func TestNormalizeIPAddressAcceptsCIDRNotation(t *testing.T) {
+	if got := normalizeIPAddress("2001:db8::10/64"); got != "2001:db8::10" {
+		t.Fatalf("expected normalized ipv6, got %q", got)
+	}
+	if got := normalizeIPAddress("203.0.113.8/32"); got != "203.0.113.8" {
+		t.Fatalf("expected normalized ipv4, got %q", got)
+	}
+}
+
+func TestSameAddressMatchesCIDRAndPlainIP(t *testing.T) {
+	if !sameAddress("2001:db8::10", "2001:db8::10/64") {
+		t.Fatal("expected plain ipv6 and cidr ipv6 to match")
+	}
+	if !sameAddress("203.0.113.8", "203.0.113.8/32") {
+		t.Fatal("expected plain ipv4 and cidr ipv4 to match")
+	}
+}
+
 func TestCommandResultExecutionErrorTreatsNonZeroExitCodeAsFailure(t *testing.T) {
 	exitCode := 2
 	err := commandResultExecutionError(&commandResult{

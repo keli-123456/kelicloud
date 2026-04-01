@@ -2183,8 +2183,16 @@ func sameAddress(target string, values ...string) bool {
 	if target == "" {
 		return false
 	}
+	normalizedTarget := normalizeIPAddress(target)
 	for _, value := range values {
-		if strings.TrimSpace(value) == target {
+		trimmedValue := strings.TrimSpace(value)
+		if trimmedValue == target {
+			return true
+		}
+		if normalizedTarget == "" {
+			continue
+		}
+		if normalizedValue := normalizeIPAddress(trimmedValue); normalizedValue != "" && normalizedValue == normalizedTarget {
 			return true
 		}
 	}
@@ -3142,7 +3150,11 @@ func normalizeIPAddress(value string) string {
 		return ""
 	}
 	ip := net.ParseIP(value)
-	if ip == nil {
+	if ip != nil {
+		return ip.String()
+	}
+	ip, _, err := net.ParseCIDR(value)
+	if err != nil || ip == nil {
 		return ""
 	}
 	return ip.String()
@@ -3809,8 +3821,8 @@ func provisionLinodeInstance(ctx context.Context, userUUID string, plan models.F
 		}
 	}
 	outcome := &actionOutcome{
-		IPv4:             firstString(instance.IPv4),
-		IPv6:             strings.TrimSpace(instance.IPv6),
+		IPv4:             normalizeIPAddress(firstString(instance.IPv4)),
+		IPv6:             normalizeIPAddress(instance.IPv6),
 		AutoConnectGroup: autoConnectGroup,
 		NewInstanceRef:   newInstanceRef,
 		NewAddresses: map[string]interface{}{

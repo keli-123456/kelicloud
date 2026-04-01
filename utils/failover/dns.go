@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"sort"
@@ -1306,20 +1307,39 @@ func filterCloudflareRecords(records []cloudflareDNSRecord, name, recordType str
 func selectRecordValue(recordType, ipv4, ipv6 string) (string, error) {
 	switch strings.ToUpper(strings.TrimSpace(recordType)) {
 	case "A":
-		ipv4 = strings.TrimSpace(ipv4)
-		if ipv4 == "" {
-			return "", errors.New("ipv4 address is empty for A record")
-		}
-		return ipv4, nil
+		return normalizeDNSRecordIPValue("ipv4", "A", ipv4, true)
 	case "AAAA":
-		ipv6 = strings.TrimSpace(ipv6)
-		if ipv6 == "" {
-			return "", errors.New("ipv6 address is empty for AAAA record")
-		}
-		return ipv6, nil
+		return normalizeDNSRecordIPValue("ipv6", "AAAA", ipv6, false)
 	default:
 		return "", fmt.Errorf("unsupported DNS record type: %s", recordType)
 	}
+}
+
+func normalizeDNSRecordIPValue(addressLabel, recordType, value string, wantIPv4 bool) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", fmt.Errorf("%s address is empty for %s record", addressLabel, recordType)
+	}
+
+	normalized := normalizeIPAddress(value)
+	if normalized == "" {
+		return "", fmt.Errorf("%s address is invalid for %s record: %q", addressLabel, recordType, value)
+	}
+
+	ip := net.ParseIP(normalized)
+	if ip == nil {
+		return "", fmt.Errorf("%s address is invalid for %s record: %q", addressLabel, recordType, value)
+	}
+	if wantIPv4 {
+		if ip.To4() == nil {
+			return "", fmt.Errorf("%s address is invalid for %s record: %q", addressLabel, recordType, value)
+		}
+		return ip.To4().String(), nil
+	}
+	if ip.To4() != nil {
+		return "", fmt.Errorf("%s address is invalid for %s record: %q", addressLabel, recordType, value)
+	}
+	return ip.String(), nil
 }
 
 type cloudflareDNSClient struct {

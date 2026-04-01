@@ -74,6 +74,33 @@ func TestBuildDNSApplyPlan(t *testing.T) {
 	})
 }
 
+func TestSelectRecordValueNormalizesCIDRValues(t *testing.T) {
+	value, err := selectRecordValue("AAAA", "", "2001:db8::10/64")
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if value != "2001:db8::10" {
+		t.Fatalf("expected normalized ipv6 value, got %q", value)
+	}
+
+	value, err = selectRecordValue("A", "203.0.113.8/32", "")
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if value != "203.0.113.8" {
+		t.Fatalf("expected normalized ipv4 value, got %q", value)
+	}
+}
+
+func TestSelectRecordValueRejectsWrongAddressFamily(t *testing.T) {
+	if _, err := selectRecordValue("AAAA", "", "203.0.113.8"); err == nil {
+		t.Fatal("expected ipv4 value to be rejected for AAAA record")
+	}
+	if _, err := selectRecordValue("A", "2001:db8::10", ""); err == nil {
+		t.Fatal("expected ipv6 value to be rejected for A record")
+	}
+}
+
 func TestNormalizeAliyunLinesCanonicalizesKnownLabels(t *testing.T) {
 	lines := normalizeAliyunLines("默认", []string{"telecom", "电信", "境外"})
 	if len(lines) != 3 {
