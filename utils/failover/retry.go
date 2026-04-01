@@ -17,23 +17,34 @@ var (
 	retryCleanupResolveFunc = resolveCurrentInstanceCleanupFromRef
 )
 
+type ExecutionActionAvailability struct {
+	Available bool
+	Reason    string
+}
+
+type ExecutionAvailableActions struct {
+	RetryDNS     ExecutionActionAvailability
+	RetryCleanup ExecutionActionAvailability
+}
+
+func DescribeExecutionAvailableActions(task *models.FailoverTask, execution *models.FailoverExecution) ExecutionAvailableActions {
+	return ExecutionAvailableActions{
+		RetryDNS:     describeRetryDNSAvailability(task, execution),
+		RetryCleanup: describeRetryCleanupAvailability(task, execution),
+	}
+}
+
 func RetryDNSForUser(userUUID string, executionID uint) (*models.FailoverExecution, error) {
 	task, execution, runner, err := loadRetryExecutionContext(userUUID, executionID)
 	if err != nil {
 		return nil, err
 	}
-	if strings.TrimSpace(execution.DNSStatus) != models.FailoverDNSStatusFailed {
-		return nil, fmt.Errorf("dns retry is only available after a failed dns step")
-	}
-	if strings.TrimSpace(task.DNSProvider) == "" || strings.TrimSpace(task.DNSEntryID) == "" {
-		return nil, fmt.Errorf("dns switching is not configured for this task")
+	availableActions := DescribeExecutionAvailableActions(task, execution)
+	if !availableActions.RetryDNS.Available {
+		return nil, errors.New(firstNonEmpty(availableActions.RetryDNS.Reason, "dns retry is not available for this execution"))
 	}
 
 	ipv4, ipv6 := executionRetryDNSAddresses(execution)
-	if ipv4 == "" && ipv6 == "" {
-		return nil, fmt.Errorf("no execution addresses are available for dns retry")
-	}
-
 	previousStatus := normalizeRetryExecutionStatus(execution.Status)
 	retryStep := runner.startStep("retry_dns", "Retry DNS", map[string]interface{}{
 		"provider":        task.DNSProvider,
@@ -119,20 +130,11 @@ func RetryCleanupForUser(userUUID string, executionID uint) (*models.FailoverExe
 	if err != nil {
 		return nil, err
 	}
-	if strings.TrimSpace(execution.DNSStatus) != models.FailoverDNSStatusSuccess {
-		return nil, fmt.Errorf("cleanup retry is only available after dns succeeds")
+	availableActions := DescribeExecutionAvailableActions(task, execution)
+	if !availableActions.RetryCleanup.Available {
+		return nil, errors.New(firstNonEmpty(availableActions.RetryCleanup.Reason, "cleanup retry is not available for this execution"))
 	}
-	switch strings.TrimSpace(execution.CleanupStatus) {
-	case models.FailoverCleanupStatusPending, models.FailoverCleanupStatusFailed, models.FailoverCleanupStatusWarning:
-	default:
-		return nil, fmt.Errorf("cleanup retry is only available when cleanup is pending, failed, or needs review")
-	}
-
 	oldRef := parseJSONMap(execution.OldInstanceRef)
-	if len(oldRef) == 0 {
-		return nil, fmt.Errorf("no old instance reference is available for cleanup retry")
-	}
-
 	previousStatus := normalizeRetryExecutionStatus(execution.Status)
 	retryStep := runner.startStep("retry_cleanup", "Retry Old Instance Cleanup", map[string]interface{}{
 		"previous_status": previousStatus,
@@ -281,6 +283,75 @@ func normalizeRetryExecutionStatus(status string) string {
 		return models.FailoverExecutionStatusFailed
 	}
 	return status
+}
+
+func describeRetryDNSAvailability(task *models.FailoverTask, execution *models.FailoverExecution) ExecutionActionAvailability {
+	if execution == nil {
+		return ExecutionActionAvailability{Reason: "execution is unavailable"}
+	}
+	if retryExecutionIsActive(execution.Status) {
+		return ExecutionActionAvailability{Reason: "execution is still running"}
+	}
+	if task == nil || strings.TrimSpace(task.DNSProvider) == "" || strings.TrimSpace(task.DNSEntryID) == "" {
+		return ExecutionActionAvailability{Reason: "dns switching is not configured for this task"}
+	}
+
+	switch strings.TrimSpace(execution.DNSStatus) {
+	case models.FailoverDNSStatusFailed:
+		ipv4, ipv6 := executionRetryDNSAddresses(execution)
+		if ipv4 == "" && ipv6 == "" {
+			return ExecutionActionAvailability{Reason: "no saved execution addresses are available for dns retry"}
+		}
+		return ExecutionActionAvailability{Available: true}
+	case models.FailoverDNSStatusSuccess:
+		return ExecutionActionAvailability{Reason: "dns already succeeded for this execution"}
+	case models.FailoverDNSStatusSkipped:
+		return ExecutionActionAvailability{Reason: "dns switching was skipped for this execution"}
+	case models.FailoverDNSStatusPending:
+		return ExecutionActionAvailability{Reason: "dns retry is only available after a failed dns step"}
+	default:
+		return ExecutionActionAvailability{Reason: "dns retry is only available after a failed dns step"}
+	}
+}
+
+func describeRetryCleanupAvailability(task *models.FailoverTask, execution *models.FailoverExecution) ExecutionActionAvailability {
+	if execution == nil {
+		return ExecutionActionAvailability{Reason: "execution is unavailable"}
+	}
+	if retryExecutionIsActive(execution.Status) {
+		return ExecutionActionAvailability{Reason: "execution is still running"}
+	}
+	if strings.TrimSpace(execution.DNSStatus) != models.FailoverDNSStatusSuccess {
+		return ExecutionActionAvailability{Reason: "dns must succeed before old instance cleanup can be retried"}
+	}
+
+	classification := strings.TrimSpace(stringMapValue(parseJSONMap(execution.CleanupResult), "classification"))
+	switch classification {
+	case cleanupClassificationNotRequested:
+		return ExecutionActionAvailability{Reason: "this execution did not require old instance cleanup"}
+	case cleanupClassificationInstanceDeleted:
+		return ExecutionActionAvailability{Reason: "old instance cleanup already succeeded"}
+	case cleanupClassificationInstanceMissing:
+		return ExecutionActionAvailability{Reason: "the old instance was already missing"}
+	case cleanupClassificationProviderEntryMissing:
+		return ExecutionActionAvailability{Reason: "the original cloud credential entry was deleted; manual review is required"}
+	case cleanupClassificationProviderEntryUnhealthy:
+		return ExecutionActionAvailability{Reason: "the original cloud credential is unavailable; manual review is required"}
+	}
+
+	switch strings.TrimSpace(execution.CleanupStatus) {
+	case models.FailoverCleanupStatusPending, models.FailoverCleanupStatusFailed, models.FailoverCleanupStatusWarning:
+	default:
+		if strings.TrimSpace(execution.CleanupStatus) == models.FailoverCleanupStatusSuccess {
+			return ExecutionActionAvailability{Reason: "old instance cleanup already succeeded"}
+		}
+		return ExecutionActionAvailability{Reason: "cleanup retry is only available when cleanup is pending, failed, or needs review"}
+	}
+
+	if len(parseJSONMap(execution.OldInstanceRef)) == 0 {
+		return ExecutionActionAvailability{Reason: "no saved old instance reference is available for cleanup retry"}
+	}
+	return ExecutionActionAvailability{Available: true}
 }
 
 func executionRetryDNSAddresses(execution *models.FailoverExecution) (string, string) {

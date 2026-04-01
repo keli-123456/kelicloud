@@ -227,3 +227,32 @@ func TestRetryCleanupForUserRequiresSuccessfulDNS(t *testing.T) {
 		t.Fatal("expected cleanup retry to be rejected before dns succeeds")
 	}
 }
+
+func TestDescribeExecutionAvailableActionsAllowsDNSRetryAfterFailure(t *testing.T) {
+	prepareRetryTestDB(t)
+	userUUID := "retry-actions-dns-user"
+	task, execution := seedRetryExecution(t, userUUID, "retry-actions-dns-task", models.FailoverExecutionStatusFailed, models.FailoverDNSStatusFailed, models.FailoverCleanupStatusPending)
+
+	actions := DescribeExecutionAvailableActions(task, execution)
+	if !actions.RetryDNS.Available {
+		t.Fatalf("expected dns retry to be available, got %#v", actions.RetryDNS)
+	}
+	if actions.RetryCleanup.Available {
+		t.Fatalf("expected cleanup retry to stay unavailable before dns succeeds, got %#v", actions.RetryCleanup)
+	}
+}
+
+func TestDescribeExecutionAvailableActionsExplainsCleanupManualReview(t *testing.T) {
+	prepareRetryTestDB(t)
+	userUUID := "retry-actions-cleanup-user"
+	task, execution := seedRetryExecution(t, userUUID, "retry-actions-cleanup-task", models.FailoverExecutionStatusSuccess, models.FailoverDNSStatusSuccess, models.FailoverCleanupStatusWarning)
+	execution.CleanupResult = `{"classification":"provider_entry_missing","summary":"manual review required"}`
+
+	actions := DescribeExecutionAvailableActions(task, execution)
+	if actions.RetryCleanup.Available {
+		t.Fatalf("expected cleanup retry to be unavailable, got %#v", actions.RetryCleanup)
+	}
+	if actions.RetryCleanup.Reason == "" {
+		t.Fatal("expected cleanup retry reason to be populated")
+	}
+}

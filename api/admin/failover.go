@@ -192,41 +192,52 @@ type failoverExecutionStepView struct {
 	UpdatedAt   models.LocalTime  `json:"updated_at"`
 }
 
+type failoverExecutionActionView struct {
+	Available bool   `json:"available"`
+	Reason    string `json:"reason,omitempty"`
+}
+
+type failoverExecutionAvailableActionsView struct {
+	RetryDNS     failoverExecutionActionView `json:"retry_dns"`
+	RetryCleanup failoverExecutionActionView `json:"retry_cleanup"`
+}
+
 type failoverExecutionView struct {
-	ID                    uint                        `json:"id"`
-	TaskID                uint                        `json:"task_id"`
-	Status                string                      `json:"status"`
-	TriggerReason         string                      `json:"trigger_reason"`
-	WatchClientUUID       string                      `json:"watch_client_uuid"`
-	TriggerSnapshot       json.RawMessage             `json:"trigger_snapshot"`
-	SelectedPlanID        *uint                       `json:"selected_plan_id,omitempty"`
-	AttemptedPlans        json.RawMessage             `json:"attempted_plans"`
-	OldClientUUID         string                      `json:"old_client_uuid"`
-	OldInstanceRef        json.RawMessage             `json:"old_instance_ref"`
-	OldAddresses          json.RawMessage             `json:"old_addresses"`
-	NewClientUUID         string                      `json:"new_client_uuid"`
-	NewInstanceRef        json.RawMessage             `json:"new_instance_ref"`
-	NewAddresses          json.RawMessage             `json:"new_addresses"`
-	ScriptClipboardID     *int                        `json:"script_clipboard_id,omitempty"`
-	ScriptClipboardIDs    []int                       `json:"script_clipboard_ids,omitempty"`
-	ScriptNameSnapshot    string                      `json:"script_name_snapshot"`
-	ScriptTaskID          string                      `json:"script_task_id"`
-	ScriptStatus          string                      `json:"script_status"`
-	ScriptExitCode        *int                        `json:"script_exit_code,omitempty"`
-	ScriptFinishedAt      *models.LocalTime           `json:"script_finished_at"`
-	ScriptOutput          string                      `json:"script_output"`
-	ScriptOutputTruncated bool                        `json:"script_output_truncated"`
-	DNSProvider           string                      `json:"dns_provider"`
-	DNSStatus             string                      `json:"dns_status"`
-	DNSResult             json.RawMessage             `json:"dns_result"`
-	CleanupStatus         string                      `json:"cleanup_status"`
-	CleanupResult         json.RawMessage             `json:"cleanup_result"`
-	ErrorMessage          string                      `json:"error_message"`
-	StartedAt             models.LocalTime            `json:"started_at"`
-	FinishedAt            *models.LocalTime           `json:"finished_at"`
-	Steps                 []failoverExecutionStepView `json:"steps,omitempty"`
-	CreatedAt             models.LocalTime            `json:"created_at"`
-	UpdatedAt             models.LocalTime            `json:"updated_at"`
+	ID                    uint                                  `json:"id"`
+	TaskID                uint                                  `json:"task_id"`
+	Status                string                                `json:"status"`
+	TriggerReason         string                                `json:"trigger_reason"`
+	WatchClientUUID       string                                `json:"watch_client_uuid"`
+	TriggerSnapshot       json.RawMessage                       `json:"trigger_snapshot"`
+	SelectedPlanID        *uint                                 `json:"selected_plan_id,omitempty"`
+	AttemptedPlans        json.RawMessage                       `json:"attempted_plans"`
+	OldClientUUID         string                                `json:"old_client_uuid"`
+	OldInstanceRef        json.RawMessage                       `json:"old_instance_ref"`
+	OldAddresses          json.RawMessage                       `json:"old_addresses"`
+	NewClientUUID         string                                `json:"new_client_uuid"`
+	NewInstanceRef        json.RawMessage                       `json:"new_instance_ref"`
+	NewAddresses          json.RawMessage                       `json:"new_addresses"`
+	ScriptClipboardID     *int                                  `json:"script_clipboard_id,omitempty"`
+	ScriptClipboardIDs    []int                                 `json:"script_clipboard_ids,omitempty"`
+	ScriptNameSnapshot    string                                `json:"script_name_snapshot"`
+	ScriptTaskID          string                                `json:"script_task_id"`
+	ScriptStatus          string                                `json:"script_status"`
+	ScriptExitCode        *int                                  `json:"script_exit_code,omitempty"`
+	ScriptFinishedAt      *models.LocalTime                     `json:"script_finished_at"`
+	ScriptOutput          string                                `json:"script_output"`
+	ScriptOutputTruncated bool                                  `json:"script_output_truncated"`
+	DNSProvider           string                                `json:"dns_provider"`
+	DNSStatus             string                                `json:"dns_status"`
+	DNSResult             json.RawMessage                       `json:"dns_result"`
+	CleanupStatus         string                                `json:"cleanup_status"`
+	CleanupResult         json.RawMessage                       `json:"cleanup_result"`
+	AvailableActions      failoverExecutionAvailableActionsView `json:"available_actions"`
+	ErrorMessage          string                                `json:"error_message"`
+	StartedAt             models.LocalTime                      `json:"started_at"`
+	FinishedAt            *models.LocalTime                     `json:"finished_at"`
+	Steps                 []failoverExecutionStepView           `json:"steps,omitempty"`
+	CreatedAt             models.LocalTime                      `json:"created_at"`
+	UpdatedAt             models.LocalTime                      `json:"updated_at"`
 }
 
 func parseFailoverTaskID(c *gin.Context, param string) (uint, bool) {
@@ -337,6 +348,20 @@ func buildFailoverPlanView(plan models.FailoverPlan) failoverPlanView {
 		WaitAgentTimeoutSec: plan.WaitAgentTimeoutSec,
 		CreatedAt:           plan.CreatedAt,
 		UpdatedAt:           plan.UpdatedAt,
+	}
+}
+
+func buildFailoverExecutionAvailableActionsView(task *models.FailoverTask, execution *models.FailoverExecution) failoverExecutionAvailableActionsView {
+	availableActions := failoversvc.DescribeExecutionAvailableActions(task, execution)
+	return failoverExecutionAvailableActionsView{
+		RetryDNS: failoverExecutionActionView{
+			Available: availableActions.RetryDNS.Available,
+			Reason:    strings.TrimSpace(availableActions.RetryDNS.Reason),
+		},
+		RetryCleanup: failoverExecutionActionView{
+			Available: availableActions.RetryCleanup.Available,
+			Reason:    strings.TrimSpace(availableActions.RetryCleanup.Reason),
+		},
 	}
 }
 
@@ -520,7 +545,7 @@ func buildFailoverTaskView(task *models.FailoverTask, latestExecution *models.Fa
 	}
 }
 
-func buildFailoverExecutionView(execution *models.FailoverExecution, includeSteps bool) failoverExecutionView {
+func buildFailoverExecutionView(execution *models.FailoverExecution, task *models.FailoverTask, includeSteps bool) failoverExecutionView {
 	scriptClipboardIDs := execution.EffectiveScriptClipboardIDs()
 	view := failoverExecutionView{
 		ID:                    execution.ID,
@@ -551,6 +576,7 @@ func buildFailoverExecutionView(execution *models.FailoverExecution, includeStep
 		DNSResult:             rawJSONOrNull(execution.DNSResult),
 		CleanupStatus:         execution.CleanupStatus,
 		CleanupResult:         rawJSONOrNull(execution.CleanupResult),
+		AvailableActions:      buildFailoverExecutionAvailableActionsView(task, execution),
 		ErrorMessage:          execution.ErrorMessage,
 		StartedAt:             execution.StartedAt,
 		FinishedAt:            execution.FinishedAt,
@@ -1479,7 +1505,8 @@ func RunFailoverTask(c *gin.Context) {
 		return
 	}
 
-	if _, err := failoverdb.GetTaskByIDForUser(scope.UserUUID, taskID); err != nil {
+	task, err := failoverdb.GetTaskByIDForUser(scope.UserUUID, taskID)
+	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			api.RespondError(c, http.StatusNotFound, "Failover task not found")
 			return
@@ -1494,7 +1521,7 @@ func RunFailoverTask(c *gin.Context) {
 		return
 	}
 
-	api.RespondSuccess(c, buildFailoverExecutionView(execution, false))
+	api.RespondSuccess(c, buildFailoverExecutionView(execution, task, false))
 }
 
 func StopFailoverExecution(c *gin.Context) {
@@ -1518,7 +1545,17 @@ func StopFailoverExecution(c *gin.Context) {
 		return
 	}
 
-	api.RespondSuccess(c, buildFailoverExecutionView(execution, true))
+	task, taskErr := failoverdb.GetTaskByIDForUser(scope.UserUUID, execution.TaskID)
+	if taskErr != nil {
+		if errors.Is(taskErr, gorm.ErrRecordNotFound) {
+			api.RespondError(c, http.StatusNotFound, "Failover task not found")
+			return
+		}
+		api.RespondError(c, http.StatusInternalServerError, "Failed to load failover task: "+taskErr.Error())
+		return
+	}
+
+	api.RespondSuccess(c, buildFailoverExecutionView(execution, task, true))
 }
 
 func RetryFailoverExecutionDNS(c *gin.Context) {
@@ -1542,7 +1579,17 @@ func RetryFailoverExecutionDNS(c *gin.Context) {
 		return
 	}
 
-	api.RespondSuccess(c, buildFailoverExecutionView(execution, true))
+	task, taskErr := failoverdb.GetTaskByIDForUser(scope.UserUUID, execution.TaskID)
+	if taskErr != nil {
+		if errors.Is(taskErr, gorm.ErrRecordNotFound) {
+			api.RespondError(c, http.StatusNotFound, "Failover task not found")
+			return
+		}
+		api.RespondError(c, http.StatusInternalServerError, "Failed to load failover task: "+taskErr.Error())
+		return
+	}
+
+	api.RespondSuccess(c, buildFailoverExecutionView(execution, task, true))
 }
 
 func RetryFailoverExecutionCleanup(c *gin.Context) {
@@ -1566,7 +1613,17 @@ func RetryFailoverExecutionCleanup(c *gin.Context) {
 		return
 	}
 
-	api.RespondSuccess(c, buildFailoverExecutionView(execution, true))
+	task, taskErr := failoverdb.GetTaskByIDForUser(scope.UserUUID, execution.TaskID)
+	if taskErr != nil {
+		if errors.Is(taskErr, gorm.ErrRecordNotFound) {
+			api.RespondError(c, http.StatusNotFound, "Failover task not found")
+			return
+		}
+		api.RespondError(c, http.StatusInternalServerError, "Failed to load failover task: "+taskErr.Error())
+		return
+	}
+
+	api.RespondSuccess(c, buildFailoverExecutionView(execution, task, true))
 }
 
 func GetFailoverExecutions(c *gin.Context) {
@@ -1577,6 +1634,16 @@ func GetFailoverExecutions(c *gin.Context) {
 
 	taskID, ok := parseFailoverTaskID(c, "id")
 	if !ok {
+		return
+	}
+
+	task, taskErr := failoverdb.GetTaskByIDForUser(scope.UserUUID, taskID)
+	if taskErr != nil {
+		if errors.Is(taskErr, gorm.ErrRecordNotFound) {
+			api.RespondError(c, http.StatusNotFound, "Failover task not found")
+			return
+		}
+		api.RespondError(c, http.StatusInternalServerError, "Failed to load failover task: "+taskErr.Error())
 		return
 	}
 
@@ -1603,7 +1670,7 @@ func GetFailoverExecutions(c *gin.Context) {
 	response := make([]failoverExecutionView, 0, len(executions))
 	for _, execution := range executions {
 		executionCopy := execution
-		response = append(response, buildFailoverExecutionView(&executionCopy, false))
+		response = append(response, buildFailoverExecutionView(&executionCopy, task, false))
 	}
 	api.RespondSuccess(c, response)
 }
@@ -1629,5 +1696,15 @@ func GetFailoverExecution(c *gin.Context) {
 		return
 	}
 
-	api.RespondSuccess(c, buildFailoverExecutionView(execution, true))
+	task, taskErr := failoverdb.GetTaskByIDForUser(scope.UserUUID, execution.TaskID)
+	if taskErr != nil {
+		if errors.Is(taskErr, gorm.ErrRecordNotFound) {
+			api.RespondError(c, http.StatusNotFound, "Failover task not found")
+			return
+		}
+		api.RespondError(c, http.StatusInternalServerError, "Failed to load failover task: "+taskErr.Error())
+		return
+	}
+
+	api.RespondSuccess(c, buildFailoverExecutionView(execution, task, true))
 }
