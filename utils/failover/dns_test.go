@@ -1,6 +1,9 @@
 package failover
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestBuildDNSApplyPlan(t *testing.T) {
 	t.Run("strict ipv4 only", func(t *testing.T) {
@@ -162,5 +165,31 @@ func TestEvaluateDNSVerificationRecordsMatchesAliyunNormalizedLines(t *testing.T
 	}
 	if !result.Success {
 		t.Fatalf("expected verification to pass, got missing=%#v unexpected=%#v", result.Missing, result.Unexpected)
+	}
+}
+
+func TestFormatAliyunRPCErrorIncludesAPIErrorDetails(t *testing.T) {
+	err := formatAliyunRPCError("400 Bad Request", []byte(`{"Code":"InvalidTTL","Message":"invalid ttl","RequestId":"req-123"}`))
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	message := err.Error()
+	for _, part := range []string{"400 Bad Request", "InvalidTTL", "invalid ttl", "req-123"} {
+		if !strings.Contains(message, part) {
+			t.Fatalf("expected %q in error message %q", part, message)
+		}
+	}
+}
+
+func TestFormatAliyunRPCErrorFallsBackToBodyText(t *testing.T) {
+	err := formatAliyunRPCError("400 Bad Request", []byte("plain failure"))
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	message := err.Error()
+	for _, part := range []string{"400 Bad Request", "plain failure"} {
+		if !strings.Contains(message, part) {
+			t.Fatalf("expected %q in error message %q", part, message)
+		}
 	}
 }

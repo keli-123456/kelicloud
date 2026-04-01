@@ -1486,6 +1486,12 @@ type aliyunRecordMutationResponse struct {
 	RecordID string `json:"RecordId"`
 }
 
+type aliyunAPIErrorResponse struct {
+	Code      string `json:"Code"`
+	Message   string `json:"Message"`
+	RequestID string `json:"RequestId"`
+}
+
 func newAliyunDNSClient(accessKeyID, accessKeySecret, regionID string) *aliyunDNSClient {
 	endpoint := "https://alidns.aliyuncs.com/"
 	regionID = strings.TrimSpace(regionID)
@@ -1648,21 +1654,61 @@ func (c *aliyunDNSClient) doRPC(ctx context.Context, action string, values url.V
 		return err
 	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return fmt.Errorf("aliyun dns request failed: %s", response.Status)
+		return formatAliyunRPCError(response.Status, body)
 	}
 
 	if err := json.Unmarshal(body, out); err != nil {
 		return err
 	}
 
-	var apiErr struct {
-		Code    string `json:"Code"`
-		Message string `json:"Message"`
-	}
-	if err := json.Unmarshal(body, &apiErr); err == nil && strings.TrimSpace(apiErr.Code) != "" {
-		return fmt.Errorf("%s: %s", apiErr.Code, apiErr.Message)
+	if apiErr, ok := parseAliyunAPIError(body); ok {
+		message := firstNonEmpty(strings.TrimSpace(apiErr.Message), "aliyun dns request failed")
+		if requestID := strings.TrimSpace(apiErr.RequestID); requestID != "" {
+			return fmt.Errorf("%s: %s (request_id: %s)", strings.TrimSpace(apiErr.Code), message, requestID)
+		}
+		return fmt.Errorf("%s: %s", strings.TrimSpace(apiErr.Code), message)
 	}
 	return nil
+}
+
+func parseAliyunAPIError(body []byte) (*aliyunAPIErrorResponse, bool) {
+	var apiErr aliyunAPIErrorResponse
+	if err := json.Unmarshal(body, &apiErr); err != nil {
+		return nil, false
+	}
+	if strings.TrimSpace(apiErr.Code) == "" && strings.TrimSpace(apiErr.Message) == "" {
+		return nil, false
+	}
+	return &apiErr, true
+}
+
+func formatAliyunRPCError(status string, body []byte) error {
+	if apiErr, ok := parseAliyunAPIError(body); ok {
+		parts := make([]string, 0, 2)
+		if code := strings.TrimSpace(apiErr.Code); code != "" {
+			parts = append(parts, code)
+		}
+		if message := strings.TrimSpace(apiErr.Message); message != "" {
+			parts = append(parts, message)
+		}
+		detail := strings.Join(parts, ": ")
+		if detail == "" {
+			detail = "aliyun dns request failed"
+		}
+		if requestID := strings.TrimSpace(apiErr.RequestID); requestID != "" {
+			detail = fmt.Sprintf("%s (request_id: %s)", detail, requestID)
+		}
+		return fmt.Errorf("aliyun dns request failed: %s: %s", strings.TrimSpace(status), detail)
+	}
+
+	bodyText := strings.TrimSpace(string(body))
+	if bodyText != "" {
+		if len(bodyText) > 240 {
+			bodyText = bodyText[:240] + "..."
+		}
+		return fmt.Errorf("aliyun dns request failed: %s: %s", strings.TrimSpace(status), bodyText)
+	}
+	return fmt.Errorf("aliyun dns request failed: %s", strings.TrimSpace(status))
 }
 
 func signAliyunRPC(values url.Values, secret string) string {

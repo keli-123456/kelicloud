@@ -3770,6 +3770,11 @@ func provisionLinodeInstance(ctx context.Context, userUUID string, plan models.F
 			UserData: linodecloud.EncodeUserData(userData),
 		}
 	}
+	if autoConnectGroup != "" {
+		if err := linodecloud.ValidateAutoConnectSupport(ctx, client, request.Region, request.Image); err != nil {
+			return nil, err
+		}
+	}
 
 	instance, err := client.CreateInstance(ctx, request)
 	if err != nil {

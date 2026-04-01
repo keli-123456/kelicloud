@@ -139,13 +139,14 @@ type Type struct {
 }
 
 type Image struct {
-	ID          string `json:"id"`
-	Label       string `json:"label"`
-	Description string `json:"description"`
-	Vendor      string `json:"vendor"`
-	Deprecated  bool   `json:"deprecated"`
-	IsPublic    bool   `json:"is_public"`
-	Created     string `json:"created"`
+	ID           string   `json:"id"`
+	Label        string   `json:"label"`
+	Description  string   `json:"description"`
+	Vendor       string   `json:"vendor"`
+	Deprecated   bool     `json:"deprecated"`
+	IsPublic     bool     `json:"is_public"`
+	Created      string   `json:"created"`
+	Capabilities []string `json:"capabilities"`
 }
 
 type SSHKey struct {

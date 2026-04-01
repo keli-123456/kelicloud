@@ -681,6 +681,12 @@ func CreateLinodeInstance(c *gin.Context) {
 			UserData: linodecloud.EncodeUserData(resolvedUserData),
 		}
 	}
+	if autoConnectGroup != "" {
+		if err := linodecloud.ValidateAutoConnectSupport(ctx, client, request.Region, request.Image); err != nil {
+			api.RespondError(c, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
 
 	instance, err := client.CreateInstance(ctx, request)
 	if err != nil {
