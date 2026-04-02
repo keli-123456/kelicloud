@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -14,11 +16,20 @@ import (
 	smithyhttp "github.com/aws/smithy-go/transport/http"
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/api"
+	dbawsfollowup "github.com/komari-monitor/komari/database/awsfollowup"
 	"github.com/komari-monitor/komari/database/models"
+	"github.com/komari-monitor/komari/utils/awsfollowup"
 	awscloud "github.com/komari-monitor/komari/utils/cloudprovider/aws"
+	"gorm.io/gorm"
 )
 
 const awsProviderName = "aws"
+
+const (
+	awsCreateFollowUpSyncAttempts = 5
+	awsCreateFollowUpSyncDelay    = 2 * time.Second
+	awsCreateFollowUpNextRunDelay = 15 * time.Second
+)
 
 type createAWSInstancePayload struct {
 	Name             string         `json:"name"`
@@ -29,6 +40,8 @@ type createAWSInstancePayload struct {
 	SecurityGroupIDs []string       `json:"security_group_ids,omitempty"`
 	UserData         string         `json:"user_data,omitempty"`
 	AssignPublicIP   bool           `json:"assign_public_ip"`
+	AssignIPv6       bool           `json:"assign_ipv6"`
+	AllowAllTraffic  bool           `json:"allow_all_traffic"`
 	Tags             []awscloud.Tag `json:"tags,omitempty"`
 	AutoConnect      bool           `json:"auto_connect"`
 	AutoConnectGroup string         `json:"auto_connect_group,omitempty"`
@@ -42,6 +55,7 @@ type createAWSLightsailInstancePayload struct {
 	KeyPairName      string         `json:"key_pair_name,omitempty"`
 	UserData         string         `json:"user_data,omitempty"`
 	IPAddressType    string         `json:"ip_address_type,omitempty"`
+	AllowAllTraffic  bool           `json:"allow_all_traffic"`
 	Tags             []awscloud.Tag `json:"tags,omitempty"`
 	AutoConnect      bool           `json:"auto_connect"`
 	AutoConnectGroup string         `json:"auto_connect_group,omitempty"`
@@ -54,6 +68,24 @@ type awsAccountView struct {
 	Region        string                    `json:"region"`
 	EC2Quota      *awscloud.EC2QuotaSummary `json:"ec2_quota,omitempty"`
 	EC2QuotaError string                    `json:"ec2_quota_error,omitempty"`
+}
+
+type awsFollowUpTaskView struct {
+	ID             uint              `json:"id"`
+	CredentialID   string            `json:"credential_id"`
+	CredentialName string            `json:"credential_name"`
+	Region         string            `json:"region"`
+	TaskType       string            `json:"task_type"`
+	ResourceID     string            `json:"resource_id"`
+	Status         string            `json:"status"`
+	Attempts       int               `json:"attempts"`
+	MaxAttempts    int               `json:"max_attempts"`
+	LastError      string            `json:"last_error,omitempty"`
+	LastAttemptAt  *models.LocalTime `json:"last_attempt_at,omitempty"`
+	NextRunAt      models.LocalTime  `json:"next_run_at"`
+	CompletedAt    *models.LocalTime `json:"completed_at,omitempty"`
+	CreatedAt      models.LocalTime  `json:"created_at"`
+	UpdatedAt      models.LocalTime  `json:"updated_at"`
 }
 
 func GetAWSCredentials(c *gin.Context) {
@@ -245,14 +277,18 @@ func CheckAWSCredentials(c *gin.Context) {
 			}()
 
 			record := addition.Credentials[credentialIndex]
+			region := strings.TrimSpace(addition.ActiveRegion)
+			if region == "" {
+				region = record.DefaultRegion
+			}
 			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 			defer cancel()
 
-			identity, err := awscloud.GetIdentity(ctx, &record, record.DefaultRegion)
+			identity, err := awscloud.GetIdentity(ctx, &record, region)
 			var quota *awscloud.EC2QuotaSummary
 			var quotaErr error
 			if err == nil {
-				quota, quotaErr = awscloud.GetEC2QuotaSummary(ctx, &record, record.DefaultRegion)
+				quota, quotaErr = awscloud.GetEC2QuotaSummary(ctx, &record, region)
 			}
 			mu.Lock()
 			addition.Credentials[credentialIndex].SetCheckResult(checkedAt, identity, quota, quotaErr, err)
@@ -299,8 +335,111 @@ func DeleteAWSCredential(c *gin.Context) {
 		return
 	}
 
-	logCloudAudit(c, "delete aws credential: "+credentialID)
+	cancelledCount, cancelErr := dbawsfollowup.CancelPendingTasksByCredential(
+		scope.UserUUID,
+		credentialID,
+		time.Now(),
+		"AWS credential removed; follow-up task cancelled",
+	)
+	if cancelErr != nil {
+		log.Printf("aws follow-up: failed to cancel tasks for deleted credential %s: %v", credentialID, cancelErr)
+	}
+
+	logCloudAudit(c, fmt.Sprintf("delete aws credential: %s (cancelled %d follow-up tasks)", credentialID, cancelledCount))
 	api.RespondSuccess(c, addition.ToPoolView())
+}
+
+func ListAWSFollowUpTasks(c *gin.Context) {
+	scope, ok := requireCurrentOwnerScope(c)
+	if !ok {
+		return
+	}
+
+	_, addition, err := loadAWSAddition(scope, true)
+	if err != nil {
+		api.RespondError(c, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	tasks, err := dbawsfollowup.ListTasksByUser(scope.UserUUID, 200, false)
+	if err != nil {
+		api.RespondError(c, http.StatusInternalServerError, "Failed to load AWS follow-up tasks: "+err.Error())
+		return
+	}
+
+	credentialNames := make(map[string]string, len(addition.Credentials))
+	for _, credential := range addition.Credentials {
+		credentialNames[credential.ID] = credential.Name
+	}
+
+	views := make([]awsFollowUpTaskView, 0, len(tasks))
+	for _, task := range tasks {
+		credentialName := credentialNames[task.CredentialID]
+		if credentialName == "" {
+			credentialName = task.CredentialID
+		}
+		views = append(views, awsFollowUpTaskView{
+			ID:             task.ID,
+			CredentialID:   task.CredentialID,
+			CredentialName: credentialName,
+			Region:         task.Region,
+			TaskType:       task.TaskType,
+			ResourceID:     task.ResourceID,
+			Status:         task.Status,
+			Attempts:       task.Attempts,
+			MaxAttempts:    task.MaxAttempts,
+			LastError:      task.LastError,
+			LastAttemptAt:  task.LastAttemptAt,
+			NextRunAt:      task.NextRunAt,
+			CompletedAt:    task.CompletedAt,
+			CreatedAt:      task.CreatedAt,
+			UpdatedAt:      task.UpdatedAt,
+		})
+	}
+
+	api.RespondSuccess(c, views)
+}
+
+func RetryAWSFollowUpTask(c *gin.Context) {
+	scope, ok := requireCurrentOwnerScope(c)
+	if !ok {
+		return
+	}
+
+	taskIDValue := strings.TrimSpace(c.Param("id"))
+	taskID, err := strconv.ParseUint(taskIDValue, 10, 64)
+	if err != nil || taskID == 0 {
+		api.RespondError(c, http.StatusBadRequest, "Invalid follow-up task id")
+		return
+	}
+
+	if err := dbawsfollowup.RetryTaskByID(scope.UserUUID, uint(taskID), time.Now()); err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			api.RespondError(c, http.StatusNotFound, "AWS follow-up task not found or is not retryable")
+			return
+		}
+		api.RespondError(c, http.StatusInternalServerError, "Failed to retry AWS follow-up task: "+err.Error())
+		return
+	}
+
+	logCloudAudit(c, fmt.Sprintf("retry aws follow-up task: %d", taskID))
+	api.RespondSuccess(c, gin.H{"id": taskID, "status": models.AWSFollowUpTaskStatusPending})
+}
+
+func ClearAWSFollowUpTerminalTasks(c *gin.Context) {
+	scope, ok := requireCurrentOwnerScope(c)
+	if !ok {
+		return
+	}
+
+	deletedCount, err := dbawsfollowup.DeleteTerminalTasksByUser(scope.UserUUID)
+	if err != nil {
+		api.RespondError(c, http.StatusInternalServerError, "Failed to clear AWS follow-up tasks: "+err.Error())
+		return
+	}
+
+	logCloudAudit(c, fmt.Sprintf("clear aws follow-up terminal tasks: %d", deletedCount))
+	api.RespondSuccess(c, gin.H{"deleted_count": deletedCount})
 }
 
 func GetAWSCredentialSecret(c *gin.Context) {
@@ -678,6 +817,7 @@ func CreateAWSInstance(c *gin.Context) {
 		SecurityGroupIDs: trimStringSlice(payload.SecurityGroupIDs),
 		UserData:         resolvedUserData,
 		AssignPublicIP:   payload.AssignPublicIP,
+		AssignIPv6:       payload.AssignIPv6,
 		Tags:             payload.Tags,
 	}
 
@@ -685,6 +825,36 @@ func CreateAWSInstance(c *gin.Context) {
 	if err != nil {
 		respondAWSError(c, err)
 		return
+	}
+
+	warnings := make([]string, 0, 2)
+	if request.AssignIPv6 {
+		followUpErr := runAWSCreateFollowUp(ctx, awsCreateFollowUpSyncAttempts, awsCreateFollowUpSyncDelay, func(runCtx context.Context) error {
+			_, err := awscloud.EnsureInstanceIPv6Address(runCtx, credential, region, instance.InstanceID)
+			return err
+		})
+		if followUpErr != nil {
+			if enqueueErr := awsfollowup.EnqueueEC2AssignIPv6(scope.UserUUID, credential.ID, region, instance.InstanceID, time.Now().Add(awsCreateFollowUpNextRunDelay)); enqueueErr != nil {
+				warnings = append(warnings, fmt.Sprintf("IPv6 setup is still pending, and Komari could not queue the background retry: %v (enqueue error: %v)", followUpErr, enqueueErr))
+			} else {
+				warnings = append(warnings, fmt.Sprintf("IPv6 setup is still pending and Komari will keep retrying in the background: %v", followUpErr))
+			}
+		} else if refreshedInstance, refreshErr := awscloud.GetInstance(ctx, credential, region, instance.InstanceID); refreshErr == nil {
+			instance = refreshedInstance
+		}
+	}
+	if payload.AllowAllTraffic {
+		followUpErr := runAWSCreateFollowUp(ctx, awsCreateFollowUpSyncAttempts, awsCreateFollowUpSyncDelay, func(runCtx context.Context) error {
+			_, err := awscloud.AllowAllSecurityGroupTraffic(runCtx, credential, region, instance.InstanceID)
+			return err
+		})
+		if followUpErr != nil {
+			if enqueueErr := awsfollowup.EnqueueEC2AllowAllTraffic(scope.UserUUID, credential.ID, region, instance.InstanceID, time.Now().Add(awsCreateFollowUpNextRunDelay)); enqueueErr != nil {
+				warnings = append(warnings, fmt.Sprintf("Security group opening is still pending, and Komari could not queue the background retry: %v (enqueue error: %v)", followUpErr, enqueueErr))
+			} else {
+				warnings = append(warnings, fmt.Sprintf("Security group opening is still pending and Komari will keep retrying in the background: %v", followUpErr))
+			}
+		}
 	}
 
 	logMessage := fmt.Sprintf("create aws ec2 instance: %s (%s/%s", request.Name, region, request.InstanceType)
@@ -695,6 +865,7 @@ func CreateAWSInstance(c *gin.Context) {
 	logCloudAudit(c, logMessage)
 	api.RespondSuccess(c, gin.H{
 		"instance": instance,
+		"warning":  strings.Join(warnings, "; "),
 	})
 }
 
@@ -754,6 +925,20 @@ func CreateAWSLightsailInstance(c *gin.Context) {
 		return
 	}
 
+	warnings := make([]string, 0, 1)
+	if payload.AllowAllTraffic {
+		followUpErr := runAWSCreateFollowUp(ctx, awsCreateFollowUpSyncAttempts, awsCreateFollowUpSyncDelay, func(runCtx context.Context) error {
+			return awscloud.OpenLightsailAllPublicPorts(runCtx, credential, region, request.Name)
+		})
+		if followUpErr != nil {
+			if enqueueErr := awsfollowup.EnqueueLightsailAllowAllPorts(scope.UserUUID, credential.ID, region, request.Name, time.Now().Add(awsCreateFollowUpNextRunDelay)); enqueueErr != nil {
+				warnings = append(warnings, fmt.Sprintf("Lightsail firewall opening is still pending, and Komari could not queue the background retry: %v (enqueue error: %v)", followUpErr, enqueueErr))
+			} else {
+				warnings = append(warnings, fmt.Sprintf("Lightsail firewall opening is still pending and Komari will keep retrying in the background: %v", followUpErr))
+			}
+		}
+	}
+
 	logMessage := fmt.Sprintf("create aws lightsail instance: %s (%s/%s", request.Name, request.AvailabilityZone, request.BundleID)
 	if autoConnectGroup != "" {
 		logMessage += ", auto_connect_group=" + autoConnectGroup
@@ -761,8 +946,9 @@ func CreateAWSLightsailInstance(c *gin.Context) {
 	logMessage += ")"
 	logCloudAudit(c, logMessage)
 	api.RespondSuccess(c, gin.H{
-		"name":   request.Name,
-		"status": "submitted",
+		"name":    request.Name,
+		"status":  "submitted",
+		"warning": strings.Join(warnings, "; "),
 	})
 }
 
@@ -919,6 +1105,17 @@ func PostAWSInstanceAction(c *gin.Context) {
 			return
 		}
 		err = awscloud.ReleaseAddress(ctx, credential, region, payload.AllocationID)
+	case "replace_address":
+		address, releasedAllocationIDs, actionErr := awscloud.ReplaceAddress(
+			ctx,
+			credential,
+			region,
+			instanceID,
+			payload.PrivateIP,
+		)
+		err = actionErr
+		response["address"] = address
+		response["released_allocation_ids"] = releasedAllocationIDs
 	case "allow_all_traffic":
 		groupIDs, actionErr := awscloud.AllowAllSecurityGroupTraffic(ctx, credential, region, instanceID)
 		err = actionErr
@@ -1010,6 +1207,22 @@ func PostAWSLightsailInstanceAction(c *gin.Context) {
 		}
 		err = awscloud.ReleaseLightsailStaticIP(ctx, credential, region, payload.StaticIPName)
 		response["static_ip_name"] = strings.TrimSpace(payload.StaticIPName)
+	case "replace_static_ip":
+		staticIPName := strings.TrimSpace(payload.StaticIPName)
+		if staticIPName == "" {
+			api.RespondError(c, http.StatusBadRequest, "static_ip_name is required")
+			return
+		}
+		releasedStaticIPName, actionErr := awscloud.ReplaceLightsailStaticIP(
+			ctx,
+			credential,
+			region,
+			staticIPName,
+			instanceName,
+		)
+		err = actionErr
+		response["static_ip_name"] = staticIPName
+		response["released_static_ip_name"] = releasedStaticIPName
 	case "allow_all_traffic":
 		err = awscloud.OpenLightsailAllPublicPorts(ctx, credential, region, instanceName)
 	default:
@@ -1023,6 +1236,41 @@ func PostAWSLightsailInstanceAction(c *gin.Context) {
 
 	logCloudAudit(c, fmt.Sprintf("aws lightsail instance action: %s (%s)", actionType, instanceName))
 	api.RespondSuccess(c, response)
+}
+
+func runAWSCreateFollowUp(ctx context.Context, attempts int, delay time.Duration, action func(context.Context) error) error {
+	if attempts < 1 {
+		attempts = 1
+	}
+	if delay <= 0 {
+		delay = time.Second
+	}
+
+	var lastErr error
+	for attempt := 0; attempt < attempts; attempt++ {
+		if err := action(ctx); err == nil {
+			return nil
+		} else {
+			lastErr = err
+		}
+
+		if attempt == attempts-1 {
+			break
+		}
+
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			if lastErr != nil {
+				return lastErr
+			}
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+
+	return lastErr
 }
 
 func getAWSActiveCredential(c *gin.Context, scope ownerScope) (*awscloud.Addition, *awscloud.CredentialRecord, string, context.Context, context.CancelFunc, error) {

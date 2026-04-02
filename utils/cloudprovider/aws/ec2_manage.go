@@ -324,6 +324,72 @@ func AllocateAndAssociateAddress(ctx context.Context, credential *CredentialReco
 	return describeAddressByAllocationID(ctx, client, allocationID)
 }
 
+func ReplaceAddress(ctx context.Context, credential *CredentialRecord, region, instanceID, privateIP string) (*Address, []string, error) {
+	cfg, err := buildConfig(ctx, credential, region)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	client := ec2.NewFromConfig(cfg)
+	instance, err := describeInstance(ctx, client, instanceID)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	targetPrivateIP := resolveInstanceAddressTargetPrivateIP(instance, privateIP)
+	existingAddresses, err := listInstanceAddresses(ctx, client, instanceID)
+	if err != nil {
+		return nil, nil, err
+	}
+	replacedAddresses := filterAssociatedInstanceAddresses(existingAddresses, targetPrivateIP)
+
+	allocation, err := client.AllocateAddress(ctx, &ec2.AllocateAddressInput{
+		Domain: ec2types.DomainTypeVpc,
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+
+	allocationID := strings.TrimSpace(awssdk.ToString(allocation.AllocationId))
+	_, err = client.AssociateAddress(ctx, &ec2.AssociateAddressInput{
+		AllocationId:       awssdk.String(allocationID),
+		AllowReassociation: awssdk.Bool(true),
+		InstanceId:         awssdk.String(strings.TrimSpace(instanceID)),
+		PrivateIpAddress: func() *string {
+			if targetPrivateIP == "" {
+				return nil
+			}
+			return awssdk.String(targetPrivateIP)
+		}(),
+	})
+	if err != nil {
+		_, _ = client.ReleaseAddress(ctx, &ec2.ReleaseAddressInput{
+			AllocationId: awssdk.String(allocationID),
+		})
+		return nil, nil, err
+	}
+
+	address, err := describeAddressByAllocationID(ctx, client, allocationID)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	releasedAllocationIDs := make([]string, 0, len(replacedAddresses))
+	for _, replacedAddress := range replacedAddresses {
+		replacedAllocationID := strings.TrimSpace(replacedAddress.AllocationID)
+		if replacedAllocationID == "" || replacedAllocationID == allocationID {
+			continue
+		}
+		if err := releaseElasticAddressByAllocationID(ctx, client, replacedAllocationID); err != nil {
+			return address, releasedAllocationIDs, err
+		}
+		releasedAllocationIDs = append(releasedAllocationIDs, replacedAllocationID)
+	}
+	sort.Strings(releasedAllocationIDs)
+
+	return address, releasedAllocationIDs, nil
+}
+
 func AssociateAddress(ctx context.Context, credential *CredentialRecord, region, allocationID, instanceID, privateIP string) (*Address, error) {
 	cfg, err := buildConfig(ctx, credential, region)
 	if err != nil {
@@ -373,6 +439,42 @@ func ReleaseAddress(ctx context.Context, credential *CredentialRecord, region, a
 		AllocationId: awssdk.String(strings.TrimSpace(allocationID)),
 	})
 	return err
+}
+
+func EnsureInstanceIPv6Address(ctx context.Context, credential *CredentialRecord, region, instanceID string) ([]string, error) {
+	cfg, err := buildConfig(ctx, credential, region)
+	if err != nil {
+		return nil, err
+	}
+
+	client := ec2.NewFromConfig(cfg)
+	instance, err := describeInstance(ctx, client, instanceID)
+	if err != nil {
+		return nil, err
+	}
+
+	if addresses := listInstanceIPv6Addresses(instance); len(addresses) > 0 {
+		return addresses, nil
+	}
+
+	networkInterfaceID := primaryInstanceNetworkInterfaceID(instance)
+	if networkInterfaceID == "" {
+		return nil, fmt.Errorf("instance has no primary network interface: %s", strings.TrimSpace(instanceID))
+	}
+
+	if _, err := client.AssignIpv6Addresses(ctx, &ec2.AssignIpv6AddressesInput{
+		NetworkInterfaceId: awssdk.String(networkInterfaceID),
+		Ipv6AddressCount:   awssdk.Int32(1),
+	}); err != nil {
+		return nil, err
+	}
+
+	updatedInstance, err := describeInstance(ctx, client, instanceID)
+	if err != nil {
+		return nil, err
+	}
+
+	return listInstanceIPv6Addresses(updatedInstance), nil
 }
 
 func AllowAllSecurityGroupTraffic(ctx context.Context, credential *CredentialRecord, region, instanceID string) ([]string, error) {
@@ -436,6 +538,62 @@ func AllowAllSecurityGroupTraffic(ctx context.Context, credential *CredentialRec
 
 	sort.Strings(groupIDs)
 	return groupIDs, nil
+}
+
+func resolveInstanceAddressTargetPrivateIP(instance ec2types.Instance, privateIP string) string {
+	if trimmed := strings.TrimSpace(privateIP); trimmed != "" {
+		return trimmed
+	}
+	return strings.TrimSpace(awssdk.ToString(instance.PrivateIpAddress))
+}
+
+func filterAssociatedInstanceAddresses(addresses []Address, targetPrivateIP string) []Address {
+	filtered := make([]Address, 0, len(addresses))
+	for _, address := range addresses {
+		if strings.TrimSpace(address.AssociationID) == "" {
+			continue
+		}
+		if targetPrivateIP != "" && strings.TrimSpace(address.PrivateIP) != targetPrivateIP {
+			continue
+		}
+		filtered = append(filtered, address)
+	}
+	return filtered
+}
+
+func releaseElasticAddressByAllocationID(ctx context.Context, client *ec2.Client, allocationID string) error {
+	address, err := describeAddressByAllocationID(ctx, client, allocationID)
+	if err != nil {
+		return err
+	}
+	if address != nil && strings.TrimSpace(address.AssociationID) != "" {
+		if _, err := client.DisassociateAddress(ctx, &ec2.DisassociateAddressInput{
+			AssociationId: awssdk.String(strings.TrimSpace(address.AssociationID)),
+		}); err != nil {
+			return err
+		}
+	}
+	_, err = client.ReleaseAddress(ctx, &ec2.ReleaseAddressInput{
+		AllocationId: awssdk.String(strings.TrimSpace(allocationID)),
+	})
+	return err
+}
+
+func primaryInstanceNetworkInterfaceID(instance ec2types.Instance) string {
+	fallback := ""
+	for _, networkInterface := range instance.NetworkInterfaces {
+		networkInterfaceID := strings.TrimSpace(awssdk.ToString(networkInterface.NetworkInterfaceId))
+		if networkInterfaceID == "" {
+			continue
+		}
+		if fallback == "" {
+			fallback = networkInterfaceID
+		}
+		if networkInterface.Attachment != nil && networkInterface.Attachment.DeviceIndex != nil && awssdk.ToInt32(networkInterface.Attachment.DeviceIndex) == 0 {
+			return networkInterfaceID
+		}
+	}
+	return fallback
 }
 
 func describeInstance(ctx context.Context, client *ec2.Client, instanceID string) (ec2types.Instance, error) {

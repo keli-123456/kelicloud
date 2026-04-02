@@ -535,6 +535,66 @@ func ReleaseLightsailStaticIP(ctx context.Context, credential *CredentialRecord,
 	return err
 }
 
+func ReplaceLightsailStaticIP(ctx context.Context, credential *CredentialRecord, region, staticIPName, instanceName string) (string, error) {
+	client, err := newLightsailClient(ctx, credential, region)
+	if err != nil {
+		return "", err
+	}
+
+	staticIPs, err := ListLightsailStaticIPs(ctx, credential, region)
+	if err != nil {
+		return "", err
+	}
+
+	currentStaticIPName := findAttachedLightsailStaticIPName(staticIPs, instanceName)
+	if currentStaticIPName != "" && currentStaticIPName == strings.TrimSpace(staticIPName) {
+		return "", fmt.Errorf("replacement static IP name must differ from the currently attached static IP")
+	}
+
+	if _, err := client.AllocateStaticIp(ctx, &lightsail.AllocateStaticIpInput{
+		StaticIpName: awssdk.String(strings.TrimSpace(staticIPName)),
+	}); err != nil {
+		return "", err
+	}
+
+	if currentStaticIPName != "" {
+		if _, err := client.DetachStaticIp(ctx, &lightsail.DetachStaticIpInput{
+			StaticIpName: awssdk.String(currentStaticIPName),
+		}); err != nil {
+			_, _ = client.ReleaseStaticIp(ctx, &lightsail.ReleaseStaticIpInput{
+				StaticIpName: awssdk.String(strings.TrimSpace(staticIPName)),
+			})
+			return "", err
+		}
+	}
+
+	if _, err := client.AttachStaticIp(ctx, &lightsail.AttachStaticIpInput{
+		StaticIpName: awssdk.String(strings.TrimSpace(staticIPName)),
+		InstanceName: awssdk.String(strings.TrimSpace(instanceName)),
+	}); err != nil {
+		if currentStaticIPName != "" {
+			_, _ = client.AttachStaticIp(ctx, &lightsail.AttachStaticIpInput{
+				StaticIpName: awssdk.String(currentStaticIPName),
+				InstanceName: awssdk.String(strings.TrimSpace(instanceName)),
+			})
+		}
+		_, _ = client.ReleaseStaticIp(ctx, &lightsail.ReleaseStaticIpInput{
+			StaticIpName: awssdk.String(strings.TrimSpace(staticIPName)),
+		})
+		return "", err
+	}
+
+	if currentStaticIPName != "" {
+		if _, err := client.ReleaseStaticIp(ctx, &lightsail.ReleaseStaticIpInput{
+			StaticIpName: awssdk.String(currentStaticIPName),
+		}); err != nil {
+			return currentStaticIPName, err
+		}
+	}
+
+	return currentStaticIPName, nil
+}
+
 func OpenLightsailAllPublicPorts(ctx context.Context, credential *CredentialRecord, region, instanceName string) error {
 	client, err := newLightsailClient(ctx, credential, region)
 	if err != nil {
@@ -594,6 +654,16 @@ func OpenLightsailAllPublicPorts(ctx context.Context, credential *CredentialReco
 		PortInfo:     portInfo,
 	})
 	return err
+}
+
+func findAttachedLightsailStaticIPName(staticIPs []LightsailStaticIP, instanceName string) string {
+	trimmedInstanceName := strings.TrimSpace(instanceName)
+	for _, staticIP := range staticIPs {
+		if strings.TrimSpace(staticIP.AttachedTo) == trimmedInstanceName {
+			return strings.TrimSpace(staticIP.Name)
+		}
+	}
+	return ""
 }
 
 func newLightsailClient(ctx context.Context, credential *CredentialRecord, region string) (*lightsail.Client, error) {

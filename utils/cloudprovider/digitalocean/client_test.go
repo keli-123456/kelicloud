@@ -2,47 +2,57 @@ package digitalocean
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
-	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 )
 
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (fn roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return fn(request)
+}
+
+func newTestClient(t *testing.T, transport http.RoundTripper) *Client {
+	t.Helper()
+
+	client, err := newClient("token", "https://api.digitalocean.test")
+	require.NoError(t, err)
+	client.httpClient = &http.Client{Transport: transport}
+	return client
+}
+
+func jsonResponse(statusCode int, body string) *http.Response {
+	return &http.Response{
+		StatusCode: statusCode,
+		Header: http.Header{
+			"Content-Type": []string{"application/json"},
+		},
+		Body: io.NopCloser(strings.NewReader(body)),
+	}
+}
+
 func TestListDropletsFollowsPagination(t *testing.T) {
-	var server *httptest.Server
-	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Query().Get("page") {
+	client := newTestClient(t, roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		require.Equal(t, "/v2/droplets", request.URL.Path)
+
+		switch request.URL.Query().Get("page") {
 		case "2":
-			require.Equal(t, "/v2/droplets", r.URL.Path)
-			_ = json.NewEncoder(w).Encode(map[string]any{
-				"droplets": []map[string]any{
-					{"id": 2, "name": "second"},
-				},
-				"links": map[string]any{
-					"pages": map[string]any{},
-				},
-			})
+			return jsonResponse(http.StatusOK, `{
+				"droplets": [{"id": 2, "name": "second"}],
+				"links": {"pages": {}}
+			}`), nil
 		default:
-			require.Equal(t, "/v2/droplets", r.URL.Path)
-			_ = json.NewEncoder(w).Encode(map[string]any{
-				"droplets": []map[string]any{
-					{"id": 1, "name": "first"},
-				},
-				"links": map[string]any{
-					"pages": map[string]any{
-						"next": server.URL + "/v2/droplets?page=2",
-					},
-				},
-			})
+			return jsonResponse(http.StatusOK, `{
+				"droplets": [{"id": 1, "name": "first"}],
+				"links": {"pages": {"next": "https://api.digitalocean.test/v2/droplets?page=2"}}
+			}`), nil
 		}
 	}))
-	defer server.Close()
-
-	client, err := newClient("token", server.URL)
-	require.NoError(t, err)
 
 	droplets, err := client.ListDroplets(context.Background())
 	require.NoError(t, err)
@@ -52,20 +62,16 @@ func TestListDropletsFollowsPagination(t *testing.T) {
 }
 
 func TestGetAccountReturnsAPIError(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusUnauthorized)
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"id":         "unauthorized",
-			"message":    "invalid token",
-			"request_id": "req-123",
-		})
+	client := newTestClient(t, roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		require.Equal(t, "/v2/account", request.URL.Path)
+		return jsonResponse(http.StatusUnauthorized, `{
+			"id": "unauthorized",
+			"message": "invalid token",
+			"request_id": "req-123"
+		}`), nil
 	}))
-	defer server.Close()
 
-	client, err := newClient("token", server.URL)
-	require.NoError(t, err)
-
-	_, err = client.GetAccount(context.Background())
+	_, err := client.GetAccount(context.Background())
 	require.Error(t, err)
 
 	var apiErr *APIError

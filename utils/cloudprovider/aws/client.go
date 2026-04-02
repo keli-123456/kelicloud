@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -15,8 +16,15 @@ import (
 	awscredentials "github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
+	"github.com/aws/aws-sdk-go-v2/service/servicequotas"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/komari-monitor/komari/utils/outboundproxy"
+)
+
+const (
+	ec2ServiceCode                   = "ec2"
+	ec2StandardOnDemandVCPUQuotaCode = "L-1216C47A"
+	describeInstanceTypesBatchSize   = 100
 )
 
 type Identity struct {
@@ -27,10 +35,14 @@ type Identity struct {
 
 type EC2QuotaSummary struct {
 	Region                           string `json:"region,omitempty"`
+	MaxStandardVCPUs                 int    `json:"max_standard_vcpus,omitempty"`
 	MaxInstances                     int    `json:"max_instances,omitempty"`
 	MaxElasticIPs                    int    `json:"max_elastic_ips,omitempty"`
 	VPCMaxElasticIPs                 int    `json:"vpc_max_elastic_ips,omitempty"`
 	VPCMaxSecurityGroupsPerInterface int    `json:"vpc_max_security_groups_per_interface,omitempty"`
+	InstanceStandardVCPUs            int    `json:"instance_standard_vcpus,omitempty"`
+	ReservedStandardVCPUs            int    `json:"reserved_standard_vcpus,omitempty"`
+	RunningStandardVCPUs             int    `json:"running_standard_vcpus,omitempty"`
 	RunningInstances                 int    `json:"running_instances,omitempty"`
 	TotalInstances                   int    `json:"total_instances,omitempty"`
 	AllocatedElasticIPs              int    `json:"allocated_elastic_ips,omitempty"`
@@ -122,6 +134,7 @@ type CreateInstanceRequest struct {
 	SecurityGroupIDs []string `json:"security_group_ids,omitempty"`
 	UserData         string   `json:"user_data,omitempty"`
 	AssignPublicIP   bool     `json:"assign_public_ip"`
+	AssignIPv6       bool     `json:"assign_ipv6"`
 	Tags             []Tag    `json:"tags,omitempty"`
 }
 
@@ -208,7 +221,33 @@ func GetEC2QuotaSummary(ctx context.Context, credential *CredentialRecord, regio
 		}
 	}
 
-	if summary.MaxInstances == 0 &&
+	warnings := make([]string, 0, 3)
+
+	if maxStandardVCPUs, quotaErr := getStandardOnDemandVCPUQuota(ctx, cfg); quotaErr == nil {
+		summary.MaxStandardVCPUs = maxStandardVCPUs
+	} else {
+		warnings = append(warnings, "standard vCPU quota: "+quotaErr.Error())
+	}
+
+	if usage, usageErr := getInstanceUsageSummary(ctx, client); usageErr == nil {
+		summary.RunningInstances = usage.RunningInstances
+		summary.TotalInstances = usage.TotalInstances
+		summary.InstanceStandardVCPUs = usage.InstanceStandardVCPUs
+		summary.ReservedStandardVCPUs = usage.ReservedStandardVCPUs
+		summary.RunningStandardVCPUs = usage.RunningStandardVCPUs
+	} else {
+		warnings = append(warnings, "instance usage: "+usageErr.Error())
+	}
+
+	if allocatedCount, associatedCount, usageErr := getElasticAddressUsageCounts(ctx, client); usageErr == nil {
+		summary.AllocatedElasticIPs = allocatedCount
+		summary.AssociatedElasticIPs = associatedCount
+	} else {
+		warnings = append(warnings, "elastic IP usage: "+usageErr.Error())
+	}
+
+	if summary.MaxStandardVCPUs == 0 &&
+		summary.MaxInstances == 0 &&
 		summary.MaxElasticIPs == 0 &&
 		summary.VPCMaxElasticIPs == 0 &&
 		summary.VPCMaxSecurityGroupsPerInterface == 0 {
@@ -216,28 +255,20 @@ func GetEC2QuotaSummary(ctx context.Context, credential *CredentialRecord, regio
 		// account attributes are not populated for this credential.
 	}
 
-	if runningCount, totalCount, usageErr := getInstanceUsageCounts(ctx, client); usageErr == nil {
-		summary.RunningInstances = runningCount
-		summary.TotalInstances = totalCount
-	}
-
-	if allocatedCount, associatedCount, usageErr := getElasticAddressUsageCounts(ctx, client); usageErr == nil {
-		summary.AllocatedElasticIPs = allocatedCount
-		summary.AssociatedElasticIPs = associatedCount
-	}
-
-	if summary.MaxInstances == 0 &&
+	if summary.MaxStandardVCPUs == 0 &&
+		summary.MaxInstances == 0 &&
 		summary.MaxElasticIPs == 0 &&
 		summary.VPCMaxElasticIPs == 0 &&
 		summary.VPCMaxSecurityGroupsPerInterface == 0 &&
+		summary.RunningStandardVCPUs == 0 &&
 		summary.RunningInstances == 0 &&
 		summary.TotalInstances == 0 &&
 		summary.AllocatedElasticIPs == 0 &&
 		summary.AssociatedElasticIPs == 0 {
-		return nil, nil
+		return nil, joinLookupWarnings(warnings)
 	}
 
-	return summary, nil
+	return summary, joinLookupWarnings(warnings)
 }
 
 func ListRegions(ctx context.Context, credential *CredentialRecord) ([]Region, error) {
@@ -577,6 +608,9 @@ func CreateInstance(ctx context.Context, credential *CredentialRecord, region st
 		if request.AssignPublicIP {
 			networkInterface.AssociatePublicIpAddress = awssdk.Bool(true)
 		}
+		if request.AssignIPv6 {
+			networkInterface.Ipv6AddressCount = awssdk.Int32(1)
+		}
 		input.NetworkInterfaces = []ec2types.InstanceNetworkInterfaceSpecification{networkInterface}
 	} else if len(securityGroupIDs) > 0 {
 		input.SecurityGroupIds = securityGroupIDs
@@ -712,17 +746,25 @@ func listInstanceIPv6Addresses(item ec2types.Instance) []string {
 	return addresses
 }
 
-func getInstanceUsageCounts(ctx context.Context, client *ec2.Client) (int, int, error) {
+type instanceUsageSummary struct {
+	RunningInstances      int
+	TotalInstances        int
+	InstanceStandardVCPUs int
+	ReservedStandardVCPUs int
+	RunningStandardVCPUs  int
+}
+
+func getInstanceUsageSummary(ctx context.Context, client *ec2.Client) (instanceUsageSummary, error) {
 	paginator := ec2.NewDescribeInstancesPaginator(client, &ec2.DescribeInstancesInput{
 		MaxResults: awssdk.Int32(100),
 	})
 
-	runningCount := 0
-	totalCount := 0
+	summary := instanceUsageSummary{}
+	nonReservedRunningByType := make(map[string]int)
 	for paginator.HasMorePages() {
 		page, err := paginator.NextPage(ctx)
 		if err != nil {
-			return 0, 0, err
+			return instanceUsageSummary{}, err
 		}
 		for _, reservation := range page.Reservations {
 			for _, item := range reservation.Instances {
@@ -730,15 +772,43 @@ func getInstanceUsageCounts(ctx context.Context, client *ec2.Client) (int, int, 
 				if state == ec2types.InstanceStateNameTerminated {
 					continue
 				}
-				totalCount++
+				summary.TotalInstances++
 				if state == ec2types.InstanceStateNameRunning {
-					runningCount++
+					summary.RunningInstances++
+					if countsTowardStandardOnDemandVCPUQuota(item) {
+						instanceType := strings.TrimSpace(string(item.InstanceType))
+						if instanceType != "" && strings.TrimSpace(awssdk.ToString(item.CapacityReservationId)) == "" {
+							nonReservedRunningByType[instanceType]++
+						}
+					}
 				}
 			}
 		}
 	}
 
-	return runningCount, totalCount, nil
+	reservedByType, err := getStandardOnDemandCapacityReservationCounts(ctx, client)
+	if err != nil {
+		return summary, err
+	}
+
+	instanceTypes := collectInstanceTypes(nonReservedRunningByType, reservedByType)
+	if len(instanceTypes) == 0 {
+		return summary, nil
+	}
+
+	vcpusByType, err := describeInstanceTypeDefaultVCPUs(ctx, client, instanceTypes)
+	if err != nil {
+		return summary, err
+	}
+	for instanceType, count := range nonReservedRunningByType {
+		summary.InstanceStandardVCPUs += vcpusByType[instanceType] * count
+	}
+	for instanceType, count := range reservedByType {
+		summary.ReservedStandardVCPUs += vcpusByType[instanceType] * count
+	}
+	summary.RunningStandardVCPUs = summary.InstanceStandardVCPUs + summary.ReservedStandardVCPUs
+
+	return summary, nil
 }
 
 func getElasticAddressUsageCounts(ctx context.Context, client *ec2.Client) (int, int, error) {
@@ -756,6 +826,159 @@ func getElasticAddressUsageCounts(ctx context.Context, client *ec2.Client) (int,
 	}
 
 	return allocatedCount, associatedCount, nil
+}
+
+func getStandardOnDemandVCPUQuota(ctx context.Context, cfg awssdk.Config) (int, error) {
+	client := servicequotas.NewFromConfig(cfg)
+	output, err := client.GetServiceQuota(ctx, &servicequotas.GetServiceQuotaInput{
+		ServiceCode: awssdk.String(ec2ServiceCode),
+		QuotaCode:   awssdk.String(ec2StandardOnDemandVCPUQuotaCode),
+	})
+	if err != nil {
+		return 0, err
+	}
+	if output == nil || output.Quota == nil {
+		return 0, errors.New("aws service quotas returned no EC2 standard vCPU quota")
+	}
+	return int(math.Round(awssdk.ToFloat64(output.Quota.Value))), nil
+}
+
+func describeInstanceTypeDefaultVCPUs(ctx context.Context, client *ec2.Client, instanceTypes []string) (map[string]int, error) {
+	result := make(map[string]int, len(instanceTypes))
+	for start := 0; start < len(instanceTypes); start += describeInstanceTypesBatchSize {
+		end := start + describeInstanceTypesBatchSize
+		if end > len(instanceTypes) {
+			end = len(instanceTypes)
+		}
+
+		batch := make([]ec2types.InstanceType, 0, end-start)
+		for _, instanceType := range instanceTypes[start:end] {
+			batch = append(batch, ec2types.InstanceType(instanceType))
+		}
+
+		output, err := client.DescribeInstanceTypes(ctx, &ec2.DescribeInstanceTypesInput{
+			InstanceTypes: batch,
+		})
+		if err != nil {
+			return nil, err
+		}
+		for _, item := range output.InstanceTypes {
+			result[strings.TrimSpace(string(item.InstanceType))] = int(awssdk.ToInt32(item.VCpuInfo.DefaultVCpus))
+		}
+	}
+	return result, nil
+}
+
+func getStandardOnDemandCapacityReservationCounts(ctx context.Context, client *ec2.Client) (map[string]int, error) {
+	paginator := ec2.NewDescribeCapacityReservationsPaginator(client, &ec2.DescribeCapacityReservationsInput{
+		MaxResults: awssdk.Int32(100),
+	})
+
+	countsByType := make(map[string]int)
+	for paginator.HasMorePages() {
+		page, err := paginator.NextPage(ctx)
+		if err != nil {
+			return nil, err
+		}
+		for _, reservation := range page.CapacityReservations {
+			if !capacityReservationCountsTowardStandardOnDemandVCPUQuota(reservation) {
+				continue
+			}
+
+			instanceType := strings.TrimSpace(awssdk.ToString(reservation.InstanceType))
+			totalInstances := int(awssdk.ToInt32(reservation.TotalInstanceCount))
+			if instanceType == "" || totalInstances <= 0 {
+				continue
+			}
+			countsByType[instanceType] += totalInstances
+		}
+	}
+
+	return countsByType, nil
+}
+
+func countsTowardStandardOnDemandVCPUQuota(instance ec2types.Instance) bool {
+	if instance.InstanceLifecycle != "" || strings.TrimSpace(awssdk.ToString(instance.CapacityBlockId)) != "" {
+		return false
+	}
+	return isStandardOnDemandInstanceType(string(instance.InstanceType))
+}
+
+func capacityReservationCountsTowardStandardOnDemandVCPUQuota(reservation ec2types.CapacityReservation) bool {
+	if reservation.ReservationType == ec2types.CapacityReservationTypeCapacityBlock {
+		return false
+	}
+	switch reservation.State {
+	case ec2types.CapacityReservationStateAssessing,
+		ec2types.CapacityReservationStateScheduled,
+		ec2types.CapacityReservationStatePending,
+		ec2types.CapacityReservationStateActive,
+		ec2types.CapacityReservationStateDelayed:
+		return isStandardOnDemandInstanceType(awssdk.ToString(reservation.InstanceType))
+	default:
+		return false
+	}
+}
+
+func isStandardOnDemandInstanceType(instanceType string) bool {
+	prefix := instanceFamilyPrefix(instanceType)
+	switch prefix {
+	case "", "dl", "f", "g", "hpc", "inf", "mac", "p", "trn", "u", "vt", "x":
+		return false
+	}
+
+	switch prefix[0] {
+	case 'a', 'c', 'd', 'h', 'i', 'm', 'r', 't', 'z':
+		return true
+	default:
+		return false
+	}
+}
+
+func instanceFamilyPrefix(instanceType string) string {
+	family := strings.ToLower(strings.TrimSpace(instanceType))
+	if dot := strings.Index(family, "."); dot >= 0 {
+		family = family[:dot]
+	}
+	for index, value := range family {
+		if value == '-' || (value >= '0' && value <= '9') {
+			return family[:index]
+		}
+	}
+	return family
+}
+
+func collectInstanceTypes(groupedCounts ...map[string]int) []string {
+	set := make(map[string]struct{})
+	for _, counts := range groupedCounts {
+		for instanceType, count := range counts {
+			if strings.TrimSpace(instanceType) == "" || count <= 0 {
+				continue
+			}
+			set[instanceType] = struct{}{}
+		}
+	}
+
+	result := make([]string, 0, len(set))
+	for instanceType := range set {
+		result = append(result, instanceType)
+	}
+	sort.Strings(result)
+	return result
+}
+
+func joinLookupWarnings(parts []string) error {
+	filtered := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			filtered = append(filtered, part)
+		}
+	}
+	if len(filtered) == 0 {
+		return nil
+	}
+	return errors.New(strings.Join(filtered, "; "))
 }
 
 func buildTagSpecifications(name string, tags []Tag) []ec2types.TagSpecification {

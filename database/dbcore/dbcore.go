@@ -654,6 +654,7 @@ func GetDBInstance() *gorm.DB {
 			&models.MessageSenderProvider{},
 			&models.CloudProvider{},
 			&models.CloudInstanceShare{},
+			&models.AWSFollowUpTask{},
 		)
 		if err != nil {
 			log.Fatalf("Failed to create tables: %v", err)

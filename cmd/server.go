@@ -36,6 +36,7 @@ import (
 	"github.com/komari-monitor/komari/database/tasks"
 	"github.com/komari-monitor/komari/public"
 	"github.com/komari-monitor/komari/utils"
+	"github.com/komari-monitor/komari/utils/awsfollowup"
 	clientddns "github.com/komari-monitor/komari/utils/clientddns"
 	"github.com/komari-monitor/komari/utils/cloudflared"
 	_ "github.com/komari-monitor/komari/utils/cloudprovider"
@@ -335,6 +336,9 @@ func RunServer() {
 				awsGroup.POST("/credentials/check", admin.CheckAWSCredentials)
 				awsGroup.GET("/credentials/:id/secret", admin.GetAWSCredentialSecret)
 				awsGroup.DELETE("/credentials/:id", admin.DeleteAWSCredential)
+				awsGroup.GET("/follow-up-tasks", admin.ListAWSFollowUpTasks)
+				awsGroup.POST("/follow-up-tasks/:id/retry", admin.RetryAWSFollowUpTask)
+				awsGroup.DELETE("/follow-up-tasks/terminal", admin.ClearAWSFollowUpTerminalTasks)
 				awsGroup.GET("/account", admin.GetAWSAccount)
 				awsGroup.GET("/catalog", admin.GetAWSCatalog)
 				awsGroup.GET("/instances", admin.ListAWSInstances)
@@ -528,6 +532,7 @@ func DoScheduledWork() {
 	d_notification.ReloadLoadNotificationSchedule()
 	ticker := time.NewTicker(time.Minute * 30)
 	minute := time.NewTicker(60 * time.Second)
+	quarterMinute := time.NewTicker(15 * time.Second)
 	//records.DeleteRecordBefore(time.Now().Add(-time.Hour * 24 * 30))
 	records.CompactRecord()
 	go notifier.CheckExpireScheduledWork()
@@ -551,6 +556,8 @@ func DoScheduledWork() {
 			failover.RunScheduledWork()
 			clientddns.RunScheduledSync()
 			offlinecleanup.RunScheduledWork()
+		case <-quarterMinute.C:
+			awsfollowup.RunScheduledWork()
 		}
 	}
 

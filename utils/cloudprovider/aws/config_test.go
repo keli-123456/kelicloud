@@ -22,9 +22,13 @@ func TestCredentialRecordSetCheckResultStoresQuota(t *testing.T) {
 		UserID:    "AIDATEST",
 	}, &EC2QuotaSummary{
 		Region:                           "us-west-2",
+		MaxStandardVCPUs:                 32,
 		MaxInstances:                     20,
 		MaxElasticIPs:                    5,
 		VPCMaxSecurityGroupsPerInterface: 5,
+		InstanceStandardVCPUs:            4,
+		ReservedStandardVCPUs:            4,
+		RunningStandardVCPUs:             8,
 		RunningInstances:                 3,
 		TotalInstances:                   4,
 		AllocatedElasticIPs:              2,
@@ -36,9 +40,13 @@ func TestCredentialRecordSetCheckResultStoresQuota(t *testing.T) {
 	require.Equal(t, "123456789012", credential.AccountID)
 	require.NotNil(t, credential.EC2Quota)
 	require.Equal(t, "us-west-2", credential.EC2Quota.Region)
+	require.Equal(t, 32, credential.EC2Quota.MaxStandardVCPUs)
 	require.Equal(t, 20, credential.EC2Quota.MaxInstances)
 	require.Equal(t, 5, credential.EC2Quota.MaxElasticIPs)
 	require.Equal(t, 5, credential.EC2Quota.VPCMaxSecurityGroupsPerInterface)
+	require.Equal(t, 4, credential.EC2Quota.InstanceStandardVCPUs)
+	require.Equal(t, 4, credential.EC2Quota.ReservedStandardVCPUs)
+	require.Equal(t, 8, credential.EC2Quota.RunningStandardVCPUs)
 	require.Equal(t, 3, credential.EC2Quota.RunningInstances)
 	require.Equal(t, 4, credential.EC2Quota.TotalInstances)
 	require.Equal(t, 2, credential.EC2Quota.AllocatedElasticIPs)
@@ -48,13 +56,19 @@ func TestCredentialRecordSetCheckResultStoresQuota(t *testing.T) {
 
 func TestNormalizeEC2QuotaSummaryKeepsUsageOnlyData(t *testing.T) {
 	summary := normalizeEC2QuotaSummary(&EC2QuotaSummary{
-		Region:              "us-east-1",
-		RunningInstances:    2,
-		AllocatedElasticIPs: 1,
+		Region:                "us-east-1",
+		InstanceStandardVCPUs: 4,
+		ReservedStandardVCPUs: 4,
+		RunningStandardVCPUs:  8,
+		RunningInstances:      2,
+		AllocatedElasticIPs:   1,
 	})
 
 	require.NotNil(t, summary)
 	require.Equal(t, "us-east-1", summary.Region)
+	require.Equal(t, 4, summary.InstanceStandardVCPUs)
+	require.Equal(t, 4, summary.ReservedStandardVCPUs)
+	require.Equal(t, 8, summary.RunningStandardVCPUs)
 	require.Equal(t, 2, summary.RunningInstances)
 	require.Equal(t, 1, summary.AllocatedElasticIPs)
 }
