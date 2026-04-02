@@ -248,6 +248,35 @@ func saveDigitalOceanAddition(userUUID string, addition *digitalocean.Addition) 
 	return saveProviderAddition(userUUID, "digitalocean", string(payload))
 }
 
+func reloadDigitalOceanAdditionTokenState(userUUID string, token *digitalocean.TokenRecord) (*digitalocean.Addition, *digitalocean.TokenRecord, error) {
+	if token == nil {
+		return nil, nil, errors.New("DigitalOcean token is not configured")
+	}
+
+	addition, err := loadDigitalOceanAddition(userUUID)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	latestToken := addition.FindToken(token.ID)
+	if latestToken == nil {
+		tokenValue := strings.TrimSpace(token.Token)
+		if tokenValue != "" {
+			for index := range addition.Tokens {
+				if strings.TrimSpace(addition.Tokens[index].Token) == tokenValue {
+					latestToken = &addition.Tokens[index]
+					break
+				}
+			}
+		}
+	}
+	if latestToken == nil {
+		return nil, nil, newProviderEntryNotFoundError("digitalocean", token.ID)
+	}
+
+	return addition, latestToken, nil
+}
+
 func loadLinodeAddition(userUUID string) (*linode.Addition, error) {
 	raw, err := loadProviderAddition(userUUID, "linode")
 	if err != nil {
@@ -326,6 +355,35 @@ func saveLinodeAddition(userUUID string, addition *linode.Addition) error {
 		return err
 	}
 	return saveProviderAddition(userUUID, "linode", string(payload))
+}
+
+func reloadLinodeAdditionTokenState(userUUID string, token *linode.TokenRecord) (*linode.Addition, *linode.TokenRecord, error) {
+	if token == nil {
+		return nil, nil, errors.New("Linode token is not configured")
+	}
+
+	addition, err := loadLinodeAddition(userUUID)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	latestToken := addition.FindToken(token.ID)
+	if latestToken == nil {
+		tokenValue := strings.TrimSpace(token.Token)
+		if tokenValue != "" {
+			for index := range addition.Tokens {
+				if strings.TrimSpace(addition.Tokens[index].Token) == tokenValue {
+					latestToken = &addition.Tokens[index]
+					break
+				}
+			}
+		}
+	}
+	if latestToken == nil {
+		return nil, nil, newProviderEntryNotFoundError("linode", token.ID)
+	}
+
+	return addition, latestToken, nil
 }
 
 func loadGenericProviderEntry(userUUID, providerName, entryID string) (*genericProviderEntry, error) {

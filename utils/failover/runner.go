@@ -83,6 +83,95 @@ type cleanupAssessment struct {
 	Result      map[string]interface{}
 }
 
+type provisionCleanupError struct {
+	Provider     string
+	ResourceType string
+	ResourceID   string
+	CleanupLabel string
+	CleanupError error
+	Cause        error
+}
+
+func (e *provisionCleanupError) Error() string {
+	if e == nil {
+		return ""
+	}
+
+	resourceLabel := strings.TrimSpace(e.ResourceType)
+	if resourceLabel == "" {
+		resourceLabel = "instance"
+	}
+	resourceID := strings.TrimSpace(e.ResourceID)
+	resourceRef := resourceLabel
+	if resourceID != "" {
+		resourceRef = resourceLabel + " " + resourceID
+	}
+
+	if e.CleanupError != nil {
+		return fmt.Sprintf(
+			"failed to save the root password for new %s; automatic cleanup failed and the resource may still exist: %v; cleanup error: %v",
+			resourceRef,
+			e.Cause,
+			e.CleanupError,
+		)
+	}
+
+	return fmt.Sprintf(
+		"failed to save the root password for new %s; deleted the resource automatically to avoid leaving an unmanaged instance: %v",
+		resourceRef,
+		e.Cause,
+	)
+}
+
+func (e *provisionCleanupError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Cause
+}
+
+func (e *provisionCleanupError) cleanupStatus() string {
+	if e == nil {
+		return ""
+	}
+	if e.CleanupError != nil {
+		return "delete_failed"
+	}
+	return "deleted"
+}
+
+func (e *provisionCleanupError) stepMessage() string {
+	if e == nil {
+		return ""
+	}
+	if e.CleanupError != nil {
+		return "new instance root password could not be saved and automatic cleanup failed"
+	}
+	return "new instance root password could not be saved; deleted the new instance automatically"
+}
+
+func (e *provisionCleanupError) detail() map[string]interface{} {
+	if e == nil {
+		return nil
+	}
+
+	detail := map[string]interface{}{
+		"provider":       strings.TrimSpace(e.Provider),
+		"resource_type":  strings.TrimSpace(e.ResourceType),
+		"resource_id":    strings.TrimSpace(e.ResourceID),
+		"failure_class":  "post_provision_error",
+		"cleanup_status": e.cleanupStatus(),
+		"label":          strings.TrimSpace(e.CleanupLabel),
+	}
+	if e.Cause != nil {
+		detail["error"] = e.Cause.Error()
+	}
+	if e.CleanupError != nil {
+		detail["cleanup_error"] = e.CleanupError.Error()
+	}
+	return detail
+}
+
 type blockedOutletError struct {
 	ClientUUID string
 	Status     string
@@ -680,6 +769,26 @@ func (r *executionRunner) executePlanActionWithProviderPool(plan models.Failover
 					attemptDetail["error"] = actionErr.Error()
 					entryAttempts = append(entryAttempts, attemptDetail)
 					return nil, "", entryAttempts, actionErr
+				}
+				var provisionErr *provisionCleanupError
+				if errors.As(actionErr, &provisionErr) {
+					for key, value := range provisionErr.detail() {
+						attemptDetail[key] = value
+					}
+					attemptDetail["status"] = "failed"
+					attemptDetail["error"] = actionErr.Error()
+					entryAttempts = append(entryAttempts, attemptDetail)
+
+					rollbackStep := r.startStep("rollback_new", "Cleanup Failed New Instance", provisionErr.detail())
+					rollbackStatus := models.FailoverStepStatusSuccess
+					if provisionErr.CleanupError != nil {
+						rollbackStatus = models.FailoverStepStatusFailed
+					}
+					r.finishStep(rollbackStep, rollbackStatus, provisionErr.stepMessage(), provisionErr.detail())
+
+					postProvisionFailureSeen = true
+					postProvisionFailureErr = actionErr
+					goto nextCandidate
 				}
 				decision := classifyProviderFailure(plan.Provider, actionErr)
 				applyProviderEntryFailure(r.task.UserID, plan.Provider, candidate.EntryID, decision, actionErr)
@@ -1375,12 +1484,18 @@ func persistDigitalOceanRootPassword(userUUID string, addition *digitalocean.Add
 	if addition == nil || token == nil || dropletID <= 0 || strings.TrimSpace(rootPassword) == "" {
 		return nil
 	}
-	if err := token.SaveDropletPassword(dropletID, dropletName, passwordMode, rootPassword, time.Now()); err != nil {
+
+	latestAddition, latestToken, err := reloadDigitalOceanAdditionTokenState(userUUID, token)
+	if err != nil {
+		log.Printf("failover: failed to reload DigitalOcean token state for droplet %d: %v", dropletID, err)
+		return err
+	}
+	if err := latestToken.SaveDropletPassword(dropletID, dropletName, passwordMode, rootPassword, time.Now()); err != nil {
 		log.Printf("failover: failed to save DigitalOcean root password for droplet %d: %v", dropletID, err)
 		return err
 	}
-	if err := saveDigitalOceanAddition(userUUID, addition); err != nil {
-		token.RemoveSavedDropletPassword(dropletID)
+	if err := saveDigitalOceanAddition(userUUID, latestAddition); err != nil {
+		latestToken.RemoveSavedDropletPassword(dropletID)
 		log.Printf("failover: failed to persist DigitalOcean root password for droplet %d: %v", dropletID, err)
 		return err
 	}
@@ -1391,10 +1506,20 @@ func removeSavedDigitalOceanRootPassword(userUUID string, addition *digitalocean
 	if addition == nil || token == nil || dropletID <= 0 {
 		return
 	}
-	if !token.RemoveSavedDropletPassword(dropletID) {
+
+	targetAddition := addition
+	targetToken := token
+	if latestAddition, latestToken, err := reloadDigitalOceanAdditionTokenState(userUUID, token); err == nil {
+		targetAddition = latestAddition
+		targetToken = latestToken
+	} else {
+		log.Printf("failover: failed to reload DigitalOcean token state for droplet %d cleanup, falling back to in-memory state: %v", dropletID, err)
+	}
+
+	if !targetToken.RemoveSavedDropletPassword(dropletID) {
 		return
 	}
-	if err := saveDigitalOceanAddition(userUUID, addition); err != nil {
+	if err := saveDigitalOceanAddition(userUUID, targetAddition); err != nil {
 		log.Printf("failover: failed to remove saved DigitalOcean root password for droplet %d: %v", dropletID, err)
 	}
 }
@@ -1403,12 +1528,18 @@ func persistLinodeRootPassword(userUUID string, addition *linodecloud.Addition, 
 	if addition == nil || token == nil || instanceID <= 0 || strings.TrimSpace(rootPassword) == "" {
 		return nil
 	}
-	if err := token.SaveInstancePassword(instanceID, instanceLabel, passwordMode, rootPassword, time.Now()); err != nil {
+
+	latestAddition, latestToken, err := reloadLinodeAdditionTokenState(userUUID, token)
+	if err != nil {
+		log.Printf("failover: failed to reload Linode token state for instance %d: %v", instanceID, err)
+		return err
+	}
+	if err := latestToken.SaveInstancePassword(instanceID, instanceLabel, passwordMode, rootPassword, time.Now()); err != nil {
 		log.Printf("failover: failed to save Linode root password for instance %d: %v", instanceID, err)
 		return err
 	}
-	if err := saveLinodeAddition(userUUID, addition); err != nil {
-		token.RemoveSavedInstancePassword(instanceID)
+	if err := saveLinodeAddition(userUUID, latestAddition); err != nil {
+		latestToken.RemoveSavedInstancePassword(instanceID)
 		log.Printf("failover: failed to persist Linode root password for instance %d: %v", instanceID, err)
 		return err
 	}
@@ -1419,10 +1550,20 @@ func removeSavedLinodeRootPassword(userUUID string, addition *linodecloud.Additi
 	if addition == nil || token == nil || instanceID <= 0 {
 		return
 	}
-	if !token.RemoveSavedInstancePassword(instanceID) {
+
+	targetAddition := addition
+	targetToken := token
+	if latestAddition, latestToken, err := reloadLinodeAdditionTokenState(userUUID, token); err == nil {
+		targetAddition = latestAddition
+		targetToken = latestToken
+	} else {
+		log.Printf("failover: failed to reload Linode token state for instance %d cleanup, falling back to in-memory state: %v", instanceID, err)
+	}
+
+	if !targetToken.RemoveSavedInstancePassword(instanceID) {
 		return
 	}
-	if err := saveLinodeAddition(userUUID, addition); err != nil {
+	if err := saveLinodeAddition(userUUID, targetAddition); err != nil {
 		log.Printf("failover: failed to remove saved Linode root password for instance %d: %v", instanceID, err)
 	}
 }
@@ -3659,6 +3800,26 @@ func provisionDigitalOceanDroplet(ctx context.Context, userUUID string, plan mod
 		return nil, normalizeExecutionStopError(err)
 	}
 	passwordSaveErr := persistDigitalOceanRootPassword(userUUID, addition, token, droplet.ID, droplet.Name, passwordMode, rootPassword)
+	if rootPassword != "" && passwordSaveErr != nil {
+		cleanupErr := client.DeleteDroplet(contextOrBackground(ctx), droplet.ID)
+		if cleanupErr != nil && !isDigitalOceanNotFoundError(cleanupErr) {
+			return nil, &provisionCleanupError{
+				Provider:     "digitalocean",
+				ResourceType: "droplet",
+				ResourceID:   strconv.Itoa(droplet.ID),
+				CleanupLabel: fmt.Sprintf("delete failed digitalocean droplet %d", droplet.ID),
+				CleanupError: normalizeExecutionStopError(cleanupErr),
+				Cause:        passwordSaveErr,
+			}
+		}
+		return nil, &provisionCleanupError{
+			Provider:     "digitalocean",
+			ResourceType: "droplet",
+			ResourceID:   strconv.Itoa(droplet.ID),
+			CleanupLabel: fmt.Sprintf("delete failed digitalocean droplet %d", droplet.ID),
+			Cause:        passwordSaveErr,
+		}
+	}
 	newInstanceRef := map[string]interface{}{
 		"provider":            "digitalocean",
 		"provider_entry_id":   token.ID,
@@ -3805,6 +3966,26 @@ func provisionLinodeInstance(ctx context.Context, userUUID string, plan models.F
 		passwordMode,
 		rootPassword,
 	)
+	if rootPassword != "" && passwordSaveErr != nil {
+		cleanupErr := client.DeleteInstance(contextOrBackground(ctx), instance.ID)
+		if cleanupErr != nil && !isLinodeNotFoundError(cleanupErr) {
+			return nil, &provisionCleanupError{
+				Provider:     "linode",
+				ResourceType: "instance",
+				ResourceID:   strconv.Itoa(instance.ID),
+				CleanupLabel: fmt.Sprintf("delete failed linode instance %d", instance.ID),
+				CleanupError: normalizeExecutionStopError(cleanupErr),
+				Cause:        passwordSaveErr,
+			}
+		}
+		return nil, &provisionCleanupError{
+			Provider:     "linode",
+			ResourceType: "instance",
+			ResourceID:   strconv.Itoa(instance.ID),
+			CleanupLabel: fmt.Sprintf("delete failed linode instance %d", instance.ID),
+			Cause:        passwordSaveErr,
+		}
+	}
 	newInstanceRef := map[string]interface{}{
 		"provider":            "linode",
 		"provider_entry_id":   token.ID,

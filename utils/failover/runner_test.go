@@ -14,6 +14,7 @@ import (
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/utils/cloudprovider/digitalocean"
+	linodecloud "github.com/komari-monitor/komari/utils/cloudprovider/linode"
 )
 
 func configureRunnerSQLiteDB(t *testing.T) {
@@ -530,6 +531,244 @@ func TestResolveCurrentInstanceCleanupByRefAddressTreatsMissingDigitalOceanToken
 	}
 	if cleanup.Label != "delete digitalocean instance at 203.0.113.10" {
 		t.Fatalf("unexpected cleanup label %q", cleanup.Label)
+	}
+}
+
+func TestPersistDigitalOceanRootPasswordReloadsLatestAdditionState(t *testing.T) {
+	configureRunnerSQLiteDB(t)
+	t.Setenv(digitalocean.DropletPasswordVaultKeyEnv, "failover-runner-test-secret")
+
+	const userUUID = "user-do-password-persist"
+	baseAddition := &digitalocean.Addition{
+		ActiveTokenID: "token-1",
+		Tokens: []digitalocean.TokenRecord{
+			{
+				ID:    "token-1",
+				Name:  "Token 1",
+				Token: "dop_v1_token_1",
+			},
+		},
+	}
+	if err := saveDigitalOceanAddition(userUUID, baseAddition); err != nil {
+		t.Fatalf("failed to seed DigitalOcean provider config: %v", err)
+	}
+
+	staleAddition, staleToken, err := loadDigitalOceanToken(userUUID, "token-1")
+	if err != nil {
+		t.Fatalf("failed to load stale DigitalOcean token: %v", err)
+	}
+
+	latestAddition, latestToken, err := loadDigitalOceanToken(userUUID, "token-1")
+	if err != nil {
+		t.Fatalf("failed to reload DigitalOcean token: %v", err)
+	}
+	if err := latestToken.SaveDropletPassword(1001, "web-old", "custom", "Old!Password123", time.Now().UTC()); err != nil {
+		t.Fatalf("failed to seed existing droplet password: %v", err)
+	}
+	if err := saveDigitalOceanAddition(userUUID, latestAddition); err != nil {
+		t.Fatalf("failed to save existing droplet credential: %v", err)
+	}
+
+	if err := persistDigitalOceanRootPassword(
+		userUUID,
+		staleAddition,
+		staleToken,
+		2002,
+		"web-new",
+		"custom",
+		"New!Password456",
+	); err != nil {
+		t.Fatalf("persistDigitalOceanRootPassword returned error: %v", err)
+	}
+
+	storedAddition, storedToken, err := loadDigitalOceanToken(userUUID, "token-1")
+	if err != nil {
+		t.Fatalf("failed to load updated DigitalOcean addition: %v", err)
+	}
+	if !storedAddition.HasSavedDropletPassword(1001) {
+		t.Fatal("expected existing DigitalOcean droplet credential to be preserved")
+	}
+	if !storedAddition.HasSavedDropletPassword(2002) {
+		t.Fatal("expected new DigitalOcean droplet credential to be saved")
+	}
+
+	passwordView, err := storedToken.RevealDropletPassword(2002)
+	if err != nil {
+		t.Fatalf("failed to reveal saved DigitalOcean droplet password: %v", err)
+	}
+	if passwordView.RootPassword != "New!Password456" {
+		t.Fatalf("unexpected DigitalOcean root password %q", passwordView.RootPassword)
+	}
+}
+
+func TestRemoveSavedDigitalOceanRootPasswordReloadsLatestAdditionState(t *testing.T) {
+	configureRunnerSQLiteDB(t)
+	t.Setenv(digitalocean.DropletPasswordVaultKeyEnv, "failover-runner-test-secret")
+
+	const userUUID = "user-do-password-remove"
+	baseAddition := &digitalocean.Addition{
+		ActiveTokenID: "token-1",
+		Tokens: []digitalocean.TokenRecord{
+			{
+				ID:    "token-1",
+				Name:  "Token 1",
+				Token: "dop_v1_token_1",
+			},
+		},
+	}
+	if err := saveDigitalOceanAddition(userUUID, baseAddition); err != nil {
+		t.Fatalf("failed to seed DigitalOcean provider config: %v", err)
+	}
+
+	staleAddition, staleToken, err := loadDigitalOceanToken(userUUID, "token-1")
+	if err != nil {
+		t.Fatalf("failed to load stale DigitalOcean token: %v", err)
+	}
+
+	latestAddition, latestToken, err := loadDigitalOceanToken(userUUID, "token-1")
+	if err != nil {
+		t.Fatalf("failed to reload DigitalOcean token: %v", err)
+	}
+	if err := latestToken.SaveDropletPassword(1001, "web-old", "custom", "Old!Password123", time.Now().UTC()); err != nil {
+		t.Fatalf("failed to seed DigitalOcean droplet password 1001: %v", err)
+	}
+	if err := latestToken.SaveDropletPassword(2002, "web-keep", "custom", "Keep!Password456", time.Now().UTC()); err != nil {
+		t.Fatalf("failed to seed DigitalOcean droplet password 2002: %v", err)
+	}
+	if err := saveDigitalOceanAddition(userUUID, latestAddition); err != nil {
+		t.Fatalf("failed to save seeded DigitalOcean credentials: %v", err)
+	}
+
+	removeSavedDigitalOceanRootPassword(userUUID, staleAddition, staleToken, 1001)
+
+	storedAddition, _, err := loadDigitalOceanToken(userUUID, "token-1")
+	if err != nil {
+		t.Fatalf("failed to load updated DigitalOcean addition: %v", err)
+	}
+	if storedAddition.HasSavedDropletPassword(1001) {
+		t.Fatal("expected targeted DigitalOcean droplet credential to be removed")
+	}
+	if !storedAddition.HasSavedDropletPassword(2002) {
+		t.Fatal("expected non-target DigitalOcean droplet credential to be preserved")
+	}
+}
+
+func TestPersistLinodeRootPasswordReloadsLatestAdditionState(t *testing.T) {
+	configureRunnerSQLiteDB(t)
+	t.Setenv(linodecloud.RootPasswordVaultKeyEnv, "failover-runner-test-secret")
+
+	const userUUID = "user-linode-password-persist"
+	baseAddition := &linodecloud.Addition{
+		ActiveTokenID: "token-1",
+		Tokens: []linodecloud.TokenRecord{
+			{
+				ID:    "token-1",
+				Name:  "Token 1",
+				Token: "linode_token_1",
+			},
+		},
+	}
+	if err := saveLinodeAddition(userUUID, baseAddition); err != nil {
+		t.Fatalf("failed to seed Linode provider config: %v", err)
+	}
+
+	staleAddition, staleToken, err := loadLinodeToken(userUUID, "token-1")
+	if err != nil {
+		t.Fatalf("failed to load stale Linode token: %v", err)
+	}
+
+	latestAddition, latestToken, err := loadLinodeToken(userUUID, "token-1")
+	if err != nil {
+		t.Fatalf("failed to reload Linode token: %v", err)
+	}
+	if err := latestToken.SaveInstancePassword(1001, "web-old", "custom", "Old!Password123", time.Now().UTC()); err != nil {
+		t.Fatalf("failed to seed existing Linode instance password: %v", err)
+	}
+	if err := saveLinodeAddition(userUUID, latestAddition); err != nil {
+		t.Fatalf("failed to save existing Linode credential: %v", err)
+	}
+
+	if err := persistLinodeRootPassword(
+		userUUID,
+		staleAddition,
+		staleToken,
+		2002,
+		"web-new",
+		"custom",
+		"New!Password456",
+	); err != nil {
+		t.Fatalf("persistLinodeRootPassword returned error: %v", err)
+	}
+
+	storedAddition, storedToken, err := loadLinodeToken(userUUID, "token-1")
+	if err != nil {
+		t.Fatalf("failed to load updated Linode addition: %v", err)
+	}
+	if !storedAddition.HasSavedInstancePassword(1001) {
+		t.Fatal("expected existing Linode instance credential to be preserved")
+	}
+	if !storedAddition.HasSavedInstancePassword(2002) {
+		t.Fatal("expected new Linode instance credential to be saved")
+	}
+
+	passwordView, err := storedToken.RevealInstancePassword(2002)
+	if err != nil {
+		t.Fatalf("failed to reveal saved Linode instance password: %v", err)
+	}
+	if passwordView.RootPassword != "New!Password456" {
+		t.Fatalf("unexpected Linode root password %q", passwordView.RootPassword)
+	}
+}
+
+func TestRemoveSavedLinodeRootPasswordReloadsLatestAdditionState(t *testing.T) {
+	configureRunnerSQLiteDB(t)
+	t.Setenv(linodecloud.RootPasswordVaultKeyEnv, "failover-runner-test-secret")
+
+	const userUUID = "user-linode-password-remove"
+	baseAddition := &linodecloud.Addition{
+		ActiveTokenID: "token-1",
+		Tokens: []linodecloud.TokenRecord{
+			{
+				ID:    "token-1",
+				Name:  "Token 1",
+				Token: "linode_token_1",
+			},
+		},
+	}
+	if err := saveLinodeAddition(userUUID, baseAddition); err != nil {
+		t.Fatalf("failed to seed Linode provider config: %v", err)
+	}
+
+	staleAddition, staleToken, err := loadLinodeToken(userUUID, "token-1")
+	if err != nil {
+		t.Fatalf("failed to load stale Linode token: %v", err)
+	}
+
+	latestAddition, latestToken, err := loadLinodeToken(userUUID, "token-1")
+	if err != nil {
+		t.Fatalf("failed to reload Linode token: %v", err)
+	}
+	if err := latestToken.SaveInstancePassword(1001, "web-old", "custom", "Old!Password123", time.Now().UTC()); err != nil {
+		t.Fatalf("failed to seed Linode instance password 1001: %v", err)
+	}
+	if err := latestToken.SaveInstancePassword(2002, "web-keep", "custom", "Keep!Password456", time.Now().UTC()); err != nil {
+		t.Fatalf("failed to seed Linode instance password 2002: %v", err)
+	}
+	if err := saveLinodeAddition(userUUID, latestAddition); err != nil {
+		t.Fatalf("failed to save seeded Linode credentials: %v", err)
+	}
+
+	removeSavedLinodeRootPassword(userUUID, staleAddition, staleToken, 1001)
+
+	storedAddition, _, err := loadLinodeToken(userUUID, "token-1")
+	if err != nil {
+		t.Fatalf("failed to load updated Linode addition: %v", err)
+	}
+	if storedAddition.HasSavedInstancePassword(1001) {
+		t.Fatal("expected targeted Linode instance credential to be removed")
+	}
+	if !storedAddition.HasSavedInstancePassword(2002) {
+		t.Fatal("expected non-target Linode instance credential to be preserved")
 	}
 }
 

@@ -29,9 +29,12 @@ const (
 	awsCreateFollowUpSyncAttempts = 5
 	awsCreateFollowUpSyncDelay    = 2 * time.Second
 	awsCreateFollowUpNextRunDelay = 15 * time.Second
+	awsAccountIdentityTimeout     = 12 * time.Second
+	awsAccountQuotaTimeout        = 10 * time.Second
 )
 
 type createAWSInstancePayload struct {
+	Region           string         `json:"region,omitempty"`
 	Name             string         `json:"name"`
 	ImageID          string         `json:"image_id" binding:"required"`
 	InstanceType     string         `json:"instance_type" binding:"required"`
@@ -42,12 +45,15 @@ type createAWSInstancePayload struct {
 	AssignPublicIP   bool           `json:"assign_public_ip"`
 	AssignIPv6       bool           `json:"assign_ipv6"`
 	AllowAllTraffic  bool           `json:"allow_all_traffic"`
+	RootPasswordMode string         `json:"root_password_mode,omitempty"`
+	RootPassword     string         `json:"root_password,omitempty"`
 	Tags             []awscloud.Tag `json:"tags,omitempty"`
 	AutoConnect      bool           `json:"auto_connect"`
 	AutoConnectGroup string         `json:"auto_connect_group,omitempty"`
 }
 
 type createAWSLightsailInstancePayload struct {
+	Region           string         `json:"region,omitempty"`
 	Name             string         `json:"name"`
 	AvailabilityZone string         `json:"availability_zone" binding:"required"`
 	BlueprintID      string         `json:"blueprint_id" binding:"required"`
@@ -56,6 +62,8 @@ type createAWSLightsailInstancePayload struct {
 	UserData         string         `json:"user_data,omitempty"`
 	IPAddressType    string         `json:"ip_address_type,omitempty"`
 	AllowAllTraffic  bool           `json:"allow_all_traffic"`
+	RootPasswordMode string         `json:"root_password_mode,omitempty"`
+	RootPassword     string         `json:"root_password,omitempty"`
 	Tags             []awscloud.Tag `json:"tags,omitempty"`
 	AutoConnect      bool           `json:"auto_connect"`
 	AutoConnectGroup string         `json:"auto_connect_group,omitempty"`
@@ -475,20 +483,26 @@ func GetAWSAccount(c *gin.Context) {
 		return
 	}
 
-	addition, credential, region, ctx, cancel, err := getAWSActiveCredential(c, scope)
+	addition, credential, region, _, cancel, err := getAWSActiveCredential(c, scope)
 	if err != nil {
 		respondAWSError(c, err)
 		return
 	}
 	defer cancel()
 
-	identity, err := awscloud.GetIdentity(ctx, credential, region)
+	identityCtx, identityCancel := context.WithTimeout(c.Request.Context(), awsAccountIdentityTimeout)
+	defer identityCancel()
+
+	identity, err := awscloud.GetIdentity(identityCtx, credential, region)
 	if err != nil {
 		respondAWSError(c, err)
 		return
 	}
 
-	quota, quotaErr := awscloud.GetEC2QuotaSummary(ctx, credential, region)
+	quotaCtx, quotaCancel := context.WithTimeout(c.Request.Context(), awsAccountQuotaTimeout)
+	defer quotaCancel()
+
+	quota, quotaErr := awscloud.GetEC2QuotaSummary(quotaCtx, credential, region)
 
 	if identity != nil {
 		credential.SetCheckResult(time.Now(), identity, quota, quotaErr, nil)
@@ -511,7 +525,8 @@ func GetAWSCatalog(c *gin.Context) {
 		return
 	}
 
-	_, credential, region, ctx, cancel, err := getAWSActiveCredential(c, scope)
+	regionOverride := strings.TrimSpace(c.Query("region"))
+	_, credential, region, ctx, cancel, err := getAWSActiveCredentialWithRegion(c, scope, regionOverride)
 	if err != nil {
 		respondAWSError(c, err)
 		return
@@ -631,7 +646,8 @@ func GetAWSLightsailCatalog(c *gin.Context) {
 		return
 	}
 
-	_, credential, region, ctx, cancel, err := getAWSActiveCredential(c, scope)
+	regionOverride := strings.TrimSpace(c.Query("region"))
+	_, credential, region, ctx, cancel, err := getAWSActiveCredentialWithRegion(c, scope, regionOverride)
 	if err != nil {
 		respondAWSError(c, err)
 		return
@@ -774,20 +790,30 @@ func CreateAWSInstance(c *gin.Context) {
 		return
 	}
 
-	_, credential, region, ctx, cancel, err := getAWSActiveCredential(c, scope)
-	if err != nil {
-		respondAWSError(c, err)
-		return
-	}
-	defer cancel()
-
 	var payload createAWSInstancePayload
 	if err := c.ShouldBindJSON(&payload); err != nil {
 		api.RespondError(c, http.StatusBadRequest, "Invalid instance request: "+err.Error())
 		return
 	}
 
-	resolvedUserData := strings.TrimSpace(payload.UserData)
+	regionOverride := strings.TrimSpace(payload.Region)
+	_, credential, region, ctx, cancel, err := getAWSActiveCredentialWithRegion(c, scope, regionOverride)
+	if err != nil {
+		respondAWSError(c, err)
+		return
+	}
+	defer cancel()
+
+	resolvedUserData, generatedRootPassword, err := resolveAWSRootPasswordUserData(
+		payload.RootPasswordMode,
+		payload.RootPassword,
+		payload.UserData,
+	)
+	if err != nil {
+		api.RespondError(c, http.StatusBadRequest, err.Error())
+		return
+	}
+
 	autoConnectGroup := ""
 	if payload.AutoConnect {
 		resolvedUserData, autoConnectGroup, err = prepareCloudAutoConnectUserData(c, resolvedUserData, autoConnectUserDataOptions{
@@ -864,8 +890,9 @@ func CreateAWSInstance(c *gin.Context) {
 	logMessage += ")"
 	logCloudAudit(c, logMessage)
 	api.RespondSuccess(c, gin.H{
-		"instance": instance,
-		"warning":  strings.Join(warnings, "; "),
+		"instance":           instance,
+		"warning":            strings.Join(warnings, "; "),
+		"generated_password": generatedRootPassword,
 	})
 }
 
@@ -875,20 +902,30 @@ func CreateAWSLightsailInstance(c *gin.Context) {
 		return
 	}
 
-	_, credential, region, ctx, cancel, err := getAWSActiveCredential(c, scope)
-	if err != nil {
-		respondAWSError(c, err)
-		return
-	}
-	defer cancel()
-
 	var payload createAWSLightsailInstancePayload
 	if err := c.ShouldBindJSON(&payload); err != nil {
 		api.RespondError(c, http.StatusBadRequest, "Invalid Lightsail instance request: "+err.Error())
 		return
 	}
 
-	resolvedUserData := strings.TrimSpace(payload.UserData)
+	regionOverride := strings.TrimSpace(payload.Region)
+	_, credential, region, ctx, cancel, err := getAWSActiveCredentialWithRegion(c, scope, regionOverride)
+	if err != nil {
+		respondAWSError(c, err)
+		return
+	}
+	defer cancel()
+
+	resolvedUserData, generatedRootPassword, err := resolveAWSRootPasswordUserData(
+		payload.RootPasswordMode,
+		payload.RootPassword,
+		payload.UserData,
+	)
+	if err != nil {
+		api.RespondError(c, http.StatusBadRequest, err.Error())
+		return
+	}
+
 	autoConnectGroup := ""
 	if payload.AutoConnect {
 		resolvedUserData, autoConnectGroup, err = prepareCloudAutoConnectUserData(c, resolvedUserData, autoConnectUserDataOptions{
@@ -946,9 +983,10 @@ func CreateAWSLightsailInstance(c *gin.Context) {
 	logMessage += ")"
 	logCloudAudit(c, logMessage)
 	api.RespondSuccess(c, gin.H{
-		"name":    request.Name,
-		"status":  "submitted",
-		"warning": strings.Join(warnings, "; "),
+		"name":               request.Name,
+		"status":             "submitted",
+		"warning":            strings.Join(warnings, "; "),
+		"generated_password": generatedRootPassword,
 	})
 }
 
@@ -1273,7 +1311,21 @@ func runAWSCreateFollowUp(ctx context.Context, attempts int, delay time.Duration
 	return lastErr
 }
 
-func getAWSActiveCredential(c *gin.Context, scope ownerScope) (*awscloud.Addition, *awscloud.CredentialRecord, string, context.Context, context.CancelFunc, error) {
+func resolveAWSRegion(addition *awscloud.Addition, activeCredential *awscloud.CredentialRecord, regionOverride string) string {
+	region := strings.TrimSpace(regionOverride)
+	if region == "" && addition != nil {
+		region = strings.TrimSpace(addition.ActiveRegion)
+	}
+	if region == "" && activeCredential != nil {
+		region = strings.TrimSpace(activeCredential.DefaultRegion)
+	}
+	if region == "" {
+		region = awscloud.DefaultRegion
+	}
+	return region
+}
+
+func getAWSActiveCredentialWithRegion(c *gin.Context, scope ownerScope, regionOverride string) (*awscloud.Addition, *awscloud.CredentialRecord, string, context.Context, context.CancelFunc, error) {
 	_, addition, err := loadAWSAddition(scope, false)
 	if err != nil {
 		return nil, nil, "", nil, nil, err
@@ -1284,17 +1336,38 @@ func getAWSActiveCredential(c *gin.Context, scope ownerScope) (*awscloud.Additio
 		return nil, nil, "", nil, nil, fmt.Errorf("AWS credential is not configured")
 	}
 
-	region := addition.ActiveRegion
-	if strings.TrimSpace(region) == "" {
-		region = activeCredential.DefaultRegion
-	}
-	region = strings.TrimSpace(region)
-	if region == "" {
-		region = awscloud.DefaultRegion
-	}
+	region := resolveAWSRegion(addition, activeCredential, regionOverride)
 
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 45*time.Second)
 	return addition, activeCredential, region, ctx, cancel, nil
+}
+
+func getAWSActiveCredential(c *gin.Context, scope ownerScope) (*awscloud.Addition, *awscloud.CredentialRecord, string, context.Context, context.CancelFunc, error) {
+	return getAWSActiveCredentialWithRegion(c, scope, "")
+}
+
+func resolveAWSRootPasswordUserData(mode, rootPassword, userData string) (string, string, error) {
+	userData = strings.TrimSpace(userData)
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "", "none":
+		return userData, "", nil
+	case "custom":
+		rootPassword = strings.TrimSpace(rootPassword)
+		if rootPassword == "" {
+			return "", "", errors.New("root password is required when custom password mode is selected")
+		}
+		resolvedUserData, err := awscloud.BuildRootPasswordUserData(rootPassword, userData)
+		return resolvedUserData, "", err
+	case "random":
+		generatedPassword, err := awscloud.GenerateRandomPassword(20)
+		if err != nil {
+			return "", "", err
+		}
+		resolvedUserData, err := awscloud.BuildRootPasswordUserData(generatedPassword, userData)
+		return resolvedUserData, generatedPassword, err
+	default:
+		return userData, "", nil
+	}
 }
 
 func respondAWSError(c *gin.Context, err error) {
