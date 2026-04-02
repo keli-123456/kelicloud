@@ -28,6 +28,11 @@ const (
 	computeSKUAPIVersion   = "2021-07-01"
 	computeAPIVersion      = "2024-11-01"
 	networkAPIVersion      = "2024-07-01"
+
+	azureVNetIPv4CIDR   = "10.217.0.0/16"
+	azureSubnetIPv4CIDR = "10.217.0.0/24"
+	azureVNetIPv6CIDR   = "fd12:3456:789a::/48"
+	azureSubnetIPv6CIDR = "fd12:3456:789a:1::/64"
 )
 
 type APIError struct {
@@ -101,6 +106,7 @@ type CreateVirtualMachineRequest struct {
 	SSHPublicKey  string
 	UserData      string
 	PublicIP      bool
+	AssignIPv6    bool
 	Image         ImageReference
 	Tags          map[string]string
 }
@@ -609,22 +615,41 @@ func (c *Client) CreateVirtualMachine(ctx context.Context, request CreateVirtual
 	if err := c.ensureResourceGroup(ctx, resourceGroup, location, tags); err != nil {
 		return nil, err
 	}
-	if err := c.ensureVirtualNetwork(ctx, resourceGroup, location, vnetName, subnetName, tags); err != nil {
+	if err := c.ensureVirtualNetwork(ctx, resourceGroup, location, vnetName, subnetName, request.AssignIPv6, tags); err != nil {
 		return nil, err
 	}
 	if err := c.ensureNetworkSecurityGroup(ctx, resourceGroup, location, nsgName, tags); err != nil {
 		return nil, err
 	}
 
-	publicIPID := ""
+	publicIPv4ID := ""
+	publicIPv6ID := ""
 	if request.PublicIP {
-		if err := c.ensurePublicIPAddress(ctx, resourceGroup, location, publicIPName, tags); err != nil {
+		if err := c.ensurePublicIPAddress(ctx, resourceGroup, location, publicIPName, "IPv4", tags); err != nil {
 			return nil, err
 		}
-		publicIPID = c.publicIPAddressPath(resourceGroup, publicIPName)
+		publicIPv4ID = c.publicIPAddressPath(resourceGroup, publicIPName)
+		if request.AssignIPv6 {
+			publicIPv6Name := resourceBase + "-ip6"
+			if err := c.ensurePublicIPAddress(ctx, resourceGroup, location, publicIPv6Name, "IPv6", tags); err != nil {
+				return nil, err
+			}
+			publicIPv6ID = c.publicIPAddressPath(resourceGroup, publicIPv6Name)
+		}
 	}
 
-	if err := c.ensureNetworkInterface(ctx, resourceGroup, location, nicName, c.subnetPath(resourceGroup, vnetName, subnetName), c.networkSecurityGroupPath(resourceGroup, nsgName), publicIPID, tags); err != nil {
+	if err := c.ensureNetworkInterface(
+		ctx,
+		resourceGroup,
+		location,
+		nicName,
+		c.subnetPath(resourceGroup, vnetName, subnetName),
+		c.networkSecurityGroupPath(resourceGroup, nsgName),
+		publicIPv4ID,
+		publicIPv6ID,
+		request.AssignIPv6,
+		tags,
+	); err != nil {
 		return nil, err
 	}
 	if err := c.ensureVirtualMachine(ctx, resourceGroup, name, location, nicName, adminUsername, adminPassword, sshPublicKey, size, image, strings.TrimSpace(request.UserData), tags); err != nil {
@@ -1151,25 +1176,37 @@ func (c *Client) ensureResourceGroup(ctx context.Context, resourceGroup, locatio
 	})
 }
 
-func (c *Client) ensureVirtualNetwork(ctx context.Context, resourceGroup, location, vnetName, subnetName string, tags map[string]string) error {
+func buildVirtualNetworkProperties(subnetName string, assignIPv6 bool) map[string]any {
+	addressPrefixes := []string{azureVNetIPv4CIDR}
+	subnetProperties := map[string]any{
+		"addressPrefix": azureSubnetIPv4CIDR,
+	}
+	if assignIPv6 {
+		addressPrefixes = append(addressPrefixes, azureVNetIPv6CIDR)
+		delete(subnetProperties, "addressPrefix")
+		subnetProperties["addressPrefixes"] = []string{azureSubnetIPv4CIDR, azureSubnetIPv6CIDR}
+	}
+
+	return map[string]any{
+		"addressSpace": map[string]any{
+			"addressPrefixes": addressPrefixes,
+		},
+		"subnets": []map[string]any{
+			{
+				"name":       subnetName,
+				"properties": subnetProperties,
+			},
+		},
+	}
+}
+
+func (c *Client) ensureVirtualNetwork(ctx context.Context, resourceGroup, location, vnetName, subnetName string, assignIPv6 bool, tags map[string]string) error {
 	return c.doAsync(ctx, http.MethodPut, c.virtualNetworkPath(resourceGroup, vnetName), url.Values{
 		"api-version": {networkAPIVersion},
 	}, map[string]any{
-		"location": location,
-		"tags":     tags,
-		"properties": map[string]any{
-			"addressSpace": map[string]any{
-				"addressPrefixes": []string{"10.217.0.0/16"},
-			},
-			"subnets": []map[string]any{
-				{
-					"name": subnetName,
-					"properties": map[string]any{
-						"addressPrefix": "10.217.0.0/24",
-					},
-				},
-			},
-		},
+		"location":   location,
+		"tags":       tags,
+		"properties": buildVirtualNetworkProperties(subnetName, assignIPv6),
 	})
 }
 
@@ -1199,7 +1236,12 @@ func (c *Client) ensureNetworkSecurityGroup(ctx context.Context, resourceGroup, 
 	})
 }
 
-func (c *Client) ensurePublicIPAddress(ctx context.Context, resourceGroup, location, name string, tags map[string]string) error {
+func (c *Client) ensurePublicIPAddress(ctx context.Context, resourceGroup, location, name, version string, tags map[string]string) error {
+	version = strings.TrimSpace(version)
+	if version == "" {
+		version = "IPv4"
+	}
+
 	return c.doAsync(ctx, http.MethodPut, c.publicIPAddressPath(resourceGroup, name), url.Values{
 		"api-version": {networkAPIVersion},
 	}, map[string]any{
@@ -1210,31 +1252,56 @@ func (c *Client) ensurePublicIPAddress(ctx context.Context, resourceGroup, locat
 		},
 		"properties": map[string]any{
 			"publicIPAllocationMethod": "Static",
-			"publicIPAddressVersion":   "IPv4",
+			"publicIPAddressVersion":   version,
 		},
 	})
 }
 
-func (c *Client) ensureNetworkInterface(ctx context.Context, resourceGroup, location, nicName, subnetID, networkSecurityGroupID, publicIPID string, tags map[string]string) error {
-	ipConfigurationProperties := map[string]any{
+func buildNetworkInterfaceIPConfigurations(subnetID, publicIPv4ID, publicIPv6ID string, assignIPv6 bool) []map[string]any {
+	ipv4Properties := map[string]any{
+		"primary":                   true,
+		"privateIPAddressVersion":   "IPv4",
 		"privateIPAllocationMethod": "Dynamic",
 		"subnet": map[string]any{
 			"id": subnetID,
 		},
 	}
-	if strings.TrimSpace(publicIPID) != "" {
-		ipConfigurationProperties["publicIPAddress"] = map[string]any{
-			"id": publicIPID,
+	if strings.TrimSpace(publicIPv4ID) != "" {
+		ipv4Properties["publicIPAddress"] = map[string]any{
+			"id": publicIPv4ID,
 		}
 	}
 
-	properties := map[string]any{
-		"ipConfigurations": []map[string]any{
-			{
-				"name":       "ipconfig1",
-				"properties": ipConfigurationProperties,
-			},
+	configurations := []map[string]any{
+		{
+			"name":       "ipconfig-ipv4",
+			"properties": ipv4Properties,
 		},
+	}
+	if assignIPv6 {
+		ipv6Properties := map[string]any{
+			"privateIPAddressVersion":   "IPv6",
+			"privateIPAllocationMethod": "Dynamic",
+			"subnet": map[string]any{
+				"id": subnetID,
+			},
+		}
+		if strings.TrimSpace(publicIPv6ID) != "" {
+			ipv6Properties["publicIPAddress"] = map[string]any{
+				"id": publicIPv6ID,
+			}
+		}
+		configurations = append(configurations, map[string]any{
+			"name":       "ipconfig-ipv6",
+			"properties": ipv6Properties,
+		})
+	}
+	return configurations
+}
+
+func (c *Client) ensureNetworkInterface(ctx context.Context, resourceGroup, location, nicName, subnetID, networkSecurityGroupID, publicIPv4ID, publicIPv6ID string, assignIPv6 bool, tags map[string]string) error {
+	properties := map[string]any{
+		"ipConfigurations": buildNetworkInterfaceIPConfigurations(subnetID, publicIPv4ID, publicIPv6ID, assignIPv6),
 	}
 	if strings.TrimSpace(networkSecurityGroupID) != "" {
 		properties["networkSecurityGroup"] = map[string]any{

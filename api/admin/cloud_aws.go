@@ -69,6 +69,60 @@ type createAWSLightsailInstancePayload struct {
 	AutoConnectGroup string         `json:"auto_connect_group,omitempty"`
 }
 
+type awsInstanceView struct {
+	awscloud.Instance
+	SavedRootPassword          bool   `json:"saved_root_password"`
+	SavedRootPasswordUpdatedAt string `json:"saved_root_password_updated_at,omitempty"`
+}
+
+type awsInstanceDetailView struct {
+	Instance           *awsInstanceView         `json:"instance"`
+	VPCID              string                   `json:"vpc_id"`
+	SubnetID           string                   `json:"subnet_id"`
+	Architecture       string                   `json:"architecture"`
+	PlatformDetails    string                   `json:"platform_details"`
+	VirtualizationType string                   `json:"virtualization_type"`
+	RootDeviceName     string                   `json:"root_device_name"`
+	MonitoringState    string                   `json:"monitoring_state"`
+	StateReason        string                   `json:"state_reason"`
+	PublicDNSName      string                   `json:"public_dns_name"`
+	PrivateDNSName     string                   `json:"private_dns_name"`
+	SecurityGroups     []awscloud.SecurityGroup `json:"security_groups"`
+	Volumes            []awscloud.Volume        `json:"volumes"`
+	Addresses          []awscloud.Address       `json:"addresses"`
+	ConsoleOutput      string                   `json:"console_output"`
+}
+
+type createAWSInstanceResponse struct {
+	Instance          *awsInstanceView `json:"instance"`
+	GeneratedPassword string           `json:"generated_password,omitempty"`
+	Warning           string           `json:"warning,omitempty"`
+	PasswordSaved     bool             `json:"password_saved"`
+	PasswordSaveError string           `json:"password_save_error,omitempty"`
+}
+
+type awsLightsailInstanceView struct {
+	awscloud.LightsailInstance
+	SavedRootPassword          bool   `json:"saved_root_password"`
+	SavedRootPasswordUpdatedAt string `json:"saved_root_password_updated_at,omitempty"`
+}
+
+type awsLightsailInstanceDetailView struct {
+	Instance  *awsLightsailInstanceView    `json:"instance"`
+	Ports     []awscloud.LightsailPort     `json:"ports"`
+	StaticIPs []awscloud.LightsailStaticIP `json:"static_ips"`
+	Snapshots []awscloud.LightsailSnapshot `json:"snapshots"`
+}
+
+type createAWSLightsailInstanceResponse struct {
+	Name              string `json:"name"`
+	Status            string `json:"status"`
+	Warning           string `json:"warning,omitempty"`
+	GeneratedPassword string `json:"generated_password,omitempty"`
+	PasswordSaved     bool   `json:"password_saved"`
+	PasswordSaveError string `json:"password_save_error,omitempty"`
+}
+
 type awsAccountView struct {
 	AccountID     string                    `json:"account_id"`
 	ARN           string                    `json:"arn"`
@@ -477,6 +531,88 @@ func GetAWSCredentialSecret(c *gin.Context) {
 	api.RespondSuccess(c, credential.SecretView())
 }
 
+func GetAWSInstancePassword(c *gin.Context) {
+	scope, ok := requireCurrentOwnerScope(c)
+	if !ok {
+		return
+	}
+
+	instanceID := strings.TrimSpace(c.Param("id"))
+	if instanceID == "" {
+		api.RespondError(c, http.StatusBadRequest, "Invalid instance id")
+		return
+	}
+
+	_, addition, err := loadAWSAddition(scope, false)
+	if err != nil {
+		api.RespondError(c, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	activeCredential := addition.ActiveCredential()
+	if activeCredential == nil {
+		api.RespondError(c, http.StatusBadRequest, "AWS credential is not configured")
+		return
+	}
+
+	resourceKey := buildAWSResourceCredentialID(resolveAWSRegion(addition, activeCredential, ""), instanceID)
+	passwordView, err := activeCredential.RevealResourcePassword("ec2", resourceKey)
+	if err != nil {
+		switch {
+		case errors.Is(err, awscloud.ErrSavedRootPasswordNotFound):
+			api.RespondError(c, http.StatusNotFound, err.Error())
+		case errors.Is(err, awscloud.ErrRootPasswordVaultDisabled), errors.Is(err, awscloud.ErrRootPasswordDecryptFailed):
+			api.RespondError(c, http.StatusBadRequest, err.Error())
+		default:
+			api.RespondError(c, http.StatusInternalServerError, "Failed to load saved root password: "+err.Error())
+		}
+		return
+	}
+
+	api.RespondSuccess(c, passwordView)
+}
+
+func GetAWSLightsailInstancePassword(c *gin.Context) {
+	scope, ok := requireCurrentOwnerScope(c)
+	if !ok {
+		return
+	}
+
+	instanceName := strings.TrimSpace(c.Param("name"))
+	if instanceName == "" {
+		api.RespondError(c, http.StatusBadRequest, "Invalid Lightsail instance name")
+		return
+	}
+
+	_, addition, err := loadAWSAddition(scope, false)
+	if err != nil {
+		api.RespondError(c, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	activeCredential := addition.ActiveCredential()
+	if activeCredential == nil {
+		api.RespondError(c, http.StatusBadRequest, "AWS credential is not configured")
+		return
+	}
+
+	resourceKey := buildAWSResourceCredentialID(resolveAWSRegion(addition, activeCredential, ""), instanceName)
+	passwordView, err := activeCredential.RevealResourcePassword("lightsail", resourceKey)
+	if err != nil {
+		switch {
+		case errors.Is(err, awscloud.ErrSavedRootPasswordNotFound):
+			api.RespondError(c, http.StatusNotFound, err.Error())
+		case errors.Is(err, awscloud.ErrRootPasswordVaultDisabled), errors.Is(err, awscloud.ErrRootPasswordDecryptFailed):
+			api.RespondError(c, http.StatusBadRequest, err.Error())
+		default:
+			api.RespondError(c, http.StatusInternalServerError, "Failed to load saved root password: "+err.Error())
+		}
+		return
+	}
+
+	api.RespondSuccess(c, passwordView)
+}
+
 func GetAWSAccount(c *gin.Context) {
 	scope, ok := requireCurrentOwnerScope(c)
 	if !ok {
@@ -531,12 +667,15 @@ func GetAWSCatalog(c *gin.Context) {
 	}
 
 	regionOverride := strings.TrimSpace(c.Query("region"))
-	_, credential, region, ctx, cancel, err := getAWSActiveCredentialWithRegion(c, scope, regionOverride)
+	_, credential, region, _, cancel, err := getAWSActiveCredentialWithRegion(c, scope, regionOverride)
 	if err != nil {
 		respondAWSError(c, err)
 		return
 	}
-	defer cancel()
+	cancel()
+
+	ctx, createCancel := context.WithTimeout(c.Request.Context(), 90*time.Second)
+	defer createCancel()
 
 	regions, err := awscloud.ListRegions(ctx, credential)
 	if err != nil {
@@ -642,7 +781,7 @@ func GetAWSInstanceDetail(c *gin.Context) {
 		return
 	}
 
-	api.RespondSuccess(c, detail)
+	api.RespondSuccess(c, buildAWSInstanceDetailView(detail, credential, region))
 }
 
 func GetAWSLightsailCatalog(c *gin.Context) {
@@ -717,7 +856,7 @@ func ListAWSLightsailInstances(c *gin.Context) {
 		return
 	}
 
-	_, credential, region, ctx, cancel, err := getAWSActiveCredential(c, scope)
+	addition, credential, region, ctx, cancel, err := getAWSActiveCredential(c, scope)
 	if err != nil {
 		respondAWSError(c, err)
 		return
@@ -733,7 +872,21 @@ func ListAWSLightsailInstances(c *gin.Context) {
 		instances = make([]awscloud.LightsailInstance, 0)
 	}
 
-	api.RespondSuccess(c, instances)
+	views := make([]awsLightsailInstanceView, 0, len(instances))
+	validResourceIDs := make([]string, 0, len(instances))
+	for index := range instances {
+		if resourceKey := buildAWSResourceCredentialID(region, instances[index].Name); resourceKey != "" {
+			validResourceIDs = append(validResourceIDs, resourceKey)
+		}
+		if view := buildAWSLightsailInstanceView(&instances[index], credential, region); view != nil {
+			views = append(views, *view)
+		}
+	}
+	if credential != nil && credential.PruneResourceCredentials("lightsail", validResourceIDs, buildAWSResourceCredentialScope(region)) {
+		_ = saveAWSAddition(scope, addition)
+	}
+
+	api.RespondSuccess(c, views)
 }
 
 func GetAWSLightsailInstanceDetail(c *gin.Context) {
@@ -761,7 +914,7 @@ func GetAWSLightsailInstanceDetail(c *gin.Context) {
 		return
 	}
 
-	api.RespondSuccess(c, detail)
+	api.RespondSuccess(c, buildAWSLightsailInstanceDetailView(detail, credential, region))
 }
 
 func ListAWSInstances(c *gin.Context) {
@@ -770,7 +923,7 @@ func ListAWSInstances(c *gin.Context) {
 		return
 	}
 
-	_, credential, region, ctx, cancel, err := getAWSActiveCredential(c, scope)
+	addition, credential, region, ctx, cancel, err := getAWSActiveCredential(c, scope)
 	if err != nil {
 		respondAWSError(c, err)
 		return
@@ -786,7 +939,21 @@ func ListAWSInstances(c *gin.Context) {
 		instances = make([]awscloud.Instance, 0)
 	}
 
-	api.RespondSuccess(c, instances)
+	views := make([]awsInstanceView, 0, len(instances))
+	validResourceIDs := make([]string, 0, len(instances))
+	for index := range instances {
+		if resourceKey := buildAWSResourceCredentialID(region, instances[index].InstanceID); resourceKey != "" {
+			validResourceIDs = append(validResourceIDs, resourceKey)
+		}
+		if view := buildAWSInstanceView(&instances[index], credential, region); view != nil {
+			views = append(views, *view)
+		}
+	}
+	if credential != nil && credential.PruneResourceCredentials("ec2", validResourceIDs, buildAWSResourceCredentialScope(region)) {
+		_ = saveAWSAddition(scope, addition)
+	}
+
+	api.RespondSuccess(c, views)
 }
 
 func CreateAWSInstance(c *gin.Context) {
@@ -802,7 +969,7 @@ func CreateAWSInstance(c *gin.Context) {
 	}
 
 	regionOverride := strings.TrimSpace(payload.Region)
-	_, credential, region, ctx, cancel, err := getAWSActiveCredentialWithRegion(c, scope, regionOverride)
+	addition, credential, region, ctx, cancel, err := getAWSActiveCredentialWithRegion(c, scope, regionOverride)
 	if err != nil {
 		respondAWSError(c, err)
 		return
@@ -852,14 +1019,15 @@ func CreateAWSInstance(c *gin.Context) {
 		Tags:             payload.Tags,
 	}
 
-	instance, err := awscloud.CreateInstance(ctx, credential, region, request)
+	createResult, err := awscloud.CreateInstance(ctx, credential, region, request)
 	if err != nil {
 		respondAWSError(c, err)
 		return
 	}
 
-	warnings := make([]string, 0, 2)
-	if request.AssignIPv6 {
+	instance := createResult.Instance
+	warnings := append(make([]string, 0, len(createResult.Warnings)+2), createResult.Warnings...)
+	if createResult.AssignIPv6 {
 		followUpErr := runAWSCreateFollowUp(ctx, awsCreateFollowUpSyncAttempts, awsCreateFollowUpSyncDelay, func(runCtx context.Context) error {
 			_, err := awscloud.EnsureInstanceIPv6Address(runCtx, credential, region, instance.InstanceID)
 			return err
@@ -888,16 +1056,56 @@ func CreateAWSInstance(c *gin.Context) {
 		}
 	}
 
+	passwordMode := normalizeAWSRootPasswordMode(payload.RootPasswordMode)
+	rootPassword := ""
+	switch passwordMode {
+	case "custom":
+		rootPassword = strings.TrimSpace(payload.RootPassword)
+	case "random":
+		rootPassword = generatedRootPassword
+	}
+
+	passwordSaved := false
+	passwordSaveError := ""
+	responseCredential := credential
+	if instance != nil && credential != nil && rootPassword != "" {
+		persistedAddition, saveErr := persistAWSResourcePassword(
+			scope,
+			addition,
+			credential,
+			"ec2",
+			buildAWSResourceCredentialID(region, instance.InstanceID),
+			firstNonEmptyAWS(instance.Name, instance.InstanceID),
+			passwordMode,
+			rootPassword,
+		)
+		if saveErr != nil {
+			passwordSaveError = saveErr.Error()
+		} else {
+			passwordSaved = true
+			if persistedCredential := findAWSCredentialForPersistenceVerification(
+				persistedAddition,
+				credential.ID,
+				credential.AccessKeyID,
+				credential.DefaultRegion,
+			); persistedCredential != nil {
+				responseCredential = persistedCredential
+			}
+		}
+	}
+
 	logMessage := fmt.Sprintf("create aws ec2 instance: %s (%s/%s", request.Name, region, request.InstanceType)
 	if autoConnectGroup != "" {
 		logMessage += ", auto_connect_group=" + autoConnectGroup
 	}
 	logMessage += ")"
 	logCloudAudit(c, logMessage)
-	api.RespondSuccess(c, gin.H{
-		"instance":           instance,
-		"warning":            strings.Join(warnings, "; "),
-		"generated_password": generatedRootPassword,
+	api.RespondSuccess(c, createAWSInstanceResponse{
+		Instance:          buildAWSInstanceView(instance, responseCredential, region),
+		Warning:           strings.Join(warnings, "; "),
+		GeneratedPassword: generatedRootPassword,
+		PasswordSaved:     passwordSaved,
+		PasswordSaveError: passwordSaveError,
 	})
 }
 
@@ -914,7 +1122,7 @@ func CreateAWSLightsailInstance(c *gin.Context) {
 	}
 
 	regionOverride := strings.TrimSpace(payload.Region)
-	_, credential, region, ctx, cancel, err := getAWSActiveCredentialWithRegion(c, scope, regionOverride)
+	addition, credential, region, ctx, cancel, err := getAWSActiveCredentialWithRegion(c, scope, regionOverride)
 	if err != nil {
 		respondAWSError(c, err)
 		return
@@ -981,17 +1189,47 @@ func CreateAWSLightsailInstance(c *gin.Context) {
 		}
 	}
 
+	passwordMode := normalizeAWSRootPasswordMode(payload.RootPasswordMode)
+	rootPassword := ""
+	switch passwordMode {
+	case "custom":
+		rootPassword = strings.TrimSpace(payload.RootPassword)
+	case "random":
+		rootPassword = generatedRootPassword
+	}
+
+	passwordSaved := false
+	passwordSaveError := ""
+	if credential != nil && rootPassword != "" {
+		if _, saveErr := persistAWSResourcePassword(
+			scope,
+			addition,
+			credential,
+			"lightsail",
+			buildAWSResourceCredentialID(region, request.Name),
+			request.Name,
+			passwordMode,
+			rootPassword,
+		); saveErr != nil {
+			passwordSaveError = saveErr.Error()
+		} else {
+			passwordSaved = true
+		}
+	}
+
 	logMessage := fmt.Sprintf("create aws lightsail instance: %s (%s/%s", request.Name, request.AvailabilityZone, request.BundleID)
 	if autoConnectGroup != "" {
 		logMessage += ", auto_connect_group=" + autoConnectGroup
 	}
 	logMessage += ")"
 	logCloudAudit(c, logMessage)
-	api.RespondSuccess(c, gin.H{
-		"name":               request.Name,
-		"status":             "submitted",
-		"warning":            strings.Join(warnings, "; "),
-		"generated_password": generatedRootPassword,
+	api.RespondSuccess(c, createAWSLightsailInstanceResponse{
+		Name:              request.Name,
+		Status:            "submitted",
+		Warning:           strings.Join(warnings, "; "),
+		GeneratedPassword: generatedRootPassword,
+		PasswordSaved:     passwordSaved,
+		PasswordSaveError: passwordSaveError,
 	})
 }
 
@@ -1001,7 +1239,7 @@ func DeleteAWSInstance(c *gin.Context) {
 		return
 	}
 
-	_, credential, region, ctx, cancel, err := getAWSActiveCredential(c, scope)
+	addition, credential, region, ctx, cancel, err := getAWSActiveCredential(c, scope)
 	if err != nil {
 		respondAWSError(c, err)
 		return
@@ -1018,6 +1256,9 @@ func DeleteAWSInstance(c *gin.Context) {
 		respondAWSError(c, err)
 		return
 	}
+	if credential != nil && credential.RemoveSavedResourcePassword("ec2", buildAWSResourceCredentialID(region, instanceID)) {
+		_ = saveAWSAddition(scope, addition)
+	}
 
 	logCloudAudit(c, fmt.Sprintf("terminate aws ec2 instance: %s", instanceID))
 	api.RespondSuccess(c, nil)
@@ -1029,7 +1270,7 @@ func DeleteAWSLightsailInstance(c *gin.Context) {
 		return
 	}
 
-	_, credential, region, ctx, cancel, err := getAWSActiveCredential(c, scope)
+	addition, credential, region, ctx, cancel, err := getAWSActiveCredential(c, scope)
 	if err != nil {
 		respondAWSError(c, err)
 		return
@@ -1045,6 +1286,9 @@ func DeleteAWSLightsailInstance(c *gin.Context) {
 	if err := awscloud.DeleteLightsailInstance(ctx, credential, region, instanceName); err != nil {
 		respondAWSError(c, err)
 		return
+	}
+	if credential != nil && credential.RemoveSavedResourcePassword("lightsail", buildAWSResourceCredentialID(region, instanceName)) {
+		_ = saveAWSAddition(scope, addition)
 	}
 
 	logCloudAudit(c, fmt.Sprintf("delete aws lightsail instance: %s", instanceName))
@@ -1438,4 +1682,221 @@ func saveAWSAddition(scope ownerScope, addition *awscloud.Addition) error {
 	}
 
 	return saveCloudProviderConfigForScope(scope, awsProviderName, string(payload))
+}
+
+func saveAWSAdditionPreservingSecrets(scope ownerScope, addition *awscloud.Addition) error {
+	if addition == nil {
+		addition = &awscloud.Addition{}
+	}
+
+	if _, current, err := loadAWSAddition(scope, true); err == nil {
+		addition.MergePersistentStateFrom(current)
+	}
+
+	return saveAWSAddition(scope, addition)
+}
+
+func persistAWSResourcePassword(
+	scope ownerScope,
+	addition *awscloud.Addition,
+	credential *awscloud.CredentialRecord,
+	resourceType string,
+	resourceID string,
+	resourceName string,
+	passwordMode string,
+	rootPassword string,
+) (*awscloud.Addition, error) {
+	resourceType = strings.TrimSpace(resourceType)
+	resourceID = strings.TrimSpace(resourceID)
+	rootPassword = strings.TrimSpace(rootPassword)
+	if addition == nil || credential == nil || resourceType == "" || resourceID == "" || rootPassword == "" {
+		return nil, errors.New("root password persistence requires an active credential and resource")
+	}
+
+	if err := credential.SaveResourcePassword(resourceType, resourceID, resourceName, passwordMode, rootPassword, time.Now()); err != nil {
+		return nil, err
+	}
+
+	verifyPersistedPassword := func() (*awscloud.Addition, error) {
+		_, persistedAddition, err := loadAWSAddition(scope, false)
+		if err != nil {
+			return nil, err
+		}
+		persistedCredential := findAWSCredentialForPersistenceVerification(
+			persistedAddition,
+			credential.ID,
+			credential.AccessKeyID,
+			credential.DefaultRegion,
+		)
+		if persistedCredential == nil || !persistedCredential.HasSavedResourcePassword(resourceType, resourceID) {
+			return nil, errors.New("saved root password was not found after persistence")
+		}
+		return persistedAddition, nil
+	}
+
+	if err := saveAWSAdditionPreservingSecrets(scope, addition); err != nil {
+		credential.RemoveSavedResourcePassword(resourceType, resourceID)
+		return nil, fmt.Errorf("Failed to save root password: %w", err)
+	}
+
+	if persistedAddition, err := verifyPersistedPassword(); err == nil {
+		return persistedAddition, nil
+	}
+
+	if err := saveAWSAddition(scope, addition); err != nil {
+		credential.RemoveSavedResourcePassword(resourceType, resourceID)
+		return nil, fmt.Errorf("Failed to save root password: %w", err)
+	}
+
+	persistedAddition, err := verifyPersistedPassword()
+	if err != nil {
+		credential.RemoveSavedResourcePassword(resourceType, resourceID)
+		return nil, fmt.Errorf("Failed to verify saved root password: %w", err)
+	}
+	return persistedAddition, nil
+}
+
+func findAWSCredentialForPersistenceVerification(addition *awscloud.Addition, credentialID, accessKeyID, defaultRegion string) *awscloud.CredentialRecord {
+	if addition == nil {
+		return nil
+	}
+
+	credentialID = strings.TrimSpace(credentialID)
+	if credentialID != "" {
+		if credential := addition.FindCredential(credentialID); credential != nil {
+			return credential
+		}
+	}
+
+	accessKeyID = strings.TrimSpace(accessKeyID)
+	defaultRegion = strings.TrimSpace(defaultRegion)
+	if accessKeyID == "" {
+		return nil
+	}
+
+	for index := range addition.Credentials {
+		if strings.TrimSpace(addition.Credentials[index].AccessKeyID) == accessKeyID &&
+			strings.TrimSpace(addition.Credentials[index].DefaultRegion) == defaultRegion {
+			return &addition.Credentials[index]
+		}
+	}
+
+	return nil
+}
+
+func buildAWSInstanceView(instance *awscloud.Instance, credential *awscloud.CredentialRecord, region string) *awsInstanceView {
+	if instance == nil {
+		return nil
+	}
+
+	view := &awsInstanceView{
+		Instance: *instance,
+	}
+	if credential != nil {
+		resourceKey := buildAWSResourceCredentialID(region, instance.InstanceID)
+		if credential.HasSavedResourcePassword("ec2", resourceKey) {
+			view.SavedRootPassword = true
+			view.SavedRootPasswordUpdatedAt = credential.SavedResourcePasswordUpdatedAt("ec2", resourceKey)
+		}
+	}
+	return view
+}
+
+func buildAWSInstanceDetailView(detail *awscloud.InstanceDetail, credential *awscloud.CredentialRecord, region string) *awsInstanceDetailView {
+	if detail == nil {
+		return nil
+	}
+
+	return &awsInstanceDetailView{
+		Instance:           buildAWSInstanceView(&detail.Instance, credential, region),
+		VPCID:              detail.VpcID,
+		SubnetID:           detail.SubnetID,
+		Architecture:       detail.Architecture,
+		PlatformDetails:    detail.PlatformDetails,
+		VirtualizationType: detail.VirtualizationType,
+		RootDeviceName:     detail.RootDeviceName,
+		MonitoringState:    detail.MonitoringState,
+		StateReason:        detail.StateReason,
+		PublicDNSName:      detail.PublicDNSName,
+		PrivateDNSName:     detail.PrivateDNSName,
+		SecurityGroups:     detail.SecurityGroups,
+		Volumes:            detail.Volumes,
+		Addresses:          detail.Addresses,
+		ConsoleOutput:      detail.ConsoleOutput,
+	}
+}
+
+func buildAWSLightsailInstanceView(instance *awscloud.LightsailInstance, credential *awscloud.CredentialRecord, region string) *awsLightsailInstanceView {
+	if instance == nil {
+		return nil
+	}
+
+	view := &awsLightsailInstanceView{
+		LightsailInstance: *instance,
+	}
+	if credential != nil {
+		resourceKey := buildAWSResourceCredentialID(region, instance.Name)
+		if credential.HasSavedResourcePassword("lightsail", resourceKey) {
+			view.SavedRootPassword = true
+			view.SavedRootPasswordUpdatedAt = credential.SavedResourcePasswordUpdatedAt("lightsail", resourceKey)
+		}
+	}
+	return view
+}
+
+func buildAWSLightsailInstanceDetailView(detail *awscloud.LightsailInstanceDetail, credential *awscloud.CredentialRecord, region string) *awsLightsailInstanceDetailView {
+	if detail == nil {
+		return nil
+	}
+
+	return &awsLightsailInstanceDetailView{
+		Instance:  buildAWSLightsailInstanceView(&detail.Instance, credential, region),
+		Ports:     detail.Ports,
+		StaticIPs: detail.StaticIPs,
+		Snapshots: detail.Snapshots,
+	}
+}
+
+func buildAWSResourceCredentialID(region, resourceID string) string {
+	resourceID = strings.TrimSpace(resourceID)
+	if resourceID == "" {
+		return ""
+	}
+
+	scopePrefix := buildAWSResourceCredentialScope(region)
+	if scopePrefix == "" {
+		return resourceID
+	}
+	return scopePrefix + resourceID
+}
+
+func buildAWSResourceCredentialScope(region string) string {
+	region = strings.TrimSpace(strings.ToLower(region))
+	if region == "" {
+		return ""
+	}
+	return region + "::"
+}
+
+func normalizeAWSRootPasswordMode(mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "none":
+		return "none"
+	case "custom":
+		return "custom"
+	case "random":
+		return "random"
+	default:
+		return ""
+	}
+}
+
+func firstNonEmptyAWS(values ...string) string {
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }

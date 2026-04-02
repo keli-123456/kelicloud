@@ -342,6 +342,7 @@ func RunServer() {
 				awsGroup.GET("/account", admin.GetAWSAccount)
 				awsGroup.GET("/catalog", admin.GetAWSCatalog)
 				awsGroup.GET("/instances", admin.ListAWSInstances)
+				awsGroup.GET("/instances/:id/password", admin.GetAWSInstancePassword)
 				awsGroup.GET("/instances/:id", admin.GetAWSInstanceDetail)
 				awsGroup.POST("/instances", admin.CreateAWSInstance)
 				awsGroup.DELETE("/instances/:id", admin.DeleteAWSInstance)
@@ -350,6 +351,7 @@ func RunServer() {
 				{
 					lightsailGroup.GET("/catalog", admin.GetAWSLightsailCatalog)
 					lightsailGroup.GET("/instances", admin.ListAWSLightsailInstances)
+					lightsailGroup.GET("/instances/:name/password", admin.GetAWSLightsailInstancePassword)
 					lightsailGroup.GET("/instances/:name", admin.GetAWSLightsailInstanceDetail)
 					lightsailGroup.POST("/instances", admin.CreateAWSLightsailInstance)
 					lightsailGroup.DELETE("/instances/:name", admin.DeleteAWSLightsailInstance)

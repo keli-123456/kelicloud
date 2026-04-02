@@ -26,21 +26,22 @@ type Addition struct {
 }
 
 type CredentialRecord struct {
-	ID              string           `json:"id"`
-	Name            string           `json:"name"`
-	Group           string           `json:"group,omitempty"`
-	AccessKeyID     string           `json:"access_key_id"`
-	SecretAccessKey string           `json:"secret_access_key"`
-	SessionToken    string           `json:"session_token,omitempty"`
-	DefaultRegion   string           `json:"default_region,omitempty"`
-	AccountID       string           `json:"account_id,omitempty"`
-	ARN             string           `json:"arn,omitempty"`
-	UserID          string           `json:"user_id,omitempty"`
-	EC2Quota        *EC2QuotaSummary `json:"ec2_quota,omitempty"`
-	EC2QuotaError   string           `json:"ec2_quota_error,omitempty"`
-	LastStatus      string           `json:"last_status,omitempty"`
-	LastError       string           `json:"last_error,omitempty"`
-	LastCheckedAt   string           `json:"last_checked_at,omitempty"`
+	ID                  string                     `json:"id"`
+	Name                string                     `json:"name"`
+	Group               string                     `json:"group,omitempty"`
+	AccessKeyID         string                     `json:"access_key_id"`
+	SecretAccessKey     string                     `json:"secret_access_key"`
+	SessionToken        string                     `json:"session_token,omitempty"`
+	DefaultRegion       string                     `json:"default_region,omitempty"`
+	AccountID           string                     `json:"account_id,omitempty"`
+	ARN                 string                     `json:"arn,omitempty"`
+	UserID              string                     `json:"user_id,omitempty"`
+	EC2Quota            *EC2QuotaSummary           `json:"ec2_quota,omitempty"`
+	EC2QuotaError       string                     `json:"ec2_quota_error,omitempty"`
+	LastStatus          string                     `json:"last_status,omitempty"`
+	LastError           string                     `json:"last_error,omitempty"`
+	LastCheckedAt       string                     `json:"last_checked_at,omitempty"`
+	ResourceCredentials []ResourceCredentialRecord `json:"resource_credentials,omitempty"`
 }
 
 type CredentialImport struct {
@@ -71,9 +72,10 @@ type CredentialView struct {
 }
 
 type CredentialPoolView struct {
-	ActiveCredentialID string           `json:"active_credential_id,omitempty"`
-	ActiveRegion       string           `json:"active_region"`
-	Credentials        []CredentialView `json:"credentials"`
+	ActiveCredentialID     string           `json:"active_credential_id,omitempty"`
+	ActiveRegion           string           `json:"active_region"`
+	PasswordStorageEnabled bool             `json:"password_storage_enabled"`
+	Credentials            []CredentialView `json:"credentials"`
 }
 
 type CredentialSecretView struct {
@@ -138,6 +140,7 @@ func (a *Addition) Normalize() {
 		credential.LastStatus = normalizeCredentialStatus(credential.LastStatus)
 		credential.LastError = strings.TrimSpace(credential.LastError)
 		credential.LastCheckedAt = strings.TrimSpace(credential.LastCheckedAt)
+		credential.ResourceCredentials = normalizeResourceCredentials(credential.ResourceCredentials)
 
 		if credential.AccessKeyID == "" || credential.SecretAccessKey == "" {
 			continue
@@ -187,6 +190,7 @@ func (a *Addition) Normalize() {
 				merged.EC2Quota = normalizeEC2QuotaSummary(credential.EC2Quota)
 				merged.EC2QuotaError = credential.EC2QuotaError
 			}
+			merged.ResourceCredentials = mergeResourceCredentials(merged.ResourceCredentials, credential.ResourceCredentials)
 			normalized[existingIndex] = merged
 			if a.ActiveCredentialID == credential.ID {
 				a.ActiveCredentialID = merged.ID
@@ -400,9 +404,10 @@ func (a *Addition) toPoolView(includeQuota bool) CredentialPoolView {
 	a.Normalize()
 
 	view := CredentialPoolView{
-		ActiveCredentialID: a.ActiveCredentialID,
-		ActiveRegion:       normalizeRegion(a.ActiveRegion),
-		Credentials:        make([]CredentialView, 0, len(a.Credentials)),
+		ActiveCredentialID:     a.ActiveCredentialID,
+		ActiveRegion:           normalizeRegion(a.ActiveRegion),
+		PasswordStorageEnabled: IsRootPasswordVaultEnabled(),
+		Credentials:            make([]CredentialView, 0, len(a.Credentials)),
 	}
 	for _, credential := range a.Credentials {
 		quota := normalizeEC2QuotaSummary(credential.EC2Quota)

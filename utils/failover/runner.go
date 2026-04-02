@@ -3580,7 +3580,7 @@ func provisionAWSInstance(ctx context.Context, userUUID string, plan models.Fail
 				return nil, err
 			}
 		}
-		instance, err := awscloud.CreateInstance(ctx, credential, region, awscloud.CreateInstanceRequest{
+		createResult, err := awscloud.CreateInstance(ctx, credential, region, awscloud.CreateInstanceRequest{
 			Name:             name,
 			ImageID:          strings.TrimSpace(payload.ImageID),
 			InstanceType:     strings.TrimSpace(payload.InstanceType),
@@ -3594,6 +3594,7 @@ func provisionAWSInstance(ctx context.Context, userUUID string, plan models.Fail
 		if err != nil {
 			return nil, err
 		}
+		instance := createResult.Instance
 		instance, detail, err := waitForAWSEC2Instance(ctx, region, credential, strings.TrimSpace(instance.InstanceID))
 		if err != nil {
 			return nil, err

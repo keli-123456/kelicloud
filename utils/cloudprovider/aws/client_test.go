@@ -5,6 +5,7 @@ import (
 	"errors"
 	"testing"
 
+	awssdk "github.com/aws/aws-sdk-go-v2/aws"
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/stretchr/testify/require"
 )
@@ -97,6 +98,60 @@ func TestParseManagedDebianImageReference(t *testing.T) {
 	require.False(t, ok)
 }
 
+func TestPickUnusedSubnetIPv6CIDR(t *testing.T) {
+	cidr, err := pickUnusedSubnetIPv6CIDR("2600:1f18:abcd:1200::/56", []ec2types.Subnet{
+		{
+			Ipv6CidrBlockAssociationSet: []ec2types.SubnetIpv6CidrBlockAssociation{
+				{Ipv6CidrBlock: stringPtr("2600:1f18:abcd:1200::/64")},
+			},
+		},
+		{
+			Ipv6CidrBlockAssociationSet: []ec2types.SubnetIpv6CidrBlockAssociation{
+				{Ipv6CidrBlock: stringPtr("2600:1f18:abcd:1201::/64")},
+			},
+		},
+	})
+	require.NoError(t, err)
+	require.Equal(t, "2600:1f18:abcd:1202::/64", cidr)
+}
+
+func TestSelectPreferredLaunchSubnetPrefersDefaultIPv6ReadySubnet(t *testing.T) {
+	subnet, ok := selectPreferredLaunchSubnet([]ec2types.Subnet{
+		{
+			SubnetId:                stringPtr("subnet-a"),
+			State:                   ec2types.SubnetStateAvailable,
+			DefaultForAz:            boolPtr(true),
+			AvailableIpAddressCount: int32Ptr(200),
+			MapPublicIpOnLaunch:     boolPtr(true),
+		},
+		{
+			SubnetId:                stringPtr("subnet-b"),
+			State:                   ec2types.SubnetStateAvailable,
+			DefaultForAz:            boolPtr(true),
+			AvailableIpAddressCount: int32Ptr(100),
+			MapPublicIpOnLaunch:     boolPtr(true),
+			Ipv6CidrBlockAssociationSet: []ec2types.SubnetIpv6CidrBlockAssociation{
+				{
+					Ipv6CidrBlock: stringPtr("2600:1f18:abcd:1200::/64"),
+					Ipv6CidrBlockState: &ec2types.SubnetCidrBlockState{
+						State: ec2types.SubnetCidrBlockStateCodeAssociated,
+					},
+				},
+			},
+		},
+	}, true)
+	require.True(t, ok)
+	require.Equal(t, "subnet-b", awssdk.ToString(subnet.SubnetId))
+}
+
 func stringPtr(value string) *string {
+	return &value
+}
+
+func boolPtr(value bool) *bool {
+	return &value
+}
+
+func int32Ptr(value int32) *int32 {
 	return &value
 }

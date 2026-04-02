@@ -141,6 +141,12 @@ type CreateInstanceRequest struct {
 	Tags             []Tag    `json:"tags,omitempty"`
 }
 
+type CreateInstanceResult struct {
+	Instance   *Instance
+	Warnings   []string
+	AssignIPv6 bool
+}
+
 func buildConfig(ctx context.Context, credential *CredentialRecord, region string) (awssdk.Config, error) {
 	if credential == nil {
 		return awssdk.Config{}, errors.New("aws credential is missing")
@@ -560,7 +566,7 @@ func ListInstances(ctx context.Context, credential *CredentialRecord, region str
 	return instances, nil
 }
 
-func CreateInstance(ctx context.Context, credential *CredentialRecord, region string, request CreateInstanceRequest) (*Instance, error) {
+func CreateInstance(ctx context.Context, credential *CredentialRecord, region string, request CreateInstanceRequest) (*CreateInstanceResult, error) {
 	cfg, err := buildConfig(ctx, credential, region)
 	if err != nil {
 		return nil, err
@@ -571,6 +577,17 @@ func CreateInstance(ctx context.Context, credential *CredentialRecord, region st
 	if err != nil {
 		return nil, err
 	}
+	networkPlan := createInstanceNetworkPlan{
+		SubnetID:   strings.TrimSpace(request.SubnetID),
+		AssignIPv6: request.AssignIPv6,
+	}
+	if networkPlan.SubnetID == "" && (request.AssignPublicIP || request.AssignIPv6 || len(request.SecurityGroupIDs) > 0) {
+		networkPlan, err = prepareCreateInstanceNetwork(ctx, client, request.AssignIPv6)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	input := &ec2.RunInstancesInput{
 		ImageId:      awssdk.String(imageID),
 		InstanceType: ec2types.InstanceType(strings.TrimSpace(request.InstanceType)),
@@ -589,7 +606,7 @@ func CreateInstance(ctx context.Context, credential *CredentialRecord, region st
 	}
 
 	securityGroupIDs := normalizeStringSlice(request.SecurityGroupIDs)
-	if subnetID := strings.TrimSpace(request.SubnetID); subnetID != "" {
+	if subnetID := networkPlan.SubnetID; subnetID != "" {
 		networkInterface := ec2types.InstanceNetworkInterfaceSpecification{
 			DeviceIndex: awssdk.Int32(0),
 			SubnetId:    awssdk.String(subnetID),
@@ -598,7 +615,7 @@ func CreateInstance(ctx context.Context, credential *CredentialRecord, region st
 		if request.AssignPublicIP {
 			networkInterface.AssociatePublicIpAddress = awssdk.Bool(true)
 		}
-		if request.AssignIPv6 {
+		if networkPlan.AssignIPv6 {
 			networkInterface.Ipv6AddressCount = awssdk.Int32(1)
 		}
 		input.NetworkInterfaces = []ec2types.InstanceNetworkInterfaceSpecification{networkInterface}
@@ -615,7 +632,16 @@ func CreateInstance(ctx context.Context, credential *CredentialRecord, region st
 	}
 
 	instanceID := awssdk.ToString(output.Instances[0].InstanceId)
-	return GetInstance(ctx, credential, region, instanceID)
+	instance, err := GetInstance(ctx, credential, region, instanceID)
+	if err != nil {
+		return nil, err
+	}
+
+	return &CreateInstanceResult{
+		Instance:   instance,
+		Warnings:   append([]string(nil), networkPlan.Warnings...),
+		AssignIPv6: networkPlan.AssignIPv6,
+	}, nil
 }
 
 func resolveRunInstancesImageID(ctx context.Context, client *ec2.Client, imageID string) (string, error) {

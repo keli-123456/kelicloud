@@ -38,6 +38,7 @@ type createAzureInstancePayload struct {
 	SSHPublicKey     string                    `json:"ssh_public_key,omitempty"`
 	UserData         string                    `json:"user_data,omitempty"`
 	PublicIP         bool                      `json:"public_ip"`
+	AssignIPv6       bool                      `json:"assign_ipv6"`
 	Image            azurecloud.ImageReference `json:"image" binding:"required"`
 	AutoConnect      bool                      `json:"auto_connect"`
 	AutoConnectGroup string                    `json:"auto_connect_group,omitempty"`
@@ -525,6 +526,7 @@ func CreateAzureInstance(c *gin.Context) {
 		SSHPublicKey:  payload.SSHPublicKey,
 		UserData:      resolvedUserData,
 		PublicIP:      payload.PublicIP,
+		AssignIPv6:    payload.AssignIPv6,
 		Image:         payload.Image,
 	})
 	if err != nil {
