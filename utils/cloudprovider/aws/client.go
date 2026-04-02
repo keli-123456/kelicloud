@@ -190,8 +190,6 @@ func GetEC2QuotaSummary(ctx context.Context, credential *CredentialRecord, regio
 	output, err := client.DescribeAccountAttributes(ctx, &ec2.DescribeAccountAttributesInput{
 		AttributeNames: []ec2types.AccountAttributeName{
 			ec2types.AccountAttributeName("max-instances"),
-			ec2types.AccountAttributeName("max-elastic-ips"),
-			ec2types.AccountAttributeName("vpc-max-elastic-ips"),
 			ec2types.AccountAttributeName("vpc-max-security-groups-per-interface"),
 		},
 	})
@@ -212,16 +210,12 @@ func GetEC2QuotaSummary(ctx context.Context, credential *CredentialRecord, regio
 		switch name {
 		case "max-instances":
 			summary.MaxInstances = value
-		case "max-elastic-ips":
-			summary.MaxElasticIPs = value
-		case "vpc-max-elastic-ips":
-			summary.VPCMaxElasticIPs = value
 		case "vpc-max-security-groups-per-interface":
 			summary.VPCMaxSecurityGroupsPerInterface = value
 		}
 	}
 
-	warnings := make([]string, 0, 3)
+	warnings := make([]string, 0, 2)
 
 	if maxStandardVCPUs, quotaErr := getStandardOnDemandVCPUQuota(ctx, cfg); quotaErr == nil {
 		summary.MaxStandardVCPUs = maxStandardVCPUs
@@ -239,17 +233,8 @@ func GetEC2QuotaSummary(ctx context.Context, credential *CredentialRecord, regio
 		warnings = append(warnings, "instance usage: "+usageErr.Error())
 	}
 
-	if allocatedCount, associatedCount, usageErr := getElasticAddressUsageCounts(ctx, client); usageErr == nil {
-		summary.AllocatedElasticIPs = allocatedCount
-		summary.AssociatedElasticIPs = associatedCount
-	} else {
-		warnings = append(warnings, "elastic IP usage: "+usageErr.Error())
-	}
-
 	if summary.MaxStandardVCPUs == 0 &&
 		summary.MaxInstances == 0 &&
-		summary.MaxElasticIPs == 0 &&
-		summary.VPCMaxElasticIPs == 0 &&
 		summary.VPCMaxSecurityGroupsPerInterface == 0 {
 		// Keep returning a summary when usage can still be observed even if
 		// account attributes are not populated for this credential.
@@ -257,14 +242,10 @@ func GetEC2QuotaSummary(ctx context.Context, credential *CredentialRecord, regio
 
 	if summary.MaxStandardVCPUs == 0 &&
 		summary.MaxInstances == 0 &&
-		summary.MaxElasticIPs == 0 &&
-		summary.VPCMaxElasticIPs == 0 &&
 		summary.VPCMaxSecurityGroupsPerInterface == 0 &&
 		summary.RunningStandardVCPUs == 0 &&
 		summary.RunningInstances == 0 &&
-		summary.TotalInstances == 0 &&
-		summary.AllocatedElasticIPs == 0 &&
-		summary.AssociatedElasticIPs == 0 {
+		summary.TotalInstances == 0 {
 		return nil, joinLookupWarnings(warnings)
 	}
 
