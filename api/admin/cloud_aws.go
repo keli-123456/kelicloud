@@ -108,7 +108,7 @@ func GetAWSCredentials(c *gin.Context) {
 		return
 	}
 
-	api.RespondSuccess(c, addition.ToPoolView())
+	api.RespondSuccess(c, addition.ToPoolViewWithoutQuota())
 }
 
 func SaveAWSCredentials(c *gin.Context) {
@@ -160,7 +160,7 @@ func SaveAWSCredentials(c *gin.Context) {
 	}
 
 	logCloudAudit(c, fmt.Sprintf("import aws credentials: %d", imported))
-	api.RespondSuccess(c, addition.ToPoolView())
+	api.RespondSuccess(c, addition.ToPoolViewWithoutQuota())
 }
 
 func SetAWSActiveCredential(c *gin.Context) {
@@ -194,7 +194,7 @@ func SetAWSActiveCredential(c *gin.Context) {
 	}
 
 	logCloudAudit(c, "set active aws credential: "+payload.CredentialID)
-	api.RespondSuccess(c, addition.ToPoolView())
+	api.RespondSuccess(c, addition.ToPoolViewWithoutQuota())
 }
 
 func SetAWSActiveRegion(c *gin.Context) {
@@ -224,7 +224,7 @@ func SetAWSActiveRegion(c *gin.Context) {
 	}
 
 	logCloudAudit(c, "set active aws region: "+payload.Region)
-	api.RespondSuccess(c, addition.ToPoolView())
+	api.RespondSuccess(c, addition.ToPoolViewWithoutQuota())
 }
 
 func CheckAWSCredentials(c *gin.Context) {
@@ -490,6 +490,8 @@ func GetAWSAccount(c *gin.Context) {
 	}
 	defer cancel()
 
+	includeQuota := c.Query("include_quota") == "1" || strings.EqualFold(c.Query("include_quota"), "true")
+
 	identityCtx, identityCancel := context.WithTimeout(c.Request.Context(), awsAccountIdentityTimeout)
 	defer identityCancel()
 
@@ -499,12 +501,15 @@ func GetAWSAccount(c *gin.Context) {
 		return
 	}
 
-	quotaCtx, quotaCancel := context.WithTimeout(c.Request.Context(), awsAccountQuotaTimeout)
-	defer quotaCancel()
+	var quota *awscloud.EC2QuotaSummary
+	var quotaErr error
+	if includeQuota {
+		quotaCtx, quotaCancel := context.WithTimeout(c.Request.Context(), awsAccountQuotaTimeout)
+		defer quotaCancel()
+		quota, quotaErr = awscloud.GetEC2QuotaSummary(quotaCtx, credential, region)
+	}
 
-	quota, quotaErr := awscloud.GetEC2QuotaSummary(quotaCtx, credential, region)
-
-	if identity != nil {
+	if includeQuota && identity != nil {
 		credential.SetCheckResult(time.Now(), identity, quota, quotaErr, nil)
 		_ = saveAWSAddition(scope, addition)
 	}

@@ -171,3 +171,35 @@ func TestAdditionRemoveCredentialClearsLegacyCredentialWhenLastEntryDeleted(t *t
 	addition.Normalize()
 	require.Empty(t, addition.Credentials)
 }
+
+func TestAdditionToPoolViewWithoutQuotaStripsQuotaFields(t *testing.T) {
+	addition := &Addition{
+		ActiveCredentialID: "cred-1",
+		ActiveRegion:       "us-east-1",
+		Credentials: []CredentialRecord{
+			{
+				ID:              "cred-1",
+				Name:            "primary",
+				AccessKeyID:     "AKIA_TEST",
+				SecretAccessKey: "secret",
+				DefaultRegion:   "us-east-1",
+				AccountID:       "123456789012",
+				EC2Quota: &EC2QuotaSummary{
+					Region:       "us-east-1",
+					MaxInstances: 20,
+				},
+				EC2QuotaError: "quota timeout",
+				LastStatus:    CredentialStatusHealthy,
+			},
+		},
+	}
+
+	view := addition.ToPoolViewWithoutQuota()
+	require.Len(t, view.Credentials, 1)
+	require.Equal(t, "cred-1", view.ActiveCredentialID)
+	require.Equal(t, "us-east-1", view.ActiveRegion)
+	require.Equal(t, "123456789012", view.Credentials[0].AccountID)
+	require.Equal(t, CredentialStatusHealthy, view.Credentials[0].LastStatus)
+	require.Nil(t, view.Credentials[0].EC2Quota)
+	require.Empty(t, view.Credentials[0].EC2QuotaError)
+}

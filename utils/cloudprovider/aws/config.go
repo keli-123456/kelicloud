@@ -390,7 +390,7 @@ func (a *Addition) RemoveCredential(id string) bool {
 	return true
 }
 
-func (a *Addition) ToPoolView() CredentialPoolView {
+func (a *Addition) toPoolView(includeQuota bool) CredentialPoolView {
 	if a == nil {
 		return CredentialPoolView{
 			ActiveRegion: normalizeRegion(""),
@@ -405,6 +405,12 @@ func (a *Addition) ToPoolView() CredentialPoolView {
 		Credentials:        make([]CredentialView, 0, len(a.Credentials)),
 	}
 	for _, credential := range a.Credentials {
+		quota := normalizeEC2QuotaSummary(credential.EC2Quota)
+		quotaError := credential.EC2QuotaError
+		if !includeQuota {
+			quota = nil
+			quotaError = ""
+		}
 		view.Credentials = append(view.Credentials, CredentialView{
 			ID:                credential.ID,
 			Name:              credential.Name,
@@ -414,8 +420,8 @@ func (a *Addition) ToPoolView() CredentialPoolView {
 			AccountID:         credential.AccountID,
 			ARN:               credential.ARN,
 			UserID:            credential.UserID,
-			EC2Quota:          normalizeEC2QuotaSummary(credential.EC2Quota),
-			EC2QuotaError:     credential.EC2QuotaError,
+			EC2Quota:          quota,
+			EC2QuotaError:     quotaError,
 			LastStatus:        normalizeCredentialStatus(credential.LastStatus),
 			LastError:         credential.LastError,
 			LastCheckedAt:     credential.LastCheckedAt,
@@ -423,6 +429,14 @@ func (a *Addition) ToPoolView() CredentialPoolView {
 		})
 	}
 	return view
+}
+
+func (a *Addition) ToPoolView() CredentialPoolView {
+	return a.toPoolView(true)
+}
+
+func (a *Addition) ToPoolViewWithoutQuota() CredentialPoolView {
+	return a.toPoolView(false)
 }
 
 func (c *CredentialRecord) SecretView() *CredentialSecretView {
