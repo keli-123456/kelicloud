@@ -1,6 +1,8 @@
 package aws
 
 import (
+	"context"
+	"errors"
 	"testing"
 
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
@@ -68,6 +70,31 @@ func TestCollectInstanceTypes(t *testing.T) {
 			"t4g.small": 0,
 		},
 	))
+}
+
+func TestShouldUseDefaultStandardOnDemandVCPUQuota(t *testing.T) {
+	require.True(t, shouldUseDefaultStandardOnDemandVCPUQuota(context.DeadlineExceeded))
+	require.True(t, shouldUseDefaultStandardOnDemandVCPUQuota(errors.New("request timed out")))
+	require.True(t, shouldUseDefaultStandardOnDemandVCPUQuota(errors.New("timeout while calling service quotas")))
+	require.False(t, shouldUseDefaultStandardOnDemandVCPUQuota(errors.New("access denied")))
+	require.False(t, shouldUseDefaultStandardOnDemandVCPUQuota(nil))
+}
+
+func TestParseManagedDebianImageReference(t *testing.T) {
+	preset, ok := parseManagedDebianImageReference("komari:debian-13-amd64")
+	require.True(t, ok)
+	require.Equal(t, "13", preset.Release)
+	require.Equal(t, "amd64", preset.Architecture)
+	require.Equal(t, "debian-13-amd64-*", preset.NamePattern)
+
+	preset, ok = parseManagedDebianImageReference("komari:debian-12-arm64")
+	require.True(t, ok)
+	require.Equal(t, "debian-12-arm64-*", preset.NamePattern)
+
+	_, ok = parseManagedDebianImageReference("komari:debian-12")
+	require.False(t, ok)
+	_, ok = parseManagedDebianImageReference("resolve:ssm:/aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id")
+	require.False(t, ok)
 }
 
 func stringPtr(value string) *string {

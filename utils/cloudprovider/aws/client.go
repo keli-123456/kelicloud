@@ -24,7 +24,10 @@ import (
 const (
 	ec2ServiceCode                   = "ec2"
 	ec2StandardOnDemandVCPUQuotaCode = "L-1216C47A"
+	defaultEC2StandardOnDemandVCPUs  = 5
 	describeInstanceTypesBatchSize   = 100
+	debianEC2ImageOwnerID            = "136693071363"
+	managedDebianImagePrefix         = "komari:debian-"
 )
 
 type Identity struct {
@@ -219,6 +222,8 @@ func GetEC2QuotaSummary(ctx context.Context, credential *CredentialRecord, regio
 
 	if maxStandardVCPUs, quotaErr := getStandardOnDemandVCPUQuota(ctx, cfg); quotaErr == nil {
 		summary.MaxStandardVCPUs = maxStandardVCPUs
+	} else if shouldUseDefaultStandardOnDemandVCPUQuota(quotaErr) {
+		summary.MaxStandardVCPUs = defaultEC2StandardOnDemandVCPUs
 	} else {
 		warnings = append(warnings, "standard vCPU quota: "+quotaErr.Error())
 	}
@@ -562,8 +567,12 @@ func CreateInstance(ctx context.Context, credential *CredentialRecord, region st
 	}
 
 	client := ec2.NewFromConfig(cfg)
+	imageID, err := resolveRunInstancesImageID(ctx, client, strings.TrimSpace(request.ImageID))
+	if err != nil {
+		return nil, err
+	}
 	input := &ec2.RunInstancesInput{
-		ImageId:      awssdk.String(strings.TrimSpace(request.ImageID)),
+		ImageId:      awssdk.String(imageID),
 		InstanceType: ec2types.InstanceType(strings.TrimSpace(request.InstanceType)),
 		MinCount:     awssdk.Int32(1),
 		MaxCount:     awssdk.Int32(1),
@@ -607,6 +616,83 @@ func CreateInstance(ctx context.Context, credential *CredentialRecord, region st
 
 	instanceID := awssdk.ToString(output.Instances[0].InstanceId)
 	return GetInstance(ctx, credential, region, instanceID)
+}
+
+func resolveRunInstancesImageID(ctx context.Context, client *ec2.Client, imageID string) (string, error) {
+	imageID = strings.TrimSpace(imageID)
+	if imageID == "" {
+		return "", errors.New("image id is required")
+	}
+
+	preset, ok := parseManagedDebianImageReference(imageID)
+	if !ok {
+		return imageID, nil
+	}
+
+	output, err := client.DescribeImages(ctx, &ec2.DescribeImagesInput{
+		Owners: []string{debianEC2ImageOwnerID},
+		Filters: []ec2types.Filter{
+			{
+				Name:   awssdk.String("name"),
+				Values: []string{preset.NamePattern},
+			},
+			{
+				Name:   awssdk.String("state"),
+				Values: []string{"available"},
+			},
+		},
+	})
+	if err != nil {
+		return "", err
+	}
+	if len(output.Images) == 0 {
+		return "", fmt.Errorf("no official Debian AMI found for %s", preset.NamePattern)
+	}
+
+	sort.Slice(output.Images, func(i, j int) bool {
+		return awssdk.ToString(output.Images[i].CreationDate) > awssdk.ToString(output.Images[j].CreationDate)
+	})
+
+	resolvedImageID := strings.TrimSpace(awssdk.ToString(output.Images[0].ImageId))
+	if resolvedImageID == "" {
+		return "", fmt.Errorf("official Debian AMI lookup returned an empty image id for %s", preset.NamePattern)
+	}
+	return resolvedImageID, nil
+}
+
+type managedDebianImagePreset struct {
+	Release      string
+	Architecture string
+	NamePattern  string
+}
+
+func parseManagedDebianImageReference(imageID string) (managedDebianImagePreset, bool) {
+	normalized := strings.ToLower(strings.TrimSpace(imageID))
+	if !strings.HasPrefix(normalized, managedDebianImagePrefix) {
+		return managedDebianImagePreset{}, false
+	}
+
+	parts := strings.Split(strings.TrimPrefix(normalized, managedDebianImagePrefix), "-")
+	if len(parts) != 2 {
+		return managedDebianImagePreset{}, false
+	}
+	release := strings.TrimSpace(parts[0])
+	architecture := strings.TrimSpace(parts[1])
+	if release == "" || architecture == "" {
+		return managedDebianImagePreset{}, false
+	}
+
+	switch architecture {
+	case "amd64", "arm64":
+	default:
+		return managedDebianImagePreset{}, false
+	}
+
+	return managedDebianImagePreset{
+		Release:      release,
+		Architecture: architecture,
+		NamePattern:  fmt.Sprintf("debian-%s-%s-*", release, architecture),
+	}, true
 }
 
 func GetInstance(ctx context.Context, credential *CredentialRecord, region, instanceID string) (*Instance, error) {
@@ -960,6 +1046,21 @@ func joinLookupWarnings(parts []string) error {
 		return nil
 	}
 	return errors.New(strings.Join(filtered, "; "))
+}
+
+func shouldUseDefaultStandardOnDemandVCPUQuota(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+
+	message := strings.ToLower(strings.TrimSpace(err.Error()))
+	return strings.Contains(message, "context deadline exceeded") ||
+		strings.Contains(message, "request timed out") ||
+		strings.Contains(message, "timeout") ||
+		strings.Contains(message, "timed out")
 }
 
 func buildTagSpecifications(name string, tags []Tag) []ec2types.TagSpecification {
