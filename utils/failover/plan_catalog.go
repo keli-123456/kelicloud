@@ -134,40 +134,31 @@ func loadAWSPlanCatalog(userUUID, entryID, entryGroup, actionType, service, regi
 				var taskErr error
 				if actionType == "rebind_public_ip" {
 					instances, taskErr = awscloud.ListInstances(ctx, credential, resolvedRegion)
-					return taskErr
 				}
+				return taskErr
+			},
+			func() error {
+				var taskErr error
 				instanceTypes, taskErr = awscloud.ListInstanceTypes(ctx, credential, resolvedRegion)
 				return taskErr
 			},
 			func() error {
 				var taskErr error
-				if actionType == "rebind_public_ip" {
-					return nil
-				}
 				images, taskErr = awscloud.ListSuggestedImages(ctx, credential, resolvedRegion)
 				return taskErr
 			},
 			func() error {
 				var taskErr error
-				if actionType == "rebind_public_ip" {
-					return nil
-				}
 				keyPairs, taskErr = awscloud.ListKeyPairs(ctx, credential, resolvedRegion)
 				return taskErr
 			},
 			func() error {
 				var taskErr error
-				if actionType == "rebind_public_ip" {
-					return nil
-				}
 				subnets, taskErr = awscloud.ListSubnets(ctx, credential, resolvedRegion)
 				return taskErr
 			},
 			func() error {
 				var taskErr error
-				if actionType == "rebind_public_ip" {
-					return nil
-				}
 				securityGroups, taskErr = awscloud.ListSecurityGroups(ctx, credential, resolvedRegion)
 				return taskErr
 			},
@@ -204,7 +195,6 @@ func loadAWSPlanCatalog(userUUID, entryID, entryGroup, actionType, service, regi
 					Hint:  strings.Join(hintParts, " · "),
 				})
 			}
-			return catalog, nil
 		}
 		for _, item := range instanceTypes {
 			catalog.InstanceTypes = append(catalog.InstanceTypes, CatalogOption{
@@ -271,24 +261,21 @@ func loadAWSPlanCatalog(userUUID, entryID, entryGroup, actionType, service, regi
 				var taskErr error
 				if actionType == "rebind_public_ip" {
 					instances, taskErr = awscloud.ListLightsailInstances(ctx, credential, resolvedRegion)
-					return taskErr
 				}
+				return taskErr
+			},
+			func() error {
+				var taskErr error
 				bundles, taskErr = awscloud.ListLightsailBundles(ctx, credential, resolvedRegion)
 				return taskErr
 			},
 			func() error {
 				var taskErr error
-				if actionType == "rebind_public_ip" {
-					return nil
-				}
 				blueprints, taskErr = awscloud.ListLightsailBlueprints(ctx, credential, resolvedRegion)
 				return taskErr
 			},
 			func() error {
 				var taskErr error
-				if actionType == "rebind_public_ip" {
-					return nil
-				}
 				keyPairs, taskErr = awscloud.ListLightsailKeyPairs(ctx, credential, resolvedRegion)
 				return taskErr
 			},
@@ -330,7 +317,6 @@ func loadAWSPlanCatalog(userUUID, entryID, entryGroup, actionType, service, regi
 					Hint:  strings.Join(hintParts, " · "),
 				})
 			}
-			return catalog, nil
 		}
 		for _, item := range bundles {
 			catalog.Bundles = append(catalog.Bundles, CatalogOption{

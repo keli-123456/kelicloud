@@ -2,9 +2,11 @@ package failover
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -13,6 +15,7 @@ import (
 	"github.com/komari-monitor/komari/database"
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
+	awscloud "github.com/komari-monitor/komari/utils/cloudprovider/aws"
 	"github.com/komari-monitor/komari/utils/cloudprovider/digitalocean"
 	linodecloud "github.com/komari-monitor/komari/utils/cloudprovider/linode"
 )
@@ -247,12 +250,201 @@ func TestFirstUsablePublicIPv6ReturnsEmptyWhenNoUsableAddressExists(t *testing.T
 	}
 }
 
+func TestResolveAWSRebindPayloadUsesTrackedCurrentEC2Instance(t *testing.T) {
+	payload, ok := resolveAWSRebindPayload(models.FailoverTask{
+		CurrentInstanceRef: `{"provider":"aws","service":"ec2","provider_entry_id":"cred-1","region":"us-east-1","instance_id":"i-1234567890"}`,
+	}, awsRebindPayload{
+		Service: "ec2",
+		Region:  "",
+	}, "cred-1")
+	if !ok {
+		t.Fatal("expected tracked EC2 instance to resolve")
+	}
+	if payload.Region != "us-east-1" {
+		t.Fatalf("expected tracked region, got %q", payload.Region)
+	}
+	if payload.InstanceID != "i-1234567890" {
+		t.Fatalf("expected tracked instance id, got %q", payload.InstanceID)
+	}
+}
+
+func TestResolveAWSRebindPayloadUsesTrackedCurrentLightsailInstance(t *testing.T) {
+	payload, ok := resolveAWSRebindPayload(models.FailoverTask{
+		CurrentInstanceRef: `{"provider":"aws","service":"lightsail","provider_entry_id":"cred-2","region":"us-west-2","instance_name":"edge-ls"}`,
+	}, awsRebindPayload{
+		Service: "lightsail",
+	}, "cred-2")
+	if !ok {
+		t.Fatal("expected tracked Lightsail instance to resolve")
+	}
+	if payload.Region != "us-west-2" {
+		t.Fatalf("expected tracked region, got %q", payload.Region)
+	}
+	if payload.InstanceName != "edge-ls" {
+		t.Fatalf("expected tracked instance name, got %q", payload.InstanceName)
+	}
+}
+
+func TestResolveAWSRebindPayloadSkipsTrackedInstanceFromDifferentProviderEntry(t *testing.T) {
+	_, ok := resolveAWSRebindPayload(models.FailoverTask{
+		CurrentInstanceRef: `{"provider":"aws","service":"ec2","provider_entry_id":"cred-1","region":"us-east-1","instance_id":"i-1234567890"}`,
+	}, awsRebindPayload{
+		Service: "ec2",
+	}, "cred-2")
+	if ok {
+		t.Fatal("expected tracked instance from another credential to be ignored")
+	}
+}
+
+func TestBuildAWSProvisionFallbackPlanRequiresProvisionConfig(t *testing.T) {
+	plan := models.FailoverPlan{
+		Provider:        "aws",
+		ProviderEntryID: "cred-1",
+		ActionType:      models.FailoverActionRebindPublicIP,
+	}
+	_, _, _, err := buildAWSProvisionFallbackPlan(plan, awsRebindPayload{
+		Service: "ec2",
+		Region:  "us-east-1",
+		ImageID: "ami-123",
+	}, "missing instance type")
+	var noFallbackErr *noPlanFallbackError
+	if !errors.As(err, &noFallbackErr) {
+		t.Fatalf("expected noPlanFallbackError for incomplete fallback config, got %v", err)
+	}
+}
+
+func TestPrepareAWSRebindExecutionPlanUsesTrackedInstanceWhenAlive(t *testing.T) {
+	originalLoadCredential := awsFailoverLoadCredential
+	originalResolveCurrent := awsFailoverResolveCurrentInstanceByAddress
+	defer func() {
+		awsFailoverLoadCredential = originalLoadCredential
+		awsFailoverResolveCurrentInstanceByAddress = originalResolveCurrent
+	}()
+
+	awsFailoverLoadCredential = func(userUUID, entryID string) (*awscloud.Addition, *awscloud.CredentialRecord, error) {
+		return &awscloud.Addition{ActiveRegion: "us-east-1"}, &awscloud.CredentialRecord{
+			ID:            entryID,
+			Name:          "cred-1",
+			DefaultRegion: "us-east-1",
+		}, nil
+	}
+	awsFailoverResolveCurrentInstanceByAddress = func(ctx context.Context, task models.FailoverTask, plan models.FailoverPlan, payload awsRebindPayload) (*currentInstanceCleanup, error) {
+		return &currentInstanceCleanup{
+			Ref: map[string]interface{}{
+				"provider":          "aws",
+				"service":           "ec2",
+				"provider_entry_id": "cred-1",
+				"region":            "us-east-1",
+				"instance_id":       "i-1234567890",
+			},
+			Addresses: map[string]interface{}{
+				"private_ip": "172.31.10.24",
+			},
+		}, nil
+	}
+
+	executionPlan, mode, reason, err := prepareAWSRebindExecutionPlan(context.Background(), models.FailoverTask{
+		UserID:         "user-1",
+		CurrentAddress: "203.0.113.10",
+	}, models.FailoverPlan{
+		Provider:        "aws",
+		ProviderEntryID: "cred-1",
+		ActionType:      models.FailoverActionRebindPublicIP,
+		Payload:         `{"service":"ec2","region":"us-east-1","image_id":"ami-123","instance_type":"t3.micro"}`,
+	})
+	if err != nil {
+		t.Fatalf("expected alive tracked instance to stay on rebind path, got %v", err)
+	}
+	if mode != "rebind_existing_instance" {
+		t.Fatalf("expected rebind_existing_instance mode, got %q", mode)
+	}
+	if !strings.Contains(reason, "current IP") {
+		t.Fatalf("expected rebind reason, got %q", reason)
+	}
+
+	var payload awsRebindPayload
+	if err := json.Unmarshal([]byte(executionPlan.Payload), &payload); err != nil {
+		t.Fatalf("expected normalized rebind payload, got %v", err)
+	}
+	if payload.InstanceID != "i-1234567890" {
+		t.Fatalf("expected tracked instance id in rebind payload, got %q", payload.InstanceID)
+	}
+	if payload.PrivateIP != "172.31.10.24" {
+		t.Fatalf("expected discovered private ip in rebind payload, got %q", payload.PrivateIP)
+	}
+}
+
+func TestPrepareAWSRebindExecutionPlanFallsBackToProvisionWhenTrackedInstanceMissing(t *testing.T) {
+	originalLoadCredential := awsFailoverLoadCredential
+	originalResolveCurrent := awsFailoverResolveCurrentInstanceByAddress
+	defer func() {
+		awsFailoverLoadCredential = originalLoadCredential
+		awsFailoverResolveCurrentInstanceByAddress = originalResolveCurrent
+	}()
+
+	awsFailoverLoadCredential = func(userUUID, entryID string) (*awscloud.Addition, *awscloud.CredentialRecord, error) {
+		return &awscloud.Addition{ActiveRegion: "us-east-1"}, &awscloud.CredentialRecord{
+			ID:            entryID,
+			Name:          "cred-1",
+			DefaultRegion: "us-east-1",
+		}, nil
+	}
+	awsFailoverResolveCurrentInstanceByAddress = func(ctx context.Context, task models.FailoverTask, plan models.FailoverPlan, payload awsRebindPayload) (*currentInstanceCleanup, error) {
+		return nil, nil
+	}
+
+	executionPlan, mode, reason, err := prepareAWSRebindExecutionPlan(context.Background(), models.FailoverTask{
+		UserID:         "user-1",
+		CurrentAddress: "203.0.113.10",
+	}, models.FailoverPlan{
+		Provider:        "aws",
+		ProviderEntryID: "cred-1",
+		ActionType:      models.FailoverActionRebindPublicIP,
+		Payload:         `{"service":"ec2","region":"us-east-1","image_id":"ami-123","instance_type":"t3.micro","assign_public_ip":true}`,
+	})
+	if err != nil {
+		t.Fatalf("expected missing tracked instance to fall back to provision, got %v", err)
+	}
+	if mode != "provision_new_instance" {
+		t.Fatalf("expected provision_new_instance mode, got %q", mode)
+	}
+	if !strings.Contains(reason, "current IP") {
+		t.Fatalf("expected provision fallback reason, got %q", reason)
+	}
+	if executionPlan.ActionType != models.FailoverActionProvisionInstance {
+		t.Fatalf("expected execution plan to switch to provision_instance, got %q", executionPlan.ActionType)
+	}
+
+	var payload awsProvisionPayload
+	if err := json.Unmarshal([]byte(executionPlan.Payload), &payload); err != nil {
+		t.Fatalf("expected fallback provision payload, got %v", err)
+	}
+	if payload.ImageID != "ami-123" || payload.InstanceType != "t3.micro" {
+		t.Fatalf("expected fallback create config to carry over, got %+v", payload)
+	}
+}
+
 func TestSameAddressMatchesCIDRAndPlainIP(t *testing.T) {
 	if !sameAddress("2001:db8::10", "2001:db8::10/64") {
 		t.Fatal("expected plain ipv6 and cidr ipv6 to match")
 	}
 	if !sameAddress("203.0.113.8", "203.0.113.8/32") {
 		t.Fatal("expected plain ipv4 and cidr ipv4 to match")
+	}
+}
+
+func TestSamePublicIPv4AddressMatchesPublicIPv4(t *testing.T) {
+	if !samePublicIPv4Address("203.0.113.8", "203.0.113.8") {
+		t.Fatal("expected public ipv4 to match")
+	}
+}
+
+func TestSamePublicIPv4AddressRejectsPrivateIPv4AndIPv6(t *testing.T) {
+	if samePublicIPv4Address("172.31.10.24", "203.0.113.8") {
+		t.Fatal("expected private ipv4 target not to match a different public ipv4")
+	}
+	if samePublicIPv4Address("2001:db8::10", "203.0.113.8") {
+		t.Fatal("expected ipv6 target not to match public ipv4 only matcher")
 	}
 }
 
@@ -304,8 +496,8 @@ func TestProviderEntryMaxAttemptsUsesTaskProvisionRetryLimit(t *testing.T) {
 	if got := providerEntryMaxAttempts(task, provisionPlan); got != 3 {
 		t.Fatalf("expected provision retries to use task limit 3, got %d", got)
 	}
-	if got := providerEntryMaxAttempts(task, rebindPlan); got != 1 {
-		t.Fatalf("expected rebind retries to remain 1, got %d", got)
+	if got := providerEntryMaxAttempts(task, rebindPlan); got != 3 {
+		t.Fatalf("expected aws smart plan retries to use task limit 3, got %d", got)
 	}
 }
 
@@ -341,8 +533,8 @@ func TestProvisionPlanFailureFallbackLimitUsesTaskSetting(t *testing.T) {
 	if got := provisionPlanFailureFallbackLimit(task, provisionPlan); got != 4 {
 		t.Fatalf("expected provision fallback limit to use task value 4, got %d", got)
 	}
-	if got := provisionPlanFailureFallbackLimit(task, rebindPlan); got != 1 {
-		t.Fatalf("expected rebind fallback limit to remain 1, got %d", got)
+	if got := provisionPlanFailureFallbackLimit(task, rebindPlan); got != 4 {
+		t.Fatalf("expected aws smart plan fallback limit to use task value 4, got %d", got)
 	}
 }
 
@@ -409,19 +601,20 @@ func TestEffectiveTaskDeleteStrategyForProvisionPlans(t *testing.T) {
 	}
 }
 
-func TestEffectiveTaskDeleteStrategyKeepsRebindPlans(t *testing.T) {
+func TestEffectiveTaskDeleteStrategyTreatsAWSPlansAsProvisionCapable(t *testing.T) {
 	task := models.FailoverTask{
 		DeleteStrategy: models.FailoverDeleteStrategyDeleteAfterSuccess,
 		Plans: []models.FailoverPlan{
 			{
 				Enabled:    true,
+				Provider:   "aws",
 				ActionType: models.FailoverActionRebindPublicIP,
 			},
 		},
 	}
 
-	if got := effectiveTaskDeleteStrategy(task); got != models.FailoverDeleteStrategyKeep {
-		t.Fatalf("expected rebind-only plans to keep old instance, got %q", got)
+	if got := effectiveTaskDeleteStrategy(task); got != models.FailoverDeleteStrategyDeleteAfterSuccess {
+		t.Fatalf("expected aws smart plan to keep delete_after_success semantics, got %q", got)
 	}
 }
 

@@ -35,6 +35,11 @@ var (
 	runningTasks     = map[uint]struct{}{}
 	executionStopMu  sync.Mutex
 	executionCancels = map[uint]context.CancelFunc{}
+
+	awsFailoverLoadCredential                  = loadAWSCredential
+	awsFailoverGetEC2InstanceDetail            = awscloud.GetInstanceDetail
+	awsFailoverGetLightsailDetail              = awscloud.GetLightsailInstanceDetail
+	awsFailoverResolveCurrentInstanceByAddress = resolveAWSCurrentInstanceByAddress
 )
 
 const interruptedExecutionMessage = "failover execution was interrupted before completion"
@@ -306,12 +311,340 @@ type linodeProvisionPayload struct {
 }
 
 type awsRebindPayload struct {
-	Service      string `json:"service,omitempty"`
-	Region       string `json:"region,omitempty"`
-	InstanceID   string `json:"instance_id,omitempty"`
-	PrivateIP    string `json:"private_ip,omitempty"`
-	InstanceName string `json:"instance_name,omitempty"`
-	StaticIPName string `json:"static_ip_name,omitempty"`
+	Service          string         `json:"service,omitempty"`
+	Region           string         `json:"region,omitempty"`
+	InstanceID       string         `json:"instance_id,omitempty"`
+	PrivateIP        string         `json:"private_ip,omitempty"`
+	InstanceName     string         `json:"instance_name,omitempty"`
+	StaticIPName     string         `json:"static_ip_name,omitempty"`
+	Name             string         `json:"name,omitempty"`
+	ImageID          string         `json:"image_id,omitempty"`
+	InstanceType     string         `json:"instance_type,omitempty"`
+	KeyName          string         `json:"key_name,omitempty"`
+	SubnetID         string         `json:"subnet_id,omitempty"`
+	SecurityGroupIDs []string       `json:"security_group_ids,omitempty"`
+	UserData         string         `json:"user_data,omitempty"`
+	AssignPublicIP   bool           `json:"assign_public_ip"`
+	AssignIPv6       bool           `json:"assign_ipv6"`
+	AllowAllTraffic  bool           `json:"allow_all_traffic"`
+	Tags             []awscloud.Tag `json:"tags,omitempty"`
+	AvailabilityZone string         `json:"availability_zone,omitempty"`
+	BlueprintID      string         `json:"blueprint_id,omitempty"`
+	BundleID         string         `json:"bundle_id,omitempty"`
+	KeyPairName      string         `json:"key_pair_name,omitempty"`
+	IPAddressType    string         `json:"ip_address_type,omitempty"`
+}
+
+func normalizeAWSFailoverService(service string) string {
+	switch strings.ToLower(strings.TrimSpace(service)) {
+	case "lightsail":
+		return "lightsail"
+	default:
+		return "ec2"
+	}
+}
+
+func normalizeAWSRebindPayload(payload awsRebindPayload) awsRebindPayload {
+	payload.Service = normalizeAWSFailoverService(payload.Service)
+	payload.Region = strings.TrimSpace(payload.Region)
+	payload.InstanceID = strings.TrimSpace(payload.InstanceID)
+	payload.PrivateIP = strings.TrimSpace(payload.PrivateIP)
+	payload.InstanceName = strings.TrimSpace(payload.InstanceName)
+	payload.StaticIPName = strings.TrimSpace(payload.StaticIPName)
+	payload.Name = strings.TrimSpace(payload.Name)
+	payload.ImageID = strings.TrimSpace(payload.ImageID)
+	payload.InstanceType = strings.TrimSpace(payload.InstanceType)
+	payload.KeyName = strings.TrimSpace(payload.KeyName)
+	payload.SubnetID = strings.TrimSpace(payload.SubnetID)
+	payload.SecurityGroupIDs = trimStrings(payload.SecurityGroupIDs)
+	payload.UserData = strings.TrimSpace(payload.UserData)
+	payload.AvailabilityZone = strings.TrimSpace(payload.AvailabilityZone)
+	payload.BlueprintID = strings.TrimSpace(payload.BlueprintID)
+	payload.BundleID = strings.TrimSpace(payload.BundleID)
+	payload.KeyPairName = strings.TrimSpace(payload.KeyPairName)
+	payload.IPAddressType = strings.TrimSpace(payload.IPAddressType)
+	return payload
+}
+
+func resolveAWSRebindPayload(task models.FailoverTask, payload awsRebindPayload, entryID string) (awsRebindPayload, bool) {
+	payload = normalizeAWSRebindPayload(payload)
+	if payload.Service == "lightsail" {
+		if payload.InstanceName != "" {
+			return payload, true
+		}
+	} else if payload.InstanceID != "" {
+		return payload, true
+	}
+
+	currentRef := parseJSONMap(task.CurrentInstanceRef)
+	if len(currentRef) == 0 {
+		return payload, false
+	}
+	if !strings.EqualFold(strings.TrimSpace(stringMapValue(currentRef, "provider")), "aws") {
+		return payload, false
+	}
+
+	refService := normalizeAWSFailoverService(firstNonEmpty(stringMapValue(currentRef, "service"), "ec2"))
+	if refService != payload.Service {
+		return payload, false
+	}
+
+	if trackedEntryID := strings.TrimSpace(providerEntryIDFromRef(currentRef)); trackedEntryID != "" && strings.TrimSpace(entryID) != "" && trackedEntryID != strings.TrimSpace(entryID) {
+		return payload, false
+	}
+
+	if payload.Region == "" {
+		payload.Region = strings.TrimSpace(stringMapValue(currentRef, "region"))
+	}
+
+	if payload.Service == "lightsail" {
+		payload.InstanceName = strings.TrimSpace(stringMapValue(currentRef, "instance_name"))
+		if payload.InstanceName == "" {
+			return payload, false
+		}
+		return payload, true
+	}
+
+	payload.InstanceID = strings.TrimSpace(stringMapValue(currentRef, "instance_id"))
+	if payload.InstanceID == "" {
+		return payload, false
+	}
+	return payload, true
+}
+
+func resolveAWSFailoverRegion(region string, addition *awscloud.Addition, credential *awscloud.CredentialRecord) string {
+	region = strings.TrimSpace(region)
+	if region != "" {
+		return region
+	}
+	if addition != nil {
+		if activeRegion := strings.TrimSpace(addition.ActiveRegion); activeRegion != "" {
+			return activeRegion
+		}
+	}
+	if credential != nil {
+		if defaultRegion := strings.TrimSpace(credential.DefaultRegion); defaultRegion != "" {
+			return defaultRegion
+		}
+	}
+	return awscloud.DefaultRegion
+}
+
+func awsRebindProvisionPayload(payload awsRebindPayload) awsProvisionPayload {
+	payload = normalizeAWSRebindPayload(payload)
+	return awsProvisionPayload{
+		Service:          payload.Service,
+		Region:           payload.Region,
+		Name:             payload.Name,
+		ImageID:          payload.ImageID,
+		InstanceType:     payload.InstanceType,
+		KeyName:          payload.KeyName,
+		SubnetID:         payload.SubnetID,
+		SecurityGroupIDs: trimStrings(payload.SecurityGroupIDs),
+		UserData:         payload.UserData,
+		AssignPublicIP:   payload.AssignPublicIP,
+		AssignIPv6:       payload.AssignIPv6,
+		AllowAllTraffic:  payload.AllowAllTraffic,
+		Tags:             payload.Tags,
+		AvailabilityZone: payload.AvailabilityZone,
+		BlueprintID:      payload.BlueprintID,
+		BundleID:         payload.BundleID,
+		KeyPairName:      payload.KeyPairName,
+		IPAddressType:    payload.IPAddressType,
+	}
+}
+
+func validateAWSProvisionPayload(payload awsProvisionPayload) error {
+	service := normalizeAWSFailoverService(payload.Service)
+	region := strings.TrimSpace(payload.Region)
+	if region == "" {
+		return errors.New("region is required")
+	}
+
+	if service == "lightsail" {
+		if strings.TrimSpace(payload.AvailabilityZone) == "" {
+			return errors.New("availability_zone is required")
+		}
+		if strings.TrimSpace(payload.BlueprintID) == "" {
+			return errors.New("blueprint_id is required")
+		}
+		if strings.TrimSpace(payload.BundleID) == "" {
+			return errors.New("bundle_id is required")
+		}
+		return nil
+	}
+
+	if strings.TrimSpace(payload.ImageID) == "" {
+		return errors.New("image_id is required")
+	}
+	if strings.TrimSpace(payload.InstanceType) == "" {
+		return errors.New("instance_type is required")
+	}
+	return nil
+}
+
+func buildAWSProvisionFallbackPlan(plan models.FailoverPlan, payload awsRebindPayload, reason string) (models.FailoverPlan, string, string, error) {
+	provisionPayload := awsRebindProvisionPayload(payload)
+	if err := validateAWSProvisionPayload(provisionPayload); err != nil {
+		return models.FailoverPlan{}, "", "", &noPlanFallbackError{
+			err: fmt.Errorf("aws failover plan could not provision a replacement under the same credential: %w", err),
+		}
+	}
+
+	encodedPayload, err := json.Marshal(provisionPayload)
+	if err != nil {
+		return models.FailoverPlan{}, "", "", fmt.Errorf("failed to encode aws fallback provision payload: %w", err)
+	}
+
+	nextPlan := plan
+	nextPlan.ActionType = models.FailoverActionProvisionInstance
+	nextPlan.Payload = string(encodedPayload)
+	return nextPlan, "provision_new_instance", strings.TrimSpace(reason), nil
+}
+
+func isAWSRebindTargetMissingError(service string, err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(strings.TrimSpace(err.Error()))
+	if service == "lightsail" {
+		return strings.Contains(message, "lightsail instance not found")
+	}
+	return strings.Contains(message, "instance not found") || strings.Contains(message, "invalidinstanceid.notfound")
+}
+
+func awsRebindTargetAllowsReuse(service, state string) bool {
+	state = strings.ToLower(strings.TrimSpace(state))
+	if state == "" {
+		return true
+	}
+	switch normalizeAWSFailoverService(service) {
+	case "lightsail":
+		return state == "running" || state == "pending" || state == "starting"
+	default:
+		return state == "running" || state == "pending"
+	}
+}
+
+func prepareAWSRebindExecutionPlan(ctx context.Context, task models.FailoverTask, plan models.FailoverPlan) (models.FailoverPlan, string, string, error) {
+	payload, err := parseAWSExecutionPayload(plan)
+	if err != nil {
+		return models.FailoverPlan{}, "", "", err
+	}
+
+	addition, credential, err := awsFailoverLoadCredential(task.UserID, plan.ProviderEntryID)
+	if err != nil {
+		return models.FailoverPlan{}, "", "", err
+	}
+	payload.Region = resolveAWSFailoverRegion(payload.Region, addition, credential)
+
+	cleanup, err := awsFailoverResolveCurrentInstanceByAddress(ctx, task, plan, payload)
+	if err != nil {
+		return models.FailoverPlan{}, "", "", err
+	}
+	if cleanup == nil {
+		return buildAWSProvisionFallbackPlan(
+			plan,
+			payload,
+			"the selected AWS credential does not have an instance with the task's current IP, so failover will create a replacement instance",
+		)
+	}
+
+	resolvedPayload := payload
+	resolvedPayload.Region = firstNonEmpty(stringMapValue(cleanup.Ref, "region"), resolvedPayload.Region)
+	resolvedPayload.Service = normalizeAWSFailoverService(firstNonEmpty(stringMapValue(cleanup.Ref, "service"), resolvedPayload.Service))
+	if resolvedPayload.Service == "lightsail" {
+		resolvedPayload.InstanceName = strings.TrimSpace(stringMapValue(cleanup.Ref, "instance_name"))
+	} else {
+		resolvedPayload.InstanceID = strings.TrimSpace(stringMapValue(cleanup.Ref, "instance_id"))
+		resolvedPayload.PrivateIP = firstNonEmpty(
+			strings.TrimSpace(stringMapValue(cleanup.Addresses, "private_ip")),
+			resolvedPayload.PrivateIP,
+		)
+	}
+
+	rebindPlan := plan
+	rebindPlan.ActionType = models.FailoverActionRebindPublicIP
+	rebindPlan.Payload = marshalJSON(resolvedPayload)
+	return rebindPlan, "rebind_existing_instance", "the selected AWS credential already has an instance with the task's current IP, so failover will only replace its public IP", nil
+}
+
+func parseAWSExecutionPayload(plan models.FailoverPlan) (awsRebindPayload, error) {
+	switch strings.TrimSpace(plan.ActionType) {
+	case models.FailoverActionProvisionInstance:
+		var payload awsProvisionPayload
+		if err := json.Unmarshal([]byte(plan.Payload), &payload); err != nil {
+			return awsRebindPayload{}, fmt.Errorf("invalid aws provision payload: %w", err)
+		}
+		return normalizeAWSRebindPayload(awsRebindPayload{
+			Service:          payload.Service,
+			Region:           payload.Region,
+			Name:             payload.Name,
+			ImageID:          payload.ImageID,
+			InstanceType:     payload.InstanceType,
+			KeyName:          payload.KeyName,
+			SubnetID:         payload.SubnetID,
+			SecurityGroupIDs: trimStrings(payload.SecurityGroupIDs),
+			UserData:         payload.UserData,
+			AssignPublicIP:   payload.AssignPublicIP,
+			AssignIPv6:       payload.AssignIPv6,
+			AllowAllTraffic:  payload.AllowAllTraffic,
+			Tags:             payload.Tags,
+			AvailabilityZone: payload.AvailabilityZone,
+			BlueprintID:      payload.BlueprintID,
+			BundleID:         payload.BundleID,
+			KeyPairName:      payload.KeyPairName,
+			IPAddressType:    payload.IPAddressType,
+		}), nil
+	case models.FailoverActionRebindPublicIP:
+		var payload awsRebindPayload
+		if err := json.Unmarshal([]byte(plan.Payload), &payload); err != nil {
+			return awsRebindPayload{}, fmt.Errorf("invalid aws rebind payload: %w", err)
+		}
+		return normalizeAWSRebindPayload(payload), nil
+	default:
+		return awsRebindPayload{}, fmt.Errorf("unsupported aws plan action: %s", plan.ActionType)
+	}
+}
+
+func resolveAWSCurrentInstanceByAddress(ctx context.Context, task models.FailoverTask, plan models.FailoverPlan, payload awsRebindPayload) (*currentInstanceCleanup, error) {
+	if strings.TrimSpace(task.CurrentAddress) == "" {
+		return nil, nil
+	}
+
+	lookupPlan := plan
+	lookupPlan.ActionType = models.FailoverActionRebindPublicIP
+	lookupPlan.Payload = marshalJSON(awsRebindPayload{
+		Service: payload.Service,
+		Region:  payload.Region,
+	})
+
+	candidate := providerPoolCandidate{
+		EntryID:   strings.TrimSpace(plan.ProviderEntryID),
+		EntryName: strings.TrimSpace(plan.ProviderEntryID),
+	}
+	cleanup, err := (&executionRunner{task: task, ctx: ctx}).resolveCurrentInstanceCleanupByAddress(ctx, lookupPlan, candidate)
+	if err != nil {
+		return nil, err
+	}
+	if cleanup == nil || !strings.EqualFold(strings.TrimSpace(stringMapValue(cleanup.Ref, "provider")), "aws") {
+		return nil, nil
+	}
+	return cleanup, nil
+}
+
+func planMayProvision(plan models.FailoverPlan) bool {
+	if strings.ToLower(strings.TrimSpace(plan.Provider)) == "aws" {
+		return true
+	}
+	return strings.TrimSpace(plan.ActionType) == models.FailoverActionProvisionInstance
+}
+
+func (r *executionRunner) preparePlanForCandidate(plan models.FailoverPlan) (models.FailoverPlan, string, string, error) {
+	if strings.ToLower(strings.TrimSpace(plan.Provider)) == "aws" {
+		return prepareAWSRebindExecutionPlan(r.ctx, r.task, plan)
+	}
+	return plan, "", "", nil
 }
 
 func RunScheduledWork() error {
@@ -642,7 +975,6 @@ func (r *executionRunner) executePlanActionWithProviderPool(plan models.Failover
 	postProvisionFailureSeen := false
 	var postProvisionFailureErr error
 	provisionFailureCount := 0
-	provisionFailureLimit := provisionPlanFailureFallbackLimit(r.task, plan)
 	entryAttempts := make([]map[string]interface{}, 0, len(candidates))
 	for _, candidate := range candidates {
 		if err := r.checkStopped(); err != nil {
@@ -662,8 +994,45 @@ func (r *executionRunner) executePlanActionWithProviderPool(plan models.Failover
 			candidateDetail["active"] = true
 		}
 
-		if strings.TrimSpace(plan.ActionType) == models.FailoverActionProvisionInstance {
-			recycledDetail, recycleErr := r.recycleCurrentOutletForCandidate(plan, candidate)
+		selectedPlan := plan
+		selectedPlan.ProviderEntryID = candidate.EntryID
+		selectedPlan.ProviderEntryGroup = candidate.EntryGroup
+
+		executionPlan, executionMode, executionReason, prepErr := r.preparePlanForCandidate(selectedPlan)
+		if prepErr != nil {
+			if errors.Is(prepErr, errExecutionStopped) {
+				return nil, "", entryAttempts, prepErr
+			}
+			var noFallbackErr *noPlanFallbackError
+			if errors.As(prepErr, &noFallbackErr) {
+				candidateDetail["status"] = "failed"
+				candidateDetail["error"] = prepErr.Error()
+				entryAttempts = append(entryAttempts, candidateDetail)
+				return nil, "", entryAttempts, prepErr
+			}
+			decision := classifyProviderFailure(plan.Provider, prepErr)
+			applyProviderEntryFailure(r.task.UserID, plan.Provider, candidate.EntryID, decision, prepErr)
+			candidateDetail["status"] = "failed"
+			candidateDetail["error"] = prepErr.Error()
+			candidateDetail["failure_class"] = decision.Class
+			entryAttempts = append(entryAttempts, candidateDetail)
+			continue
+		}
+		if executionMode != "" {
+			candidateDetail["execution_mode"] = executionMode
+		}
+		if executionReason != "" {
+			candidateDetail["execution_reason"] = executionReason
+		}
+		if strings.TrimSpace(executionPlan.ActionType) != strings.TrimSpace(selectedPlan.ActionType) {
+			candidateDetail["resolved_action_type"] = executionPlan.ActionType
+		}
+
+		isProvisionPlan := strings.TrimSpace(executionPlan.ActionType) == models.FailoverActionProvisionInstance
+		provisionFailureLimit := provisionPlanFailureFallbackLimit(r.task, executionPlan)
+
+		if isProvisionPlan {
+			recycledDetail, recycleErr := r.recycleCurrentOutletForCandidate(executionPlan, candidate)
 			if recycleErr != nil {
 				if errors.Is(recycleErr, errExecutionStopped) {
 					return nil, "", entryAttempts, recycleErr
@@ -676,16 +1045,13 @@ func (r *executionRunner) executePlanActionWithProviderPool(plan models.Failover
 			}
 			if len(recycledDetail) > 0 {
 				candidateDetail["recycled_current_instance"] = recycledDetail
-				if availabilityAfterRecycle := waitForProviderEntryCapacityAfterRecycle(r.ctx, r.task.UserID, plan, candidate); len(availabilityAfterRecycle) > 0 {
+				if availabilityAfterRecycle := waitForProviderEntryCapacityAfterRecycle(r.ctx, r.task.UserID, executionPlan, candidate); len(availabilityAfterRecycle) > 0 {
 					candidateDetail["availability_after_recycle"] = availabilityAfterRecycle
 				}
 			}
 		}
 
-		selectedPlan := plan
-		selectedPlan.ProviderEntryID = candidate.EntryID
-		isProvisionPlan := strings.TrimSpace(selectedPlan.ActionType) == models.FailoverActionProvisionInstance
-		maxAttempts := providerEntryMaxAttempts(r.task, selectedPlan)
+		maxAttempts := providerEntryMaxAttempts(r.task, executionPlan)
 		for attemptNumber := 1; attemptNumber <= maxAttempts; attemptNumber++ {
 			if err := r.checkStopped(); err != nil {
 				return nil, "", entryAttempts, err
@@ -696,12 +1062,12 @@ func (r *executionRunner) executePlanActionWithProviderPool(plan models.Failover
 			}
 			attemptDetail["attempt"] = attemptNumber
 
-			lease, availability, reserveErr := acquireProviderEntryLease(r.ctx, r.task.UserID, selectedPlan, candidate)
+			lease, availability, reserveErr := acquireProviderEntryLease(r.ctx, r.task.UserID, executionPlan, candidate)
 			if len(availability) > 0 {
 				attemptDetail["availability"] = availability
 			}
 			if reserveErr != nil && isProvisionPlan && strings.TrimSpace(stringMapValue(availability, "status")) == "full" {
-				recycledDetail, recycleErr := r.recycleCurrentOutletForCandidate(selectedPlan, candidate)
+				recycledDetail, recycleErr := r.recycleCurrentOutletForCandidate(executionPlan, candidate)
 				if recycleErr != nil {
 					if errors.Is(recycleErr, errExecutionStopped) {
 						return nil, "", entryAttempts, recycleErr
@@ -709,10 +1075,10 @@ func (r *executionRunner) executePlanActionWithProviderPool(plan models.Failover
 					attemptDetail["recycle_error"] = recycleErr.Error()
 				} else if len(recycledDetail) > 0 {
 					attemptDetail["recycled_current_instance"] = recycledDetail
-					if availabilityAfterRecycle := waitForProviderEntryCapacityAfterRecycle(r.ctx, r.task.UserID, selectedPlan, candidate); len(availabilityAfterRecycle) > 0 {
+					if availabilityAfterRecycle := waitForProviderEntryCapacityAfterRecycle(r.ctx, r.task.UserID, executionPlan, candidate); len(availabilityAfterRecycle) > 0 {
 						attemptDetail["availability_after_recycle"] = availabilityAfterRecycle
 					}
-					lease, availability, reserveErr = acquireProviderEntryLease(r.ctx, r.task.UserID, selectedPlan, candidate)
+					lease, availability, reserveErr = acquireProviderEntryLease(r.ctx, r.task.UserID, executionPlan, candidate)
 					if len(availability) > 0 {
 						attemptDetail["availability"] = availability
 					}
@@ -745,8 +1111,8 @@ func (r *executionRunner) executePlanActionWithProviderPool(plan models.Failover
 					panic(recovered)
 				}
 			}()
-			if shouldSerializeProviderOperation(selectedPlan) {
-				serialDone, serialErr := lease.BeginSerializedOperation(r.ctx, providerEntryOperationSpacing(selectedPlan))
+			if shouldSerializeProviderOperation(executionPlan) {
+				serialDone, serialErr := lease.BeginSerializedOperation(r.ctx, providerEntryOperationSpacing(executionPlan))
 				if serialErr != nil {
 					releaseProvisioningWindow(false)
 					if errors.Is(serialErr, errExecutionStopped) {
@@ -763,7 +1129,7 @@ func (r *executionRunner) executePlanActionWithProviderPool(plan models.Failover
 				finishOperation = serialDone
 			}
 
-			outcome, actionErr := r.executePlanAction(selectedPlan)
+			outcome, actionErr := r.executePlanAction(executionPlan)
 			if actionErr != nil {
 				releaseProvisioningWindow(false)
 				if errors.Is(actionErr, errExecutionStopped) {
@@ -792,8 +1158,8 @@ func (r *executionRunner) executePlanActionWithProviderPool(plan models.Failover
 					postProvisionFailureErr = actionErr
 					goto nextCandidate
 				}
-				decision := classifyProviderFailure(plan.Provider, actionErr)
-				applyProviderEntryFailure(r.task.UserID, plan.Provider, candidate.EntryID, decision, actionErr)
+				decision := classifyProviderFailure(executionPlan.Provider, actionErr)
+				applyProviderEntryFailure(r.task.UserID, executionPlan.Provider, candidate.EntryID, decision, actionErr)
 				attemptDetail["status"] = "failed"
 				attemptDetail["error"] = actionErr.Error()
 				attemptDetail["failure_class"] = decision.Class
@@ -813,7 +1179,7 @@ func (r *executionRunner) executePlanActionWithProviderPool(plan models.Failover
 				goto nextCandidate
 			}
 			if isProvisionPlan {
-				if cleanupErr := r.attachCurrentOutletCleanup(outcome, selectedPlan, candidate); cleanupErr != nil {
+				if cleanupErr := r.attachCurrentOutletCleanup(outcome, executionPlan, candidate); cleanupErr != nil {
 					releaseProvisioningWindow(false)
 					if errors.Is(cleanupErr, errExecutionStopped) {
 						attemptDetail["status"] = "failed"
@@ -834,7 +1200,7 @@ func (r *executionRunner) executePlanActionWithProviderPool(plan models.Failover
 				releaseProvisioningWindow(true)
 			}
 
-			finalizeErr := r.finalizePlan(selectedPlan, outcome)
+			finalizeErr := r.finalizePlan(executionPlan, outcome)
 			if finalizeErr != nil {
 				if errors.Is(finalizeErr, errExecutionStopped) {
 					releaseProvisioningWindow(false)
@@ -880,7 +1246,7 @@ func (r *executionRunner) executePlanActionWithProviderPool(plan models.Failover
 				postProvisionFailureSeen = true
 				postProvisionFailureErr = finalizeErr
 				if executionDecision.Cooldown > 0 {
-					applyProviderEntryFailure(r.task.UserID, plan.Provider, candidate.EntryID, providerFailureDecision{
+					applyProviderEntryFailure(r.task.UserID, executionPlan.Provider, candidate.EntryID, providerFailureDecision{
 						Class:    executionDecision.Class,
 						Cooldown: executionDecision.Cooldown,
 					}, finalizeErr)
@@ -1140,7 +1506,7 @@ func (r *executionRunner) executePlanAction(plan models.FailoverPlan) (*actionOu
 }
 
 func providerEntryMaxAttempts(task models.FailoverTask, plan models.FailoverPlan) int {
-	if strings.TrimSpace(plan.ActionType) == models.FailoverActionProvisionInstance {
+	if planMayProvision(plan) {
 		if task.ProvisionRetryLimit > 0 {
 			return task.ProvisionRetryLimit
 		}
@@ -1150,7 +1516,7 @@ func providerEntryMaxAttempts(task models.FailoverTask, plan models.FailoverPlan
 }
 
 func provisionPlanFailureFallbackLimit(task models.FailoverTask, plan models.FailoverPlan) int {
-	if strings.TrimSpace(plan.ActionType) == models.FailoverActionProvisionInstance {
+	if planMayProvision(plan) {
 		if task.ProvisionFailureFallbackLimit > 0 {
 			return task.ProvisionFailureFallbackLimit
 		}
@@ -1227,7 +1593,7 @@ func (r *executionRunner) finalizePlan(plan models.FailoverPlan, outcome *action
 	}
 
 	scriptClipboardIDs := plan.EffectiveScriptClipboardIDs()
-	if len(scriptClipboardIDs) > 0 {
+	if strings.TrimSpace(plan.ActionType) == models.FailoverActionProvisionInstance && len(scriptClipboardIDs) > 0 {
 		if targetClientUUID == "" {
 			return errors.New("script execution requires a target client but none became available")
 		}
@@ -2342,9 +2708,13 @@ func sameAddress(target string, values ...string) bool {
 	return false
 }
 
+func samePublicIPv4Address(target, publicIPv4 string) bool {
+	return sameAddress(target, strings.TrimSpace(publicIPv4))
+}
+
 func effectiveTaskDeleteStrategy(task models.FailoverTask) string {
 	for _, plan := range task.Plans {
-		if plan.Enabled && strings.TrimSpace(plan.ActionType) == models.FailoverActionProvisionInstance {
+		if plan.Enabled && planMayProvision(plan) {
 			if strings.TrimSpace(task.DeleteStrategy) == models.FailoverDeleteStrategyDeleteAfterSuccessDelay {
 				return models.FailoverDeleteStrategyDeleteAfterSuccessDelay
 			}
@@ -2673,7 +3043,7 @@ func (r *executionRunner) resolveCurrentInstanceCleanupByAddress(ctx context.Con
 				return nil, normalizeExecutionStopError(err)
 			}
 			for _, instance := range instances {
-				if !sameAddress(address, append([]string{strings.TrimSpace(instance.PublicIP), strings.TrimSpace(instance.PrivateIP)}, instance.IPv6Addresses...)...) {
+				if !samePublicIPv4Address(address, instance.PublicIP) {
 					continue
 				}
 				ref := map[string]interface{}{
@@ -2704,7 +3074,7 @@ func (r *executionRunner) resolveCurrentInstanceCleanupByAddress(ctx context.Con
 			return nil, normalizeExecutionStopError(err)
 		}
 		for _, instance := range instances {
-			if !sameAddress(address, append([]string{instance.PublicIP, instance.PrivateIP}, instance.IPv6Addresses...)...) {
+			if !samePublicIPv4Address(address, instance.PublicIP) {
 				continue
 			}
 			ref := map[string]interface{}{
@@ -3010,7 +3380,7 @@ func resolveCurrentInstanceCleanupByRefAddress(ctx context.Context, userUUID str
 				return providerEntryQueryCurrentInstanceCleanup(ref, "aws", entryID, label, err), nil
 			}
 			for _, instance := range instances {
-				if !sameAddress(address, append([]string{strings.TrimSpace(instance.PublicIP), strings.TrimSpace(instance.PrivateIP)}, instance.IPv6Addresses...)...) {
+				if !samePublicIPv4Address(address, instance.PublicIP) {
 					continue
 				}
 				resolvedRef := resolvedCurrentInstanceRef(ref, "aws", entryID)
@@ -3041,7 +3411,7 @@ func resolveCurrentInstanceCleanupByRefAddress(ctx context.Context, userUUID str
 			return providerEntryQueryCurrentInstanceCleanup(ref, "aws", entryID, label, err), nil
 		}
 		for _, instance := range instances {
-			if !sameAddress(address, append([]string{instance.PublicIP, instance.PrivateIP}, instance.IPv6Addresses...)...) {
+			if !samePublicIPv4Address(address, instance.PublicIP) {
 				continue
 			}
 			resolvedRef := resolvedCurrentInstanceRef(ref, "aws", entryID)
@@ -4240,33 +4610,25 @@ func rebindAWSIPAddress(ctx context.Context, task models.FailoverTask, plan mode
 	if err := json.Unmarshal([]byte(plan.Payload), &payload); err != nil {
 		return nil, fmt.Errorf("invalid aws rebind payload: %w", err)
 	}
+	payload, hasTarget := resolveAWSRebindPayload(task, payload, plan.ProviderEntryID)
+	if !hasTarget {
+		if normalizeAWSFailoverService(payload.Service) == "lightsail" {
+			return nil, errors.New("aws lightsail rebind requires instance_name or a tracked current instance")
+		}
+		return nil, errors.New("aws ec2 rebind requires instance_id or a tracked current instance")
+	}
 
 	addition, credential, err := loadAWSCredential(task.UserID, plan.ProviderEntryID)
 	if err != nil {
 		return nil, err
 	}
-	region := strings.TrimSpace(payload.Region)
-	if region == "" {
-		region = strings.TrimSpace(addition.ActiveRegion)
-	}
-	if region == "" {
-		region = strings.TrimSpace(credential.DefaultRegion)
-	}
-	if region == "" {
-		region = awscloud.DefaultRegion
-	}
+	region := resolveAWSFailoverRegion(payload.Region, addition, credential)
 
-	service := strings.ToLower(strings.TrimSpace(payload.Service))
-	if service == "" {
-		service = "ec2"
-	}
+	service := normalizeAWSFailoverService(payload.Service)
 
 	switch service {
 	case "ec2":
 		instanceID := strings.TrimSpace(payload.InstanceID)
-		if instanceID == "" {
-			return nil, errors.New("aws ec2 rebind requires instance_id")
-		}
 		detail, err := awscloud.GetInstanceDetail(contextOrBackground(ctx), credential, region, instanceID)
 		if err != nil {
 			return nil, normalizeExecutionStopError(err)
@@ -4299,9 +4661,6 @@ func rebindAWSIPAddress(ctx context.Context, task models.FailoverTask, plan mode
 		}, nil
 	case "lightsail":
 		instanceName := strings.TrimSpace(payload.InstanceName)
-		if instanceName == "" {
-			return nil, errors.New("aws lightsail rebind requires instance_name")
-		}
 		staticIPName := strings.TrimSpace(payload.StaticIPName)
 		if staticIPName == "" {
 			staticIPName = fmt.Sprintf("%s-ip-%d", instanceName, time.Now().Unix())

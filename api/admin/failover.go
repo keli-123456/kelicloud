@@ -131,7 +131,13 @@ type failoverProbeView struct {
 }
 
 func planRequiresOldInstanceCleanup(plan models.FailoverPlan) bool {
-	return plan.Enabled && strings.TrimSpace(plan.ActionType) == models.FailoverActionProvisionInstance
+	if !plan.Enabled {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(plan.Provider), "aws") {
+		return true
+	}
+	return strings.TrimSpace(plan.ActionType) == models.FailoverActionProvisionInstance
 }
 
 func normalizeFailoverDeleteStrategy(deleteStrategy string, plans []models.FailoverPlan) string {

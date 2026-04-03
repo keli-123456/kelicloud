@@ -159,7 +159,7 @@ func previewPlan(ctx context.Context, userUUID string, plan models.FailoverPlan,
 		},
 	))
 
-	if strings.TrimSpace(plan.ActionType) == models.FailoverActionProvisionInstance {
+	if planMayProvision(plan) {
 		preview.Checks = append(preview.Checks, previewCapacityCheck(ctx, userUUID, plan, selectedCandidate))
 	}
 
@@ -360,10 +360,8 @@ func buildPreviewPlanCatalogCheck(userUUID string, plan models.FailoverPlan, can
 			if err := json.Unmarshal([]byte(plan.Payload), &payload); err != nil {
 				return nil, nil, detail, "", "", fmt.Errorf("invalid aws rebind payload: %w", err)
 			}
-			service := strings.ToLower(strings.TrimSpace(payload.Service))
-			if service == "" {
-				service = "ec2"
-			}
+			payload = normalizeAWSRebindPayload(payload)
+			service := normalizeAWSFailoverService(payload.Service)
 			region := strings.TrimSpace(payload.Region)
 			if region == "" {
 				issues = append(issues, "region is required")
@@ -377,20 +375,54 @@ func buildPreviewPlanCatalogCheck(userUUID string, plan models.FailoverPlan, can
 			verifyPreviewCatalogOption(&issues, &warnings, "region", region, catalog.Regions)
 			if service == "lightsail" {
 				instanceName := strings.TrimSpace(payload.InstanceName)
+				availabilityZone := strings.TrimSpace(payload.AvailabilityZone)
+				blueprintID := strings.TrimSpace(payload.BlueprintID)
+				bundleID := strings.TrimSpace(payload.BundleID)
 				detail["instance_name"] = instanceName
+				detail["availability_zone"] = availabilityZone
+				detail["blueprint_id"] = blueprintID
+				detail["bundle_id"] = bundleID
 				if instanceName == "" {
-					issues = append(issues, "instance_name is required")
+					warnings = append(warnings, "instance_name is empty, so this plan will use the task's tracked current instance when available")
 				} else {
 					verifyPreviewCatalogOption(&issues, &warnings, "instance_name", instanceName, catalog.Instances)
+				}
+				if availabilityZone == "" {
+					issues = append(issues, "availability_zone is required")
+				}
+				if blueprintID == "" {
+					issues = append(issues, "blueprint_id is required")
+				}
+				if bundleID == "" {
+					issues = append(issues, "bundle_id is required")
+				}
+				if len(issues) == 0 {
+					verifyPreviewCatalogOption(&issues, &warnings, "availability_zone", availabilityZone, catalog.AvailabilityZones)
+					verifyPreviewCatalogOption(&issues, &warnings, "blueprint_id", blueprintID, catalog.Blueprints)
+					verifyPreviewCatalogOption(&issues, &warnings, "bundle_id", bundleID, catalog.Bundles)
 				}
 				return issues, warnings, detail, service, region, nil
 			}
 			instanceID := strings.TrimSpace(payload.InstanceID)
+			imageID := strings.TrimSpace(payload.ImageID)
+			instanceType := strings.TrimSpace(payload.InstanceType)
 			detail["instance_id"] = instanceID
+			detail["image_id"] = imageID
+			detail["instance_type"] = instanceType
 			if instanceID == "" {
-				issues = append(issues, "instance_id is required")
+				warnings = append(warnings, "instance_id is empty, so this plan will use the task's tracked current instance when available")
 			} else {
 				verifyPreviewCatalogOption(&issues, &warnings, "instance_id", instanceID, catalog.Instances)
+			}
+			if imageID == "" {
+				issues = append(issues, "image_id is required")
+			}
+			if instanceType == "" {
+				issues = append(issues, "instance_type is required")
+			}
+			if len(issues) == 0 {
+				verifyPreviewCatalogOption(&issues, &warnings, "image_id", imageID, catalog.Images)
+				verifyPreviewCatalogOption(&issues, &warnings, "instance_type", instanceType, catalog.InstanceTypes)
 			}
 			return issues, warnings, detail, service, region, nil
 		}
@@ -462,7 +494,7 @@ func buildPreviewPlanCatalogCheck(userUUID string, plan models.FailoverPlan, can
 }
 
 func previewAutoConnectCheck(ctx context.Context, userUUID string, plan models.FailoverPlan, candidate providerPoolCandidate) PreviewCheck {
-	if strings.TrimSpace(plan.ActionType) != models.FailoverActionProvisionInstance {
+	if !planMayProvision(plan) {
 		return newPreviewCheck(
 			"auto_connect",
 			previewStatusInfo,
@@ -569,17 +601,11 @@ func previewAutoConnectCheck(ctx context.Context, userUUID string, plan models.F
 func previewAutoConnectInputs(plan models.FailoverPlan) (string, bool, string, string, error) {
 	switch strings.TrimSpace(plan.Provider) {
 	case "aws":
-		if strings.TrimSpace(plan.ActionType) != models.FailoverActionProvisionInstance {
-			return "", true, "", "", nil
+		payload, err := parseAWSExecutionPayload(plan)
+		if err != nil {
+			return "", true, "", "", err
 		}
-		var payload awsProvisionPayload
-		if err := json.Unmarshal([]byte(plan.Payload), &payload); err != nil {
-			return "", true, "", "", fmt.Errorf("invalid aws provision payload: %w", err)
-		}
-		service := strings.ToLower(strings.TrimSpace(payload.Service))
-		if service == "" {
-			service = "ec2"
-		}
+		service := normalizeAWSFailoverService(payload.Service)
 		if service == "lightsail" {
 			return strings.TrimSpace(payload.UserData), true, strings.TrimSpace(payload.Region), "", nil
 		}
