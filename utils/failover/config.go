@@ -507,6 +507,35 @@ func buildAutoConnectUserData(opts autoConnectOptions) (string, string, error) {
 	return merged, group, nil
 }
 
+func buildAWSIPv6RefreshUserData(userData string) (string, error) {
+	return mergeShellUserData(userData, buildAWSIPv6RefreshSnippet(), true, "AWS IPv6 refresh")
+}
+
+func buildAWSIPv6RefreshSnippet() string {
+	var builder strings.Builder
+	builder.WriteString("# Komari AWS IPv6 refresh\n")
+	builder.WriteString("KOMARI_IPV6_IFACE=\"$(ip -o route show to default 2>/dev/null | awk '{print $5; exit}')\"\n")
+	builder.WriteString("if [ -z \"$KOMARI_IPV6_IFACE\" ]; then\n")
+	builder.WriteString("  KOMARI_IPV6_IFACE=\"$(ip -o link show 2>/dev/null | awk -F': ' '$2 != \"lo\" {print $2; exit}')\"\n")
+	builder.WriteString("fi\n")
+	builder.WriteString("if [ -n \"$KOMARI_IPV6_IFACE\" ]; then\n")
+	builder.WriteString("  for _komari_ipv6_attempt in 1 2 3 4 5; do\n")
+	builder.WriteString("    if ip -6 addr show dev \"$KOMARI_IPV6_IFACE\" scope global 2>/dev/null | grep -q 'inet6 '; then\n")
+	builder.WriteString("      break\n")
+	builder.WriteString("    fi\n")
+	builder.WriteString("    networkctl reconfigure \"$KOMARI_IPV6_IFACE\" >/dev/null 2>&1 || true\n")
+	builder.WriteString("    if command -v dhclient >/dev/null 2>&1; then\n")
+	builder.WriteString("      dhclient -6 -v \"$KOMARI_IPV6_IFACE\" >/dev/null 2>&1 || true\n")
+	builder.WriteString("    fi\n")
+	builder.WriteString("    netplan apply >/dev/null 2>&1 || true\n")
+	builder.WriteString("    systemctl restart systemd-networkd >/dev/null 2>&1 || true\n")
+	builder.WriteString("    systemctl restart NetworkManager >/dev/null 2>&1 || true\n")
+	builder.WriteString("    sleep 5\n")
+	builder.WriteString("  done\n")
+	builder.WriteString("fi\n")
+	return builder.String()
+}
+
 func resolveAutoConnectOriginForUser(userUUID string) (string, error) {
 	scriptDomain, err := config.GetAsForUser[string](userUUID, config.ScriptDomainKey, "")
 	if err != nil {
@@ -693,23 +722,31 @@ func buildInstallSnippet(installScriptURL, endpoint, scopedAutoDiscoveryKey stri
 }
 
 func mergeAutoConnectUserData(userData, installSnippet string, wrapInShellScript bool) (string, error) {
+	return mergeShellUserData(userData, installSnippet, wrapInShellScript, "auto connect")
+}
+
+func mergeShellUserData(userData, snippet string, wrapInShellScript bool, purpose string) (string, error) {
 	userData = strings.TrimSpace(userData)
 	if strings.HasPrefix(userData, "#cloud-config") {
-		return "", errors.New("auto connect cannot be combined with #cloud-config user_data; use shell commands instead")
+		purpose = strings.TrimSpace(purpose)
+		if purpose == "" {
+			purpose = "this feature"
+		}
+		return "", fmt.Errorf("%s cannot be combined with #cloud-config user_data; use shell commands instead", purpose)
 	}
-	installSnippet = strings.TrimSpace(installSnippet)
-	if installSnippet == "" {
+	snippet = strings.TrimSpace(snippet)
+	if snippet == "" {
 		return userData, nil
 	}
 
 	if userData == "" {
 		if !wrapInShellScript {
-			return installSnippet + "\n", nil
+			return snippet + "\n", nil
 		}
 		var builder strings.Builder
 		builder.WriteString("#!/bin/bash\n")
 		builder.WriteString("set -eu\n\n")
-		builder.WriteString(installSnippet)
+		builder.WriteString(snippet)
 		builder.WriteString("\n")
 		return builder.String(), nil
 	}
@@ -720,8 +757,8 @@ func mergeAutoConnectUserData(userData, installSnippet string, wrapInShellScript
 		builder.WriteString("\n")
 	}
 	builder.WriteString("\n")
-	builder.WriteString(installSnippet)
-	if !strings.HasSuffix(installSnippet, "\n") {
+	builder.WriteString(snippet)
+	if !strings.HasSuffix(snippet, "\n") {
 		builder.WriteString("\n")
 	}
 	return builder.String(), nil

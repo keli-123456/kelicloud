@@ -3516,6 +3516,84 @@ func runAWSProvisionFollowUp(ctx context.Context, action func(context.Context) e
 	return lastErr
 }
 
+func firstUsablePublicIPv6(values []string) string {
+	for _, value := range values {
+		normalized := normalizeIPAddress(value)
+		if normalized == "" {
+			continue
+		}
+		ip := net.ParseIP(normalized)
+		if ip == nil || ip.To16() == nil || ip.To4() != nil {
+			continue
+		}
+		if !ip.IsGlobalUnicast() || ip.IsLinkLocalUnicast() || ip.IsLoopback() || ip.IsMulticast() || ip.IsUnspecified() || ip.IsPrivate() {
+			continue
+		}
+		return normalized
+	}
+	return ""
+}
+
+func buildAWSProvisionCleanupError(ctx context.Context, service, resourceID, cleanupLabel string, cleanup func(context.Context) error, cause error) error {
+	if cause == nil {
+		return nil
+	}
+	if cleanup == nil {
+		return cause
+	}
+
+	cleanupErr := cleanup(contextOrBackground(ctx))
+	if cleanupErr != nil {
+		return &provisionCleanupError{
+			Provider:     "aws",
+			ResourceType: strings.TrimSpace(service) + " instance",
+			ResourceID:   strings.TrimSpace(resourceID),
+			CleanupLabel: strings.TrimSpace(cleanupLabel),
+			CleanupError: normalizeExecutionStopError(cleanupErr),
+			Cause:        cause,
+		}
+	}
+	return &provisionCleanupError{
+		Provider:     "aws",
+		ResourceType: strings.TrimSpace(service) + " instance",
+		ResourceID:   strings.TrimSpace(resourceID),
+		CleanupLabel: strings.TrimSpace(cleanupLabel),
+		Cause:        cause,
+	}
+}
+
+func requireUsableAWSIPv6(ctx context.Context, service, resourceID, cleanupLabel string, cleanup func(context.Context) error, addresses []string) (string, error) {
+	if ipv6 := firstUsablePublicIPv6(addresses); ipv6 != "" {
+		return ipv6, nil
+	}
+
+	normalized := make([]string, 0, len(addresses))
+	for _, value := range addresses {
+		if trimmed := normalizeIPAddress(value); trimmed != "" {
+			normalized = append(normalized, trimmed)
+		}
+	}
+
+	message := fmt.Sprintf(
+		"AWS %s provisioning requested IPv6, but the new instance never reported a usable global IPv6 address",
+		strings.TrimSpace(service),
+	)
+	if len(normalized) > 0 {
+		message += " (reported: " + strings.Join(normalized, ", ") + ")"
+	}
+	message += ". Check that the subnet and its route table are fully IPv6-enabled, and that the guest OS refreshed its network configuration."
+	return "", buildAWSProvisionCleanupError(ctx, service, resourceID, cleanupLabel, cleanup, errors.New(message))
+}
+
+func lightsailProvisionWantsIPv6(ipAddressType string) bool {
+	switch strings.ToLower(strings.TrimSpace(ipAddressType)) {
+	case "dualstack", "ipv6":
+		return true
+	default:
+		return false
+	}
+}
+
 func normalizeExecutionStopError(err error) error {
 	if err == nil {
 		return nil
@@ -3592,6 +3670,12 @@ func provisionAWSInstance(ctx context.Context, userUUID string, plan models.Fail
 			name = "failover-ec2-" + strconv.FormatInt(time.Now().Unix(), 10)
 		}
 		userData := strings.TrimSpace(payload.UserData)
+		if payload.AssignIPv6 {
+			userData, err = buildAWSIPv6RefreshUserData(userData)
+			if err != nil {
+				return nil, err
+			}
+		}
 		autoConnectGroup := ""
 		if plan.AutoConnectGroup != "" || planHasScripts(plan) {
 			userData, autoConnectGroup, err = buildAutoConnectUserData(autoConnectOptions{
@@ -3622,21 +3706,43 @@ func provisionAWSInstance(ctx context.Context, userUUID string, plan models.Fail
 		if err != nil {
 			return nil, err
 		}
+		cleanupInstanceID := strings.TrimSpace(createResult.Instance.InstanceID)
+		cleanupLabel := "terminate failed aws ec2 instance " + cleanupInstanceID
+		cleanupProvisionedInstance := func(runCtx context.Context) error {
+			if cleanupInstanceID == "" {
+				return nil
+			}
+			return normalizeExecutionStopError(awscloud.TerminateInstance(contextOrBackground(runCtx), credential, region, cleanupInstanceID))
+		}
+		if payload.AssignIPv6 && !createResult.AssignIPv6 {
+			warnings := strings.Join(trimStrings(createResult.Warnings), "; ")
+			if warnings == "" {
+				warnings = "Komari could not enable IPv6 automatically on the selected AWS network."
+			}
+			return nil, buildAWSProvisionCleanupError(
+				ctx,
+				"ec2",
+				cleanupInstanceID,
+				cleanupLabel,
+				cleanupProvisionedInstance,
+				errors.New(warnings),
+			)
+		}
 		instance := createResult.Instance
 		instance, detail, err := waitForAWSEC2Instance(ctx, region, credential, strings.TrimSpace(instance.InstanceID))
 		if err != nil {
-			return nil, err
+			return nil, buildAWSProvisionCleanupError(ctx, "ec2", cleanupInstanceID, cleanupLabel, cleanupProvisionedInstance, err)
 		}
 		if payload.AssignIPv6 {
 			if err := runAWSProvisionFollowUp(ctx, func(runCtx context.Context) error {
 				_, followUpErr := awscloud.EnsureInstanceIPv6Address(runCtx, credential, region, strings.TrimSpace(instance.InstanceID))
 				return followUpErr
 			}); err != nil {
-				return nil, normalizeExecutionStopError(err)
+				return nil, buildAWSProvisionCleanupError(ctx, "ec2", cleanupInstanceID, cleanupLabel, cleanupProvisionedInstance, normalizeExecutionStopError(err))
 			}
 			instance, detail, err = waitForAWSEC2Instance(ctx, region, credential, strings.TrimSpace(instance.InstanceID))
 			if err != nil {
-				return nil, err
+				return nil, buildAWSProvisionCleanupError(ctx, "ec2", cleanupInstanceID, cleanupLabel, cleanupProvisionedInstance, err)
 			}
 		}
 		if payload.AllowAllTraffic {
@@ -3644,10 +3750,17 @@ func provisionAWSInstance(ctx context.Context, userUUID string, plan models.Fail
 				_, followUpErr := awscloud.AllowAllSecurityGroupTraffic(runCtx, credential, region, strings.TrimSpace(instance.InstanceID))
 				return followUpErr
 			}); err != nil {
-				return nil, normalizeExecutionStopError(err)
+				return nil, buildAWSProvisionCleanupError(ctx, "ec2", cleanupInstanceID, cleanupLabel, cleanupProvisionedInstance, normalizeExecutionStopError(err))
 			}
 			if refreshedDetail, detailErr := awscloud.GetInstanceDetail(contextOrBackground(ctx), credential, region, strings.TrimSpace(instance.InstanceID)); detailErr == nil {
 				detail = refreshedDetail
+			}
+		}
+		provisionedIPv6 := firstUsablePublicIPv6(instance.IPv6Addresses)
+		if payload.AssignIPv6 {
+			provisionedIPv6, err = requireUsableAWSIPv6(ctx, "ec2", cleanupInstanceID, cleanupLabel, cleanupProvisionedInstance, instance.IPv6Addresses)
+			if err != nil {
+				return nil, err
 			}
 		}
 		detailAddresses := make([]awscloud.Address, 0)
@@ -3656,7 +3769,7 @@ func provisionAWSInstance(ctx context.Context, userUUID string, plan models.Fail
 		}
 		outcome := &actionOutcome{
 			IPv4:             strings.TrimSpace(instance.PublicIP),
-			IPv6:             firstString(instance.IPv6Addresses),
+			IPv6:             provisionedIPv6,
 			TargetClientUUID: "",
 			AutoConnectGroup: autoConnectGroup,
 			NewInstanceRef: map[string]interface{}{
@@ -3674,7 +3787,7 @@ func provisionAWSInstance(ctx context.Context, userUUID string, plan models.Fail
 				"ipv6_addresses": instance.IPv6Addresses,
 				"addresses":      detailAddresses,
 			},
-			RollbackLabel: "terminate failed aws ec2 instance " + strings.TrimSpace(instance.InstanceID),
+			RollbackLabel: cleanupLabel,
 			Rollback: func(ctx context.Context) error {
 				return normalizeExecutionStopError(awscloud.TerminateInstance(contextOrBackground(ctx), credential, region, strings.TrimSpace(instance.InstanceID)))
 			},
@@ -3700,6 +3813,12 @@ func provisionAWSInstance(ctx context.Context, userUUID string, plan models.Fail
 			name = "failover-ls-" + strconv.FormatInt(time.Now().Unix(), 10)
 		}
 		userData := strings.TrimSpace(payload.UserData)
+		if lightsailProvisionWantsIPv6(payload.IPAddressType) {
+			userData, err = buildAWSIPv6RefreshUserData(userData)
+			if err != nil {
+				return nil, err
+			}
+		}
 		autoConnectGroup := ""
 		if plan.AutoConnectGroup != "" || planHasScripts(plan) {
 			userData, autoConnectGroup, err = buildAutoConnectUserData(autoConnectOptions{
@@ -3727,24 +3846,35 @@ func provisionAWSInstance(ctx context.Context, userUUID string, plan models.Fail
 		}); err != nil {
 			return nil, err
 		}
+		cleanupLabel := "delete failed aws lightsail instance " + name
+		cleanupProvisionedInstance := func(runCtx context.Context) error {
+			return normalizeExecutionStopError(awscloud.DeleteLightsailInstance(contextOrBackground(runCtx), credential, region, name))
+		}
 		detail, err := waitForLightsailInstance(ctx, region, credential, name)
 		if err != nil {
-			return nil, err
+			return nil, buildAWSProvisionCleanupError(ctx, "lightsail", name, cleanupLabel, cleanupProvisionedInstance, err)
 		}
 		if payload.AllowAllTraffic {
 			if err := runAWSProvisionFollowUp(ctx, func(runCtx context.Context) error {
 				return awscloud.OpenLightsailAllPublicPorts(runCtx, credential, region, name)
 			}); err != nil {
-				return nil, normalizeExecutionStopError(err)
+				return nil, buildAWSProvisionCleanupError(ctx, "lightsail", name, cleanupLabel, cleanupProvisionedInstance, normalizeExecutionStopError(err))
 			}
 			detail, err = waitForLightsailInstance(ctx, region, credential, name)
+			if err != nil {
+				return nil, buildAWSProvisionCleanupError(ctx, "lightsail", name, cleanupLabel, cleanupProvisionedInstance, err)
+			}
+		}
+		provisionedIPv6 := firstUsablePublicIPv6(detail.Instance.IPv6Addresses)
+		if lightsailProvisionWantsIPv6(payload.IPAddressType) {
+			provisionedIPv6, err = requireUsableAWSIPv6(ctx, "lightsail", name, cleanupLabel, cleanupProvisionedInstance, detail.Instance.IPv6Addresses)
 			if err != nil {
 				return nil, err
 			}
 		}
 		outcome := &actionOutcome{
 			IPv4:             strings.TrimSpace(detail.Instance.PublicIP),
-			IPv6:             firstString(detail.Instance.IPv6Addresses),
+			IPv6:             provisionedIPv6,
 			AutoConnectGroup: autoConnectGroup,
 			NewInstanceRef: map[string]interface{}{
 				"provider":            "aws",
@@ -3759,7 +3889,7 @@ func provisionAWSInstance(ctx context.Context, userUUID string, plan models.Fail
 				"private_ip":     detail.Instance.PrivateIP,
 				"ipv6_addresses": detail.Instance.IPv6Addresses,
 			},
-			RollbackLabel: "delete failed aws lightsail instance " + name,
+			RollbackLabel: cleanupLabel,
 			Rollback: func(ctx context.Context) error {
 				return normalizeExecutionStopError(awscloud.DeleteLightsailInstance(contextOrBackground(ctx), credential, region, name))
 			},

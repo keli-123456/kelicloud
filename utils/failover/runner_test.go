@@ -224,6 +224,29 @@ func TestNormalizeIPAddressAcceptsCIDRNotation(t *testing.T) {
 	}
 }
 
+func TestFirstUsablePublicIPv6SkipsLinkLocalAndPrivateRanges(t *testing.T) {
+	got := firstUsablePublicIPv6([]string{
+		"fe80::82:26ff:fe5e:159/64",
+		"fd00::1234",
+		"2600:1f18:abcd:1200::10/128",
+	})
+	if got != "2600:1f18:abcd:1200::10" {
+		t.Fatalf("expected public IPv6 to be selected, got %q", got)
+	}
+}
+
+func TestFirstUsablePublicIPv6ReturnsEmptyWhenNoUsableAddressExists(t *testing.T) {
+	got := firstUsablePublicIPv6([]string{
+		"",
+		"fe80::82:26ff:fe5e:159/64",
+		"::1",
+		"fd00::1234",
+	})
+	if got != "" {
+		t.Fatalf("expected no usable public IPv6, got %q", got)
+	}
+}
+
 func TestSameAddressMatchesCIDRAndPlainIP(t *testing.T) {
 	if !sameAddress("2001:db8::10", "2001:db8::10/64") {
 		t.Fatal("expected plain ipv6 and cidr ipv6 to match")
