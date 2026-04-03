@@ -2,6 +2,7 @@ package aws
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/big"
 	"net/netip"
@@ -12,6 +13,7 @@ import (
 	awssdk "github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
+	"github.com/aws/smithy-go"
 )
 
 const (
@@ -70,6 +72,13 @@ func prepareCreateInstanceNetwork(ctx context.Context, client *ec2.Client, wantI
 			))
 		} else {
 			plan.SubnetID = strings.TrimSpace(awssdk.ToString(subnet.SubnetId))
+			if routeErr := ensureSubnetPublicIPv6Route(ctx, client, vpcID, plan.SubnetID); routeErr != nil {
+				plan.AssignIPv6 = false
+				plan.Warnings = append(plan.Warnings, fmt.Sprintf(
+					"Komari could not prepare an IPv6 internet route automatically on the default AWS subnet, so this instance was launched with IPv4 only: %v",
+					routeErr,
+				))
+			}
 		}
 	}
 
@@ -384,6 +393,230 @@ func ensureSubnetIPv6AutoAssignment(ctx context.Context, client *ec2.Client, sub
 	}
 
 	return describeSubnetByID(ctx, client, subnetID)
+}
+
+func ensureSubnetPublicIPv6Route(ctx context.Context, client *ec2.Client, vpcID, subnetID string) error {
+	routeTable, err := findRouteTableForSubnet(ctx, client, vpcID, subnetID)
+	if err != nil {
+		return err
+	}
+
+	internetGatewayID, err := getOrCreateInternetGateway(ctx, client, vpcID)
+	if err != nil {
+		return err
+	}
+
+	return ensureRouteTableIPv6InternetRoute(ctx, client, routeTable, internetGatewayID)
+}
+
+func findRouteTableForSubnet(ctx context.Context, client *ec2.Client, vpcID, subnetID string) (ec2types.RouteTable, error) {
+	routeTables, err := describeRouteTablesByVPC(ctx, client, vpcID)
+	if err != nil {
+		return ec2types.RouteTable{}, err
+	}
+
+	routeTable, ok := selectRouteTableForSubnet(routeTables, subnetID)
+	if !ok {
+		return ec2types.RouteTable{}, fmt.Errorf("no usable route table was found for subnet %s", subnetID)
+	}
+	return routeTable, nil
+}
+
+func describeRouteTablesByVPC(ctx context.Context, client *ec2.Client, vpcID string) ([]ec2types.RouteTable, error) {
+	paginator := ec2.NewDescribeRouteTablesPaginator(client, &ec2.DescribeRouteTablesInput{
+		Filters: []ec2types.Filter{
+			{
+				Name:   awssdk.String("vpc-id"),
+				Values: []string{strings.TrimSpace(vpcID)},
+			},
+		},
+		MaxResults: awssdk.Int32(100),
+	})
+
+	routeTables := make([]ec2types.RouteTable, 0)
+	for paginator.HasMorePages() {
+		page, err := paginator.NextPage(ctx)
+		if err != nil {
+			return nil, err
+		}
+		routeTables = append(routeTables, page.RouteTables...)
+	}
+	return routeTables, nil
+}
+
+func selectRouteTableForSubnet(routeTables []ec2types.RouteTable, subnetID string) (ec2types.RouteTable, bool) {
+	subnetID = strings.TrimSpace(subnetID)
+	if subnetID == "" {
+		return ec2types.RouteTable{}, false
+	}
+
+	var exactMatch *ec2types.RouteTable
+	var mainMatch *ec2types.RouteTable
+	for index := range routeTables {
+		routeTable := &routeTables[index]
+		for _, association := range routeTable.Associations {
+			if strings.TrimSpace(awssdk.ToString(association.SubnetId)) == subnetID {
+				if exactMatch == nil || strings.TrimSpace(awssdk.ToString(routeTable.RouteTableId)) < strings.TrimSpace(awssdk.ToString(exactMatch.RouteTableId)) {
+					exactMatch = routeTable
+				}
+			}
+			if awssdk.ToBool(association.Main) {
+				if mainMatch == nil || strings.TrimSpace(awssdk.ToString(routeTable.RouteTableId)) < strings.TrimSpace(awssdk.ToString(mainMatch.RouteTableId)) {
+					mainMatch = routeTable
+				}
+			}
+		}
+	}
+	if exactMatch != nil {
+		return *exactMatch, true
+	}
+	if mainMatch != nil {
+		return *mainMatch, true
+	}
+	if len(routeTables) == 0 {
+		return ec2types.RouteTable{}, false
+	}
+
+	sort.Slice(routeTables, func(i, j int) bool {
+		return strings.TrimSpace(awssdk.ToString(routeTables[i].RouteTableId)) < strings.TrimSpace(awssdk.ToString(routeTables[j].RouteTableId))
+	})
+	return routeTables[0], true
+}
+
+func getOrCreateInternetGateway(ctx context.Context, client *ec2.Client, vpcID string) (string, error) {
+	if gatewayID, ok, err := findAttachedInternetGateway(ctx, client, vpcID); err != nil {
+		return "", err
+	} else if ok {
+		return gatewayID, nil
+	}
+
+	output, err := client.CreateInternetGateway(ctx, &ec2.CreateInternetGatewayInput{})
+	if err != nil {
+		return "", err
+	}
+	if output == nil || output.InternetGateway == nil {
+		return "", fmt.Errorf("aws create internet gateway returned no gateway")
+	}
+
+	gatewayID := strings.TrimSpace(awssdk.ToString(output.InternetGateway.InternetGatewayId))
+	if gatewayID == "" {
+		return "", fmt.Errorf("aws create internet gateway returned an empty gateway id")
+	}
+
+	if _, err := client.AttachInternetGateway(ctx, &ec2.AttachInternetGatewayInput{
+		InternetGatewayId: awssdk.String(gatewayID),
+		VpcId:             awssdk.String(strings.TrimSpace(vpcID)),
+	}); err != nil {
+		return "", err
+	}
+
+	return gatewayID, nil
+}
+
+func findAttachedInternetGateway(ctx context.Context, client *ec2.Client, vpcID string) (string, bool, error) {
+	output, err := client.DescribeInternetGateways(ctx, &ec2.DescribeInternetGatewaysInput{
+		Filters: []ec2types.Filter{
+			{
+				Name:   awssdk.String("attachment.vpc-id"),
+				Values: []string{strings.TrimSpace(vpcID)},
+			},
+		},
+	})
+	if err != nil {
+		return "", false, err
+	}
+
+	gatewayIDs := make([]string, 0, len(output.InternetGateways))
+	for _, gateway := range output.InternetGateways {
+		gatewayID := strings.TrimSpace(awssdk.ToString(gateway.InternetGatewayId))
+		if gatewayID == "" {
+			continue
+		}
+		for _, attachment := range gateway.Attachments {
+			if strings.TrimSpace(awssdk.ToString(attachment.VpcId)) != strings.TrimSpace(vpcID) {
+				continue
+			}
+			state := strings.ToLower(strings.TrimSpace(string(attachment.State)))
+			if state != "" && state != "available" && state != "attached" {
+				continue
+			}
+			gatewayIDs = append(gatewayIDs, gatewayID)
+			break
+		}
+	}
+	if len(gatewayIDs) == 0 {
+		return "", false, nil
+	}
+	sort.Strings(gatewayIDs)
+	return gatewayIDs[0], true, nil
+}
+
+func ensureRouteTableIPv6InternetRoute(ctx context.Context, client *ec2.Client, routeTable ec2types.RouteTable, internetGatewayID string) error {
+	routeTableID := strings.TrimSpace(awssdk.ToString(routeTable.RouteTableId))
+	if routeTableID == "" {
+		return fmt.Errorf("route table id is empty")
+	}
+
+	if routeTableHasUsableIPv6InternetRoute(routeTable, internetGatewayID) {
+		return nil
+	}
+
+	if routeTableHasIPv6DefaultRoute(routeTable) {
+		_, err := client.ReplaceRoute(ctx, &ec2.ReplaceRouteInput{
+			RouteTableId:             awssdk.String(routeTableID),
+			DestinationIpv6CidrBlock: awssdk.String("::/0"),
+			GatewayId:                awssdk.String(strings.TrimSpace(internetGatewayID)),
+		})
+		return err
+	}
+
+	_, err := client.CreateRoute(ctx, &ec2.CreateRouteInput{
+		RouteTableId:             awssdk.String(routeTableID),
+		DestinationIpv6CidrBlock: awssdk.String("::/0"),
+		GatewayId:                awssdk.String(strings.TrimSpace(internetGatewayID)),
+	})
+	if isRouteAlreadyExistsError(err) {
+		_, err = client.ReplaceRoute(ctx, &ec2.ReplaceRouteInput{
+			RouteTableId:             awssdk.String(routeTableID),
+			DestinationIpv6CidrBlock: awssdk.String("::/0"),
+			GatewayId:                awssdk.String(strings.TrimSpace(internetGatewayID)),
+		})
+	}
+	return err
+}
+
+func routeTableHasUsableIPv6InternetRoute(routeTable ec2types.RouteTable, internetGatewayID string) bool {
+	internetGatewayID = strings.TrimSpace(internetGatewayID)
+	for _, route := range routeTable.Routes {
+		if strings.TrimSpace(awssdk.ToString(route.DestinationIpv6CidrBlock)) != "::/0" {
+			continue
+		}
+		if route.State != "" && route.State == ec2types.RouteStateBlackhole {
+			continue
+		}
+		if strings.TrimSpace(awssdk.ToString(route.GatewayId)) == internetGatewayID {
+			return true
+		}
+	}
+	return false
+}
+
+func routeTableHasIPv6DefaultRoute(routeTable ec2types.RouteTable) bool {
+	for _, route := range routeTable.Routes {
+		if strings.TrimSpace(awssdk.ToString(route.DestinationIpv6CidrBlock)) == "::/0" {
+			return true
+		}
+	}
+	return false
+}
+
+func isRouteAlreadyExistsError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	var apiErr smithy.APIError
+	return errors.As(err, &apiErr) && strings.TrimSpace(apiErr.ErrorCode()) == "RouteAlreadyExists"
 }
 
 func waitForVPCIPv6Association(ctx context.Context, client *ec2.Client, vpcID string) (string, error) {

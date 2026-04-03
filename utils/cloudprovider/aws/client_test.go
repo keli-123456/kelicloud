@@ -144,6 +144,57 @@ func TestSelectPreferredLaunchSubnetPrefersDefaultIPv6ReadySubnet(t *testing.T) 
 	require.Equal(t, "subnet-b", awssdk.ToString(subnet.SubnetId))
 }
 
+func TestSelectRouteTableForSubnetPrefersExplicitAssociation(t *testing.T) {
+	routeTable, ok := selectRouteTableForSubnet([]ec2types.RouteTable{
+		{
+			RouteTableId: stringPtr("rtb-main"),
+			Associations: []ec2types.RouteTableAssociation{
+				{Main: boolPtr(true)},
+			},
+		},
+		{
+			RouteTableId: stringPtr("rtb-subnet"),
+			Associations: []ec2types.RouteTableAssociation{
+				{SubnetId: stringPtr("subnet-123")},
+			},
+		},
+	}, "subnet-123")
+	require.True(t, ok)
+	require.Equal(t, "rtb-subnet", awssdk.ToString(routeTable.RouteTableId))
+}
+
+func TestRouteTableHasUsableIPv6InternetRoute(t *testing.T) {
+	require.True(t, routeTableHasUsableIPv6InternetRoute(ec2types.RouteTable{
+		Routes: []ec2types.Route{
+			{
+				DestinationIpv6CidrBlock: stringPtr("::/0"),
+				GatewayId:                stringPtr("igw-123"),
+				State:                    ec2types.RouteStateActive,
+			},
+		},
+	}, "igw-123"))
+
+	require.False(t, routeTableHasUsableIPv6InternetRoute(ec2types.RouteTable{
+		Routes: []ec2types.Route{
+			{
+				DestinationIpv6CidrBlock: stringPtr("::/0"),
+				GatewayId:                stringPtr("igw-999"),
+				State:                    ec2types.RouteStateActive,
+			},
+		},
+	}, "igw-123"))
+
+	require.False(t, routeTableHasUsableIPv6InternetRoute(ec2types.RouteTable{
+		Routes: []ec2types.Route{
+			{
+				DestinationIpv6CidrBlock: stringPtr("::/0"),
+				GatewayId:                stringPtr("igw-123"),
+				State:                    ec2types.RouteStateBlackhole,
+			},
+		},
+	}, "igw-123"))
+}
+
 func stringPtr(value string) *string {
 	return &value
 }
