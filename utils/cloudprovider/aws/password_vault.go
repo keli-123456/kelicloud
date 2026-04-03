@@ -17,8 +17,8 @@ import (
 const RootPasswordVaultKeyEnv = passwordvault.SecretKeyEnv
 
 var (
-	ErrRootPasswordVaultDisabled = errors.New("saved root password storage is unavailable; allow Komari to write ./data/cloud_secret.key or set KOMARI_CLOUD_SECRET_KEY")
-	ErrRootPasswordDecryptFailed = errors.New("saved root password could not be decrypted; verify KOMARI_CLOUD_SECRET_KEY or ./data/cloud_secret.key")
+	ErrRootPasswordVaultDisabled = errors.New("saved root password storage is unavailable; set KOMARI_CLOUD_SECRET_KEY, set KOMARI_CLOUD_SECRET_FILE, or allow Komari to write its cloud secret key file")
+	ErrRootPasswordDecryptFailed = errors.New("saved root password could not be decrypted; verify KOMARI_CLOUD_SECRET_KEY or the configured cloud secret key file")
 	ErrSavedRootPasswordNotFound = errors.New("saved root password was not found for this resource")
 )
 
