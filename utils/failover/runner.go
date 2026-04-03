@@ -262,6 +262,8 @@ type awsProvisionPayload struct {
 	SecurityGroupIDs    []string       `json:"security_group_ids,omitempty"`
 	UserData            string         `json:"user_data,omitempty"`
 	AssignPublicIP      bool           `json:"assign_public_ip"`
+	AssignIPv6          bool           `json:"assign_ipv6"`
+	AllowAllTraffic     bool           `json:"allow_all_traffic"`
 	Tags                []awscloud.Tag `json:"tags,omitempty"`
 	AvailabilityZone    string         `json:"availability_zone,omitempty"`
 	BlueprintID         string         `json:"blueprint_id,omitempty"`
@@ -3489,6 +3491,31 @@ func contextOrBackground(ctx context.Context) context.Context {
 	return context.Background()
 }
 
+func runAWSProvisionFollowUp(ctx context.Context, action func(context.Context) error) error {
+	const (
+		attempts = 5
+		delay    = 2 * time.Second
+	)
+
+	var lastErr error
+	for attempt := 0; attempt < attempts; attempt++ {
+		if err := waitContextOrDelay(ctx, 0); err != nil {
+			return err
+		}
+		if err := action(contextOrBackground(ctx)); err == nil {
+			return nil
+		} else {
+			lastErr = err
+		}
+		if attempt+1 < attempts {
+			if err := waitContextOrDelay(ctx, delay); err != nil {
+				return err
+			}
+		}
+	}
+	return lastErr
+}
+
 func normalizeExecutionStopError(err error) error {
 	if err == nil {
 		return nil
@@ -3589,6 +3616,7 @@ func provisionAWSInstance(ctx context.Context, userUUID string, plan models.Fail
 			SecurityGroupIDs: trimStrings(payload.SecurityGroupIDs),
 			UserData:         userData,
 			AssignPublicIP:   payload.AssignPublicIP,
+			AssignIPv6:       payload.AssignIPv6,
 			Tags:             payload.Tags,
 		})
 		if err != nil {
@@ -3598,6 +3626,33 @@ func provisionAWSInstance(ctx context.Context, userUUID string, plan models.Fail
 		instance, detail, err := waitForAWSEC2Instance(ctx, region, credential, strings.TrimSpace(instance.InstanceID))
 		if err != nil {
 			return nil, err
+		}
+		if payload.AssignIPv6 {
+			if err := runAWSProvisionFollowUp(ctx, func(runCtx context.Context) error {
+				_, followUpErr := awscloud.EnsureInstanceIPv6Address(runCtx, credential, region, strings.TrimSpace(instance.InstanceID))
+				return followUpErr
+			}); err != nil {
+				return nil, normalizeExecutionStopError(err)
+			}
+			instance, detail, err = waitForAWSEC2Instance(ctx, region, credential, strings.TrimSpace(instance.InstanceID))
+			if err != nil {
+				return nil, err
+			}
+		}
+		if payload.AllowAllTraffic {
+			if err := runAWSProvisionFollowUp(ctx, func(runCtx context.Context) error {
+				_, followUpErr := awscloud.AllowAllSecurityGroupTraffic(runCtx, credential, region, strings.TrimSpace(instance.InstanceID))
+				return followUpErr
+			}); err != nil {
+				return nil, normalizeExecutionStopError(err)
+			}
+			if refreshedDetail, detailErr := awscloud.GetInstanceDetail(contextOrBackground(ctx), credential, region, strings.TrimSpace(instance.InstanceID)); detailErr == nil {
+				detail = refreshedDetail
+			}
+		}
+		detailAddresses := make([]awscloud.Address, 0)
+		if detail != nil {
+			detailAddresses = detail.Addresses
 		}
 		outcome := &actionOutcome{
 			IPv4:             strings.TrimSpace(instance.PublicIP),
@@ -3617,7 +3672,7 @@ func provisionAWSInstance(ctx context.Context, userUUID string, plan models.Fail
 				"public_ip":      instance.PublicIP,
 				"private_ip":     instance.PrivateIP,
 				"ipv6_addresses": instance.IPv6Addresses,
-				"addresses":      detail.Addresses,
+				"addresses":      detailAddresses,
 			},
 			RollbackLabel: "terminate failed aws ec2 instance " + strings.TrimSpace(instance.InstanceID),
 			Rollback: func(ctx context.Context) error {
@@ -3675,6 +3730,17 @@ func provisionAWSInstance(ctx context.Context, userUUID string, plan models.Fail
 		detail, err := waitForLightsailInstance(ctx, region, credential, name)
 		if err != nil {
 			return nil, err
+		}
+		if payload.AllowAllTraffic {
+			if err := runAWSProvisionFollowUp(ctx, func(runCtx context.Context) error {
+				return awscloud.OpenLightsailAllPublicPorts(runCtx, credential, region, name)
+			}); err != nil {
+				return nil, normalizeExecutionStopError(err)
+			}
+			detail, err = waitForLightsailInstance(ctx, region, credential, name)
+			if err != nil {
+				return nil, err
+			}
 		}
 		outcome := &actionOutcome{
 			IPv4:             strings.TrimSpace(detail.Instance.PublicIP),
