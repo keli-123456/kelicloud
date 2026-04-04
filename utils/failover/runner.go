@@ -193,6 +193,10 @@ func isLinodeNotFoundError(err error) bool {
 	return errors.As(err, &apiErr) && apiErr != nil && apiErr.StatusCode == 404
 }
 
+func isAWSResourceNotFoundError(service string, err error) bool {
+	return isAWSRebindTargetMissingError(service, err)
+}
+
 func (e *blockedOutletError) Error() string {
 	if e == nil {
 		return "new outlet connectivity validation failed"
@@ -270,6 +274,8 @@ type awsProvisionPayload struct {
 	AssignIPv6          bool           `json:"assign_ipv6"`
 	AllowAllTraffic     bool           `json:"allow_all_traffic"`
 	Tags                []awscloud.Tag `json:"tags,omitempty"`
+	RootPasswordMode    string         `json:"root_password_mode,omitempty"`
+	RootPassword        string         `json:"root_password,omitempty"`
 	AvailabilityZone    string         `json:"availability_zone,omitempty"`
 	BlueprintID         string         `json:"blueprint_id,omitempty"`
 	BundleID            string         `json:"bundle_id,omitempty"`
@@ -328,6 +334,8 @@ type awsRebindPayload struct {
 	AssignIPv6       bool           `json:"assign_ipv6"`
 	AllowAllTraffic  bool           `json:"allow_all_traffic"`
 	Tags             []awscloud.Tag `json:"tags,omitempty"`
+	RootPasswordMode string         `json:"root_password_mode,omitempty"`
+	RootPassword     string         `json:"root_password,omitempty"`
 	AvailabilityZone string         `json:"availability_zone,omitempty"`
 	BlueprintID      string         `json:"blueprint_id,omitempty"`
 	BundleID         string         `json:"bundle_id,omitempty"`
@@ -358,6 +366,8 @@ func normalizeAWSRebindPayload(payload awsRebindPayload) awsRebindPayload {
 	payload.SubnetID = strings.TrimSpace(payload.SubnetID)
 	payload.SecurityGroupIDs = trimStrings(payload.SecurityGroupIDs)
 	payload.UserData = strings.TrimSpace(payload.UserData)
+	payload.RootPasswordMode = strings.TrimSpace(payload.RootPasswordMode)
+	payload.RootPassword = strings.TrimSpace(payload.RootPassword)
 	payload.AvailabilityZone = strings.TrimSpace(payload.AvailabilityZone)
 	payload.BlueprintID = strings.TrimSpace(payload.BlueprintID)
 	payload.BundleID = strings.TrimSpace(payload.BundleID)
@@ -446,6 +456,8 @@ func awsRebindProvisionPayload(payload awsRebindPayload) awsProvisionPayload {
 		AssignIPv6:       payload.AssignIPv6,
 		AllowAllTraffic:  payload.AllowAllTraffic,
 		Tags:             payload.Tags,
+		RootPasswordMode: payload.RootPasswordMode,
+		RootPassword:     payload.RootPassword,
 		AvailabilityZone: payload.AvailabilityZone,
 		BlueprintID:      payload.BlueprintID,
 		BundleID:         payload.BundleID,
@@ -590,6 +602,8 @@ func parseAWSExecutionPayload(plan models.FailoverPlan) (awsRebindPayload, error
 			AssignIPv6:       payload.AssignIPv6,
 			AllowAllTraffic:  payload.AllowAllTraffic,
 			Tags:             payload.Tags,
+			RootPasswordMode: payload.RootPasswordMode,
+			RootPassword:     payload.RootPassword,
 			AvailabilityZone: payload.AvailabilityZone,
 			BlueprintID:      payload.BlueprintID,
 			BundleID:         payload.BundleID,
@@ -1936,6 +1950,122 @@ func removeSavedLinodeRootPassword(userUUID string, addition *linodecloud.Additi
 	}
 }
 
+func buildAWSResourceCredentialID(region, resourceID string) string {
+	resourceID = strings.TrimSpace(resourceID)
+	if resourceID == "" {
+		return ""
+	}
+
+	region = strings.TrimSpace(strings.ToLower(region))
+	if region == "" {
+		return resourceID
+	}
+	return region + "::" + resourceID
+}
+
+func normalizeAWSRootPasswordMode(mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "none":
+		return "none"
+	case "custom":
+		return "custom"
+	case "random":
+		return "random"
+	default:
+		return ""
+	}
+}
+
+func resolveAWSRootPasswordUserData(mode, rootPassword, userData string) (string, string, error) {
+	userData = strings.TrimSpace(userData)
+	switch normalizeAWSRootPasswordMode(mode) {
+	case "", "none":
+		return userData, "", nil
+	case "custom":
+		rootPassword = strings.TrimSpace(rootPassword)
+		if rootPassword == "" {
+			return "", "", errors.New("root password is required when custom password mode is selected")
+		}
+		resolvedUserData, err := awscloud.BuildRootPasswordUserData(rootPassword, userData)
+		return resolvedUserData, "", err
+	case "random":
+		generatedPassword, err := awscloud.GenerateRandomPassword(20)
+		if err != nil {
+			return "", "", err
+		}
+		resolvedUserData, err := awscloud.BuildRootPasswordUserData(generatedPassword, userData)
+		return resolvedUserData, generatedPassword, err
+	default:
+		return userData, "", nil
+	}
+}
+
+func persistAWSRootPassword(
+	userUUID string,
+	addition *awscloud.Addition,
+	credential *awscloud.CredentialRecord,
+	resourceType string,
+	region string,
+	resourceID string,
+	resourceName string,
+	passwordMode string,
+	rootPassword string,
+) error {
+	resourceType = strings.TrimSpace(resourceType)
+	credentialResourceID := buildAWSResourceCredentialID(region, resourceID)
+	rootPassword = strings.TrimSpace(rootPassword)
+	if addition == nil || credential == nil || resourceType == "" || credentialResourceID == "" || rootPassword == "" {
+		return nil
+	}
+
+	latestAddition, latestCredential, err := reloadAWSAdditionCredentialState(userUUID, credential)
+	if err != nil {
+		log.Printf("failover: failed to reload AWS credential state for %s %s: %v", resourceType, strings.TrimSpace(resourceID), err)
+		return err
+	}
+	if err := latestCredential.SaveResourcePassword(resourceType, credentialResourceID, resourceName, passwordMode, rootPassword, time.Now()); err != nil {
+		log.Printf("failover: failed to save AWS root password for %s %s: %v", resourceType, strings.TrimSpace(resourceID), err)
+		return err
+	}
+	if err := saveAWSAddition(userUUID, latestAddition); err != nil {
+		latestCredential.RemoveSavedResourcePassword(resourceType, credentialResourceID)
+		log.Printf("failover: failed to persist AWS root password for %s %s: %v", resourceType, strings.TrimSpace(resourceID), err)
+		return err
+	}
+	return nil
+}
+
+func removeSavedAWSRootPassword(
+	userUUID string,
+	addition *awscloud.Addition,
+	credential *awscloud.CredentialRecord,
+	resourceType string,
+	region string,
+	resourceID string,
+) {
+	resourceType = strings.TrimSpace(resourceType)
+	credentialResourceID := buildAWSResourceCredentialID(region, resourceID)
+	if addition == nil || credential == nil || resourceType == "" || credentialResourceID == "" {
+		return
+	}
+
+	targetAddition := addition
+	targetCredential := credential
+	if latestAddition, latestCredential, err := reloadAWSAdditionCredentialState(userUUID, credential); err == nil {
+		targetAddition = latestAddition
+		targetCredential = latestCredential
+	} else {
+		log.Printf("failover: failed to reload AWS credential state for %s %s cleanup, falling back to in-memory state: %v", resourceType, strings.TrimSpace(resourceID), err)
+	}
+
+	if !targetCredential.RemoveSavedResourcePassword(resourceType, credentialResourceID) {
+		return
+	}
+	if err := saveAWSAddition(userUUID, targetAddition); err != nil {
+		log.Printf("failover: failed to remove saved AWS root password for %s %s: %v", resourceType, strings.TrimSpace(resourceID), err)
+	}
+}
+
 func failoverConnectivityValidationTimeout(userUUID string) time.Duration {
 	interval, err := config.GetAsForUser[int](userUUID, config.CNConnectivityIntervalKey, 60)
 	if err != nil || interval <= 0 {
@@ -3063,7 +3193,15 @@ func (r *executionRunner) resolveCurrentInstanceCleanupByAddress(ctx context.Con
 					},
 					Label: "delete aws lightsail instance " + instance.Name,
 					Cleanup: func(ctx context.Context) error {
-						return normalizeExecutionStopError(awscloud.DeleteLightsailInstance(contextOrBackground(ctx), credential, region, instance.Name))
+						if err := awscloud.DeleteLightsailInstance(contextOrBackground(ctx), credential, region, instance.Name); err != nil {
+							if isAWSResourceNotFoundError("lightsail", err) {
+								removeSavedAWSRootPassword(r.task.UserID, addition, credential, "lightsail", region, instance.Name)
+								return nil
+							}
+							return normalizeExecutionStopError(err)
+						}
+						removeSavedAWSRootPassword(r.task.UserID, addition, credential, "lightsail", region, instance.Name)
+						return nil
 					},
 				}, nil
 			}
@@ -3095,7 +3233,15 @@ func (r *executionRunner) resolveCurrentInstanceCleanupByAddress(ctx context.Con
 				},
 				Label: "terminate aws ec2 instance " + instance.InstanceID,
 				Cleanup: func(ctx context.Context) error {
-					return normalizeExecutionStopError(awscloud.TerminateInstance(contextOrBackground(ctx), credential, region, instance.InstanceID))
+					if err := awscloud.TerminateInstance(contextOrBackground(ctx), credential, region, instance.InstanceID); err != nil {
+						if isAWSResourceNotFoundError("ec2", err) {
+							removeSavedAWSRootPassword(r.task.UserID, addition, credential, "ec2", region, instance.InstanceID)
+							return nil
+						}
+						return normalizeExecutionStopError(err)
+					}
+					removeSavedAWSRootPassword(r.task.UserID, addition, credential, "ec2", region, instance.InstanceID)
+					return nil
 				},
 			}, nil
 		}
@@ -3216,7 +3362,7 @@ func resolveCurrentInstanceCleanupFromRef(ctx context.Context, userUUID string, 
 			return nil, nil
 		}
 		resolvedRef := resolvedCurrentInstanceRef(ref, "aws", entryID)
-		_, credential, err := loadAWSCredential(userUUID, entryID)
+		addition, credential, err := loadAWSCredential(userUUID, entryID)
 		if err != nil {
 			if isCurrentInstanceCredentialMissingError("aws", err) {
 				switch service {
@@ -3264,7 +3410,15 @@ func resolveCurrentInstanceCleanupFromRef(ctx context.Context, userUUID string, 
 				Ref:   resolvedRef,
 				Label: "delete aws lightsail instance " + instanceName,
 				Cleanup: func(ctx context.Context) error {
-					return normalizeExecutionStopError(awscloud.DeleteLightsailInstance(contextOrBackground(ctx), credential, region, instanceName))
+					if err := awscloud.DeleteLightsailInstance(contextOrBackground(ctx), credential, region, instanceName); err != nil {
+						if isAWSResourceNotFoundError("lightsail", err) {
+							removeSavedAWSRootPassword(userUUID, addition, credential, "lightsail", region, instanceName)
+							return nil
+						}
+						return normalizeExecutionStopError(err)
+					}
+					removeSavedAWSRootPassword(userUUID, addition, credential, "lightsail", region, instanceName)
+					return nil
 				},
 			}, nil
 		default:
@@ -3295,7 +3449,15 @@ func resolveCurrentInstanceCleanupFromRef(ctx context.Context, userUUID string, 
 				Ref:   resolvedRef,
 				Label: "terminate aws ec2 instance " + instanceID,
 				Cleanup: func(ctx context.Context) error {
-					return normalizeExecutionStopError(awscloud.TerminateInstance(contextOrBackground(ctx), credential, region, instanceID))
+					if err := awscloud.TerminateInstance(contextOrBackground(ctx), credential, region, instanceID); err != nil {
+						if isAWSResourceNotFoundError("ec2", err) {
+							removeSavedAWSRootPassword(userUUID, addition, credential, "ec2", region, instanceID)
+							return nil
+						}
+						return normalizeExecutionStopError(err)
+					}
+					removeSavedAWSRootPassword(userUUID, addition, credential, "ec2", region, instanceID)
+					return nil
 				},
 			}, nil
 		}
@@ -3363,7 +3525,7 @@ func resolveCurrentInstanceCleanupByRefAddress(ctx context.Context, userUUID str
 		if region == "" {
 			return nil, nil
 		}
-		_, credential, err := loadAWSCredential(userUUID, entryID)
+		addition, credential, err := loadAWSCredential(userUUID, entryID)
 		if err != nil {
 			if isCurrentInstanceCredentialMissingError("aws", err) {
 				return providerEntryMissingCurrentInstanceCleanup(ref, "aws", entryID, label), nil
@@ -3396,7 +3558,15 @@ func resolveCurrentInstanceCleanupByRefAddress(ctx context.Context, userUUID str
 					},
 					Label: "delete aws lightsail instance " + instance.Name,
 					Cleanup: func(ctx context.Context) error {
-						return normalizeExecutionStopError(awscloud.DeleteLightsailInstance(contextOrBackground(ctx), credential, region, instance.Name))
+						if err := awscloud.DeleteLightsailInstance(contextOrBackground(ctx), credential, region, instance.Name); err != nil {
+							if isAWSResourceNotFoundError("lightsail", err) {
+								removeSavedAWSRootPassword(userUUID, addition, credential, "lightsail", region, instance.Name)
+								return nil
+							}
+							return normalizeExecutionStopError(err)
+						}
+						removeSavedAWSRootPassword(userUUID, addition, credential, "lightsail", region, instance.Name)
+						return nil
 					},
 				}, nil
 			}
@@ -3430,7 +3600,15 @@ func resolveCurrentInstanceCleanupByRefAddress(ctx context.Context, userUUID str
 				},
 				Label: "terminate aws ec2 instance " + instance.InstanceID,
 				Cleanup: func(ctx context.Context) error {
-					return normalizeExecutionStopError(awscloud.TerminateInstance(contextOrBackground(ctx), credential, region, instance.InstanceID))
+					if err := awscloud.TerminateInstance(contextOrBackground(ctx), credential, region, instance.InstanceID); err != nil {
+						if isAWSResourceNotFoundError("ec2", err) {
+							removeSavedAWSRootPassword(userUUID, addition, credential, "ec2", region, instance.InstanceID)
+							return nil
+						}
+						return normalizeExecutionStopError(err)
+					}
+					removeSavedAWSRootPassword(userUUID, addition, credential, "ec2", region, instance.InstanceID)
+					return nil
 				},
 			}, nil
 		}
@@ -4040,6 +4218,14 @@ func provisionAWSInstance(ctx context.Context, userUUID string, plan models.Fail
 			name = "failover-ec2-" + strconv.FormatInt(time.Now().Unix(), 10)
 		}
 		userData := strings.TrimSpace(payload.UserData)
+		userData, generatedRootPassword, err := resolveAWSRootPasswordUserData(
+			payload.RootPasswordMode,
+			payload.RootPassword,
+			userData,
+		)
+		if err != nil {
+			return nil, err
+		}
 		if payload.AssignIPv6 {
 			userData, err = buildAWSIPv6RefreshUserData(userData)
 			if err != nil {
@@ -4082,7 +4268,15 @@ func provisionAWSInstance(ctx context.Context, userUUID string, plan models.Fail
 			if cleanupInstanceID == "" {
 				return nil
 			}
-			return normalizeExecutionStopError(awscloud.TerminateInstance(contextOrBackground(runCtx), credential, region, cleanupInstanceID))
+			if err := awscloud.TerminateInstance(contextOrBackground(runCtx), credential, region, cleanupInstanceID); err != nil {
+				if isAWSResourceNotFoundError("ec2", err) {
+					removeSavedAWSRootPassword(userUUID, addition, credential, "ec2", region, cleanupInstanceID)
+					return nil
+				}
+				return normalizeExecutionStopError(err)
+			}
+			removeSavedAWSRootPassword(userUUID, addition, credential, "ec2", region, cleanupInstanceID)
+			return nil
 		}
 		if payload.AssignIPv6 && !createResult.AssignIPv6 {
 			warnings := strings.Join(trimStrings(createResult.Warnings), "; ")
@@ -4133,6 +4327,28 @@ func provisionAWSInstance(ctx context.Context, userUUID string, plan models.Fail
 				return nil, err
 			}
 		}
+		passwordMode := normalizeAWSRootPasswordMode(payload.RootPasswordMode)
+		rootPassword := ""
+		switch passwordMode {
+		case "custom":
+			rootPassword = strings.TrimSpace(payload.RootPassword)
+		case "random":
+			rootPassword = generatedRootPassword
+		}
+		passwordSaveErr := persistAWSRootPassword(
+			userUUID,
+			addition,
+			credential,
+			"ec2",
+			region,
+			instance.InstanceID,
+			firstNonEmpty(instance.Name, instance.InstanceID),
+			passwordMode,
+			rootPassword,
+		)
+		if rootPassword != "" && passwordSaveErr != nil {
+			return nil, buildAWSProvisionCleanupError(ctx, "ec2", cleanupInstanceID, cleanupLabel, cleanupProvisionedInstance, passwordSaveErr)
+		}
 		detailAddresses := make([]awscloud.Address, 0)
 		if detail != nil {
 			detailAddresses = detail.Addresses
@@ -4159,8 +4375,23 @@ func provisionAWSInstance(ctx context.Context, userUUID string, plan models.Fail
 			},
 			RollbackLabel: cleanupLabel,
 			Rollback: func(ctx context.Context) error {
-				return normalizeExecutionStopError(awscloud.TerminateInstance(contextOrBackground(ctx), credential, region, strings.TrimSpace(instance.InstanceID)))
+				if err := awscloud.TerminateInstance(contextOrBackground(ctx), credential, region, strings.TrimSpace(instance.InstanceID)); err != nil {
+					if isAWSResourceNotFoundError("ec2", err) {
+						removeSavedAWSRootPassword(userUUID, addition, credential, "ec2", region, instance.InstanceID)
+						return nil
+					}
+					return normalizeExecutionStopError(err)
+				}
+				removeSavedAWSRootPassword(userUUID, addition, credential, "ec2", region, instance.InstanceID)
+				return nil
 			},
+		}
+		if rootPassword != "" {
+			outcome.NewInstanceRef["root_password_mode"] = passwordMode
+			outcome.NewInstanceRef["root_password_saved"] = passwordSaveErr == nil
+			if passwordSaveErr != nil {
+				outcome.NewInstanceRef["root_password_save_error"] = passwordSaveErr.Error()
+			}
 		}
 		if cleanupInstanceID := strings.TrimSpace(payload.CleanupInstanceID); cleanupInstanceID != "" {
 			outcome.OldInstanceRef = map[string]interface{}{
@@ -4173,7 +4404,15 @@ func provisionAWSInstance(ctx context.Context, userUUID string, plan models.Fail
 			}
 			outcome.CleanupLabel = "terminate aws ec2 instance " + cleanupInstanceID
 			outcome.Cleanup = func(ctx context.Context) error {
-				return normalizeExecutionStopError(awscloud.TerminateInstance(contextOrBackground(ctx), credential, region, cleanupInstanceID))
+				if err := awscloud.TerminateInstance(contextOrBackground(ctx), credential, region, cleanupInstanceID); err != nil {
+					if isAWSResourceNotFoundError("ec2", err) {
+						removeSavedAWSRootPassword(userUUID, addition, credential, "ec2", region, cleanupInstanceID)
+						return nil
+					}
+					return normalizeExecutionStopError(err)
+				}
+				removeSavedAWSRootPassword(userUUID, addition, credential, "ec2", region, cleanupInstanceID)
+				return nil
 			}
 		}
 		return outcome, nil
@@ -4183,6 +4422,14 @@ func provisionAWSInstance(ctx context.Context, userUUID string, plan models.Fail
 			name = "failover-ls-" + strconv.FormatInt(time.Now().Unix(), 10)
 		}
 		userData := strings.TrimSpace(payload.UserData)
+		userData, generatedRootPassword, err := resolveAWSRootPasswordUserData(
+			payload.RootPasswordMode,
+			payload.RootPassword,
+			userData,
+		)
+		if err != nil {
+			return nil, err
+		}
 		if lightsailProvisionWantsIPv6(payload.IPAddressType) {
 			userData, err = buildAWSIPv6RefreshUserData(userData)
 			if err != nil {
@@ -4218,7 +4465,15 @@ func provisionAWSInstance(ctx context.Context, userUUID string, plan models.Fail
 		}
 		cleanupLabel := "delete failed aws lightsail instance " + name
 		cleanupProvisionedInstance := func(runCtx context.Context) error {
-			return normalizeExecutionStopError(awscloud.DeleteLightsailInstance(contextOrBackground(runCtx), credential, region, name))
+			if err := awscloud.DeleteLightsailInstance(contextOrBackground(runCtx), credential, region, name); err != nil {
+				if isAWSResourceNotFoundError("lightsail", err) {
+					removeSavedAWSRootPassword(userUUID, addition, credential, "lightsail", region, name)
+					return nil
+				}
+				return normalizeExecutionStopError(err)
+			}
+			removeSavedAWSRootPassword(userUUID, addition, credential, "lightsail", region, name)
+			return nil
 		}
 		detail, err := waitForLightsailInstance(ctx, region, credential, name)
 		if err != nil {
@@ -4242,6 +4497,28 @@ func provisionAWSInstance(ctx context.Context, userUUID string, plan models.Fail
 				return nil, err
 			}
 		}
+		passwordMode := normalizeAWSRootPasswordMode(payload.RootPasswordMode)
+		rootPassword := ""
+		switch passwordMode {
+		case "custom":
+			rootPassword = strings.TrimSpace(payload.RootPassword)
+		case "random":
+			rootPassword = generatedRootPassword
+		}
+		passwordSaveErr := persistAWSRootPassword(
+			userUUID,
+			addition,
+			credential,
+			"lightsail",
+			region,
+			name,
+			name,
+			passwordMode,
+			rootPassword,
+		)
+		if rootPassword != "" && passwordSaveErr != nil {
+			return nil, buildAWSProvisionCleanupError(ctx, "lightsail", name, cleanupLabel, cleanupProvisionedInstance, passwordSaveErr)
+		}
 		outcome := &actionOutcome{
 			IPv4:             strings.TrimSpace(detail.Instance.PublicIP),
 			IPv6:             provisionedIPv6,
@@ -4261,8 +4538,23 @@ func provisionAWSInstance(ctx context.Context, userUUID string, plan models.Fail
 			},
 			RollbackLabel: cleanupLabel,
 			Rollback: func(ctx context.Context) error {
-				return normalizeExecutionStopError(awscloud.DeleteLightsailInstance(contextOrBackground(ctx), credential, region, name))
+				if err := awscloud.DeleteLightsailInstance(contextOrBackground(ctx), credential, region, name); err != nil {
+					if isAWSResourceNotFoundError("lightsail", err) {
+						removeSavedAWSRootPassword(userUUID, addition, credential, "lightsail", region, name)
+						return nil
+					}
+					return normalizeExecutionStopError(err)
+				}
+				removeSavedAWSRootPassword(userUUID, addition, credential, "lightsail", region, name)
+				return nil
 			},
+		}
+		if rootPassword != "" {
+			outcome.NewInstanceRef["root_password_mode"] = passwordMode
+			outcome.NewInstanceRef["root_password_saved"] = passwordSaveErr == nil
+			if passwordSaveErr != nil {
+				outcome.NewInstanceRef["root_password_save_error"] = passwordSaveErr.Error()
+			}
 		}
 		if cleanupName := strings.TrimSpace(payload.CleanupInstanceName); cleanupName != "" {
 			outcome.OldInstanceRef = map[string]interface{}{
@@ -4275,7 +4567,15 @@ func provisionAWSInstance(ctx context.Context, userUUID string, plan models.Fail
 			}
 			outcome.CleanupLabel = "delete aws lightsail instance " + cleanupName
 			outcome.Cleanup = func(ctx context.Context) error {
-				return normalizeExecutionStopError(awscloud.DeleteLightsailInstance(contextOrBackground(ctx), credential, region, cleanupName))
+				if err := awscloud.DeleteLightsailInstance(contextOrBackground(ctx), credential, region, cleanupName); err != nil {
+					if isAWSResourceNotFoundError("lightsail", err) {
+						removeSavedAWSRootPassword(userUUID, addition, credential, "lightsail", region, cleanupName)
+						return nil
+					}
+					return normalizeExecutionStopError(err)
+				}
+				removeSavedAWSRootPassword(userUUID, addition, credential, "lightsail", region, cleanupName)
+				return nil
 			}
 		}
 		return outcome, nil

@@ -988,6 +988,177 @@ func TestRemoveSavedLinodeRootPasswordReloadsLatestAdditionState(t *testing.T) {
 	}
 }
 
+func TestPersistAWSRootPasswordReloadsLatestAdditionState(t *testing.T) {
+	configureRunnerSQLiteDB(t)
+	t.Setenv(awscloud.RootPasswordVaultKeyEnv, "failover-runner-test-secret")
+
+	const (
+		userUUID = "user-aws-password-persist"
+		region   = "us-east-1"
+	)
+	baseAddition := &awscloud.Addition{
+		ActiveCredentialID: "credential-1",
+		Credentials: []awscloud.CredentialRecord{
+			{
+				ID:              "credential-1",
+				Name:            "Credential 1",
+				AccessKeyID:     "AKIAEXAMPLE1",
+				SecretAccessKey: "secret-1",
+				DefaultRegion:   region,
+			},
+		},
+	}
+	if err := saveAWSAddition(userUUID, baseAddition); err != nil {
+		t.Fatalf("failed to seed AWS provider config: %v", err)
+	}
+
+	staleAddition, staleCredential, err := loadAWSCredential(userUUID, "credential-1")
+	if err != nil {
+		t.Fatalf("failed to load stale AWS credential: %v", err)
+	}
+
+	latestAddition, latestCredential, err := loadAWSCredential(userUUID, "credential-1")
+	if err != nil {
+		t.Fatalf("failed to reload AWS credential: %v", err)
+	}
+	if err := latestCredential.SaveResourcePassword(
+		"ec2",
+		buildAWSResourceCredentialID(region, "i-old"),
+		"web-old",
+		"custom",
+		"Old!Password123",
+		time.Now().UTC(),
+	); err != nil {
+		t.Fatalf("failed to seed existing AWS resource password: %v", err)
+	}
+	if err := saveAWSAddition(userUUID, latestAddition); err != nil {
+		t.Fatalf("failed to save existing AWS credential: %v", err)
+	}
+
+	if err := persistAWSRootPassword(
+		userUUID,
+		staleAddition,
+		staleCredential,
+		"ec2",
+		region,
+		"i-new",
+		"web-new",
+		"custom",
+		"New!Password456",
+	); err != nil {
+		t.Fatalf("persistAWSRootPassword returned error: %v", err)
+	}
+
+	storedAddition, storedCredential, err := loadAWSCredential(userUUID, "credential-1")
+	if err != nil {
+		t.Fatalf("failed to load updated AWS addition: %v", err)
+	}
+	if !storedAddition.HasSavedResourcePassword("ec2", buildAWSResourceCredentialID(region, "i-old")) {
+		t.Fatal("expected existing AWS resource credential to be preserved")
+	}
+	if !storedAddition.HasSavedResourcePassword("ec2", buildAWSResourceCredentialID(region, "i-new")) {
+		t.Fatal("expected new AWS resource credential to be saved")
+	}
+
+	passwordView, err := storedCredential.RevealResourcePassword("ec2", buildAWSResourceCredentialID(region, "i-new"))
+	if err != nil {
+		t.Fatalf("failed to reveal saved AWS resource password: %v", err)
+	}
+	if passwordView.RootPassword != "New!Password456" {
+		t.Fatalf("unexpected AWS root password %q", passwordView.RootPassword)
+	}
+}
+
+func TestRemoveSavedAWSRootPasswordReloadsLatestAdditionState(t *testing.T) {
+	configureRunnerSQLiteDB(t)
+	t.Setenv(awscloud.RootPasswordVaultKeyEnv, "failover-runner-test-secret")
+
+	const (
+		userUUID = "user-aws-password-remove"
+		region   = "us-east-1"
+	)
+	baseAddition := &awscloud.Addition{
+		ActiveCredentialID: "credential-1",
+		Credentials: []awscloud.CredentialRecord{
+			{
+				ID:              "credential-1",
+				Name:            "Credential 1",
+				AccessKeyID:     "AKIAEXAMPLE1",
+				SecretAccessKey: "secret-1",
+				DefaultRegion:   region,
+			},
+		},
+	}
+	if err := saveAWSAddition(userUUID, baseAddition); err != nil {
+		t.Fatalf("failed to seed AWS provider config: %v", err)
+	}
+
+	staleAddition, staleCredential, err := loadAWSCredential(userUUID, "credential-1")
+	if err != nil {
+		t.Fatalf("failed to load stale AWS credential: %v", err)
+	}
+
+	latestAddition, latestCredential, err := loadAWSCredential(userUUID, "credential-1")
+	if err != nil {
+		t.Fatalf("failed to reload AWS credential: %v", err)
+	}
+	if err := latestCredential.SaveResourcePassword(
+		"ec2",
+		buildAWSResourceCredentialID(region, "i-old"),
+		"web-old",
+		"custom",
+		"Old!Password123",
+		time.Now().UTC(),
+	); err != nil {
+		t.Fatalf("failed to seed AWS resource password i-old: %v", err)
+	}
+	if err := latestCredential.SaveResourcePassword(
+		"ec2",
+		buildAWSResourceCredentialID(region, "i-keep"),
+		"web-keep",
+		"custom",
+		"Keep!Password456",
+		time.Now().UTC(),
+	); err != nil {
+		t.Fatalf("failed to seed AWS resource password i-keep: %v", err)
+	}
+	if err := saveAWSAddition(userUUID, latestAddition); err != nil {
+		t.Fatalf("failed to save seeded AWS credentials: %v", err)
+	}
+
+	removeSavedAWSRootPassword(userUUID, staleAddition, staleCredential, "ec2", region, "i-old")
+
+	storedAddition, _, err := loadAWSCredential(userUUID, "credential-1")
+	if err != nil {
+		t.Fatalf("failed to load updated AWS addition: %v", err)
+	}
+	if storedAddition.HasSavedResourcePassword("ec2", buildAWSResourceCredentialID(region, "i-old")) {
+		t.Fatal("expected targeted AWS resource credential to be removed")
+	}
+	if !storedAddition.HasSavedResourcePassword("ec2", buildAWSResourceCredentialID(region, "i-keep")) {
+		t.Fatal("expected non-target AWS resource credential to be preserved")
+	}
+}
+
+func TestAWSRebindProvisionPayloadCarriesRootPasswordFields(t *testing.T) {
+	provisionPayload := awsRebindProvisionPayload(awsRebindPayload{
+		Service:          "ec2",
+		Region:           "us-east-1",
+		Name:             "failover-ec2",
+		ImageID:          "ami-123",
+		InstanceType:     "t3.micro",
+		RootPasswordMode: "custom",
+		RootPassword:     " Passw0rd! ",
+	})
+
+	if provisionPayload.RootPasswordMode != "custom" {
+		t.Fatalf("expected root_password_mode to be preserved, got %q", provisionPayload.RootPasswordMode)
+	}
+	if provisionPayload.RootPassword != "Passw0rd!" {
+		t.Fatalf("expected root_password to be trimmed and preserved, got %q", provisionPayload.RootPassword)
+	}
+}
+
 func TestBuildProviderEntryQueryCleanupAssessmentMarksAuthInvalidAsWarning(t *testing.T) {
 	assessment := buildProviderEntryQueryCleanupAssessment(
 		"digitalocean",

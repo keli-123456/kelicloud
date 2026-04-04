@@ -168,6 +168,54 @@ func loadAWSCredentialSelection(userUUID, entryID, entryGroup string) (*awscloud
 	return addition, credential, nil
 }
 
+func saveAWSAddition(userUUID string, addition *awscloud.Addition) error {
+	if addition == nil {
+		addition = &awscloud.Addition{}
+	}
+	addition.Normalize()
+
+	payload, err := json.Marshal(addition)
+	if err != nil {
+		return err
+	}
+	return saveProviderAddition(userUUID, "aws", string(payload))
+}
+
+func reloadAWSAdditionCredentialState(userUUID string, credential *awscloud.CredentialRecord) (*awscloud.Addition, *awscloud.CredentialRecord, error) {
+	if credential == nil {
+		return nil, nil, errors.New("AWS credential is not configured")
+	}
+
+	addition, err := loadAWSAddition(userUUID)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	latestCredential := addition.FindCredential(credential.ID)
+	if latestCredential == nil {
+		accessKeyID := strings.TrimSpace(credential.AccessKeyID)
+		defaultRegion := strings.TrimSpace(credential.DefaultRegion)
+		if accessKeyID != "" {
+			for index := range addition.Credentials {
+				if strings.TrimSpace(addition.Credentials[index].AccessKeyID) == accessKeyID &&
+					strings.TrimSpace(addition.Credentials[index].DefaultRegion) == defaultRegion {
+					latestCredential = &addition.Credentials[index]
+					break
+				}
+			}
+		}
+	}
+	if latestCredential == nil {
+		entryID := strings.TrimSpace(credential.ID)
+		if entryID == "" {
+			return nil, nil, errors.New("AWS credential is not configured")
+		}
+		return nil, nil, newProviderEntryNotFoundError("aws", entryID)
+	}
+
+	return addition, latestCredential, nil
+}
+
 func loadDigitalOceanAddition(userUUID string) (*digitalocean.Addition, error) {
 	raw, err := loadProviderAddition(userUUID, "digitalocean")
 	if err != nil {
