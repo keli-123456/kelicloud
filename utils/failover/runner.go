@@ -538,6 +538,150 @@ func awsRebindTargetAllowsReuse(service, state string) bool {
 	}
 }
 
+func resolveTrackedAWSRebindPayload(task models.FailoverTask, payload awsRebindPayload, entryID string) (awsRebindPayload, bool, bool) {
+	payload = normalizeAWSRebindPayload(payload)
+	if payload.Service == "lightsail" {
+		if payload.InstanceName != "" {
+			return payload, true, false
+		}
+	} else if payload.InstanceID != "" {
+		return payload, true, false
+	}
+
+	currentRef := parseJSONMap(task.CurrentInstanceRef)
+	if len(currentRef) == 0 {
+		return payload, false, false
+	}
+	if !strings.EqualFold(strings.TrimSpace(stringMapValue(currentRef, "provider")), "aws") {
+		return payload, false, false
+	}
+
+	refService := normalizeAWSFailoverService(firstNonEmpty(stringMapValue(currentRef, "service"), "ec2"))
+	if refService != payload.Service {
+		return payload, false, false
+	}
+
+	if trackedEntryID := strings.TrimSpace(providerEntryIDFromRef(currentRef)); trackedEntryID != "" && strings.TrimSpace(entryID) != "" && trackedEntryID != strings.TrimSpace(entryID) {
+		return payload, false, false
+	}
+
+	if region := strings.TrimSpace(stringMapValue(currentRef, "region")); region != "" {
+		payload.Region = region
+	}
+
+	if payload.Service == "lightsail" {
+		payload.InstanceName = strings.TrimSpace(stringMapValue(currentRef, "instance_name"))
+		if payload.InstanceName == "" {
+			return payload, false, false
+		}
+		return payload, true, true
+	}
+
+	payload.InstanceID = strings.TrimSpace(stringMapValue(currentRef, "instance_id"))
+	if payload.InstanceID == "" {
+		return payload, false, false
+	}
+	return payload, true, true
+}
+
+func buildAWSRebindExecutionPlan(plan models.FailoverPlan, payload awsRebindPayload) models.FailoverPlan {
+	rebindPlan := plan
+	rebindPlan.ActionType = models.FailoverActionRebindPublicIP
+	rebindPlan.Payload = marshalJSON(normalizeAWSRebindPayload(payload))
+	return rebindPlan
+}
+
+func resolveTaskCurrentAddress(task models.FailoverTask) (string, error) {
+	address := strings.TrimSpace(task.CurrentAddress)
+	if address != "" {
+		return address, nil
+	}
+
+	clientUUID := strings.TrimSpace(task.WatchClientUUID)
+	userUUID := strings.TrimSpace(task.UserID)
+	if clientUUID == "" || userUUID == "" {
+		return "", nil
+	}
+
+	client, err := clientdb.GetClientByUUIDForUser(clientUUID, userUUID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return "", nil
+		}
+		return "", err
+	}
+
+	return strings.TrimSpace(firstNonEmpty(client.IPv4, client.IPv6)), nil
+}
+
+func prepareTrackedAWSRebindExecutionPlan(
+	ctx context.Context,
+	task models.FailoverTask,
+	plan models.FailoverPlan,
+	payload awsRebindPayload,
+	addition *awscloud.Addition,
+	credential *awscloud.CredentialRecord,
+) (models.FailoverPlan, string, string, bool, error) {
+	resolvedPayload, hasTarget, usedTrackedRef := resolveTrackedAWSRebindPayload(task, payload, plan.ProviderEntryID)
+	if !hasTarget {
+		return models.FailoverPlan{}, "", "", false, nil
+	}
+
+	service := normalizeAWSFailoverService(resolvedPayload.Service)
+	region := resolveAWSFailoverRegion(resolvedPayload.Region, addition, credential)
+	resolvedPayload.Region = region
+
+	switch service {
+	case "lightsail":
+		detail, err := awsFailoverGetLightsailDetail(contextOrBackground(ctx), credential, region, strings.TrimSpace(resolvedPayload.InstanceName))
+		if err != nil {
+			if isAWSRebindTargetMissingError(service, err) {
+				return models.FailoverPlan{}, "", "", false, nil
+			}
+			return models.FailoverPlan{}, "", "", false, err
+		}
+		if !awsRebindTargetAllowsReuse(service, detail.Instance.State) {
+			reason := fmt.Sprintf(
+				"the tracked AWS Lightsail instance %s is %s, so failover will create a replacement instance",
+				strings.TrimSpace(resolvedPayload.InstanceName),
+				firstNonEmpty(strings.TrimSpace(detail.Instance.State), "not reusable"),
+			)
+			fallbackPlan, mode, fallbackReason, err := buildAWSProvisionFallbackPlan(plan, payload, reason)
+			return fallbackPlan, mode, fallbackReason, true, err
+		}
+
+		reason := "the task already tracks an AWS Lightsail instance under the selected credential, so failover will only replace its public IP"
+		if !usedTrackedRef {
+			reason = "the selected AWS credential already targets a Lightsail instance, so failover will only replace its public IP"
+		}
+		return buildAWSRebindExecutionPlan(plan, resolvedPayload), "rebind_existing_instance", reason, true, nil
+	default:
+		detail, err := awsFailoverGetEC2InstanceDetail(contextOrBackground(ctx), credential, region, strings.TrimSpace(resolvedPayload.InstanceID))
+		if err != nil {
+			if isAWSRebindTargetMissingError(service, err) {
+				return models.FailoverPlan{}, "", "", false, nil
+			}
+			return models.FailoverPlan{}, "", "", false, err
+		}
+		if !awsRebindTargetAllowsReuse(service, detail.Instance.State) {
+			reason := fmt.Sprintf(
+				"the tracked AWS EC2 instance %s is %s, so failover will create a replacement instance",
+				strings.TrimSpace(resolvedPayload.InstanceID),
+				firstNonEmpty(strings.TrimSpace(detail.Instance.State), "not reusable"),
+			)
+			fallbackPlan, mode, fallbackReason, err := buildAWSProvisionFallbackPlan(plan, payload, reason)
+			return fallbackPlan, mode, fallbackReason, true, err
+		}
+
+		resolvedPayload.PrivateIP = firstNonEmpty(resolvedPayload.PrivateIP, strings.TrimSpace(detail.Instance.PrivateIP))
+		reason := "the task already tracks an AWS EC2 instance under the selected credential, so failover will only replace its public IP"
+		if !usedTrackedRef {
+			reason = "the selected AWS credential already targets an EC2 instance, so failover will only replace its public IP"
+		}
+		return buildAWSRebindExecutionPlan(plan, resolvedPayload), "rebind_existing_instance", reason, true, nil
+	}
+}
+
 func prepareAWSRebindExecutionPlan(ctx context.Context, task models.FailoverTask, plan models.FailoverPlan) (models.FailoverPlan, string, string, error) {
 	payload, err := parseAWSExecutionPayload(plan)
 	if err != nil {
@@ -549,6 +693,18 @@ func prepareAWSRebindExecutionPlan(ctx context.Context, task models.FailoverTask
 		return models.FailoverPlan{}, "", "", err
 	}
 	payload.Region = resolveAWSFailoverRegion(payload.Region, addition, credential)
+
+	if currentAddress, addressErr := resolveTaskCurrentAddress(task); addressErr != nil {
+		return models.FailoverPlan{}, "", "", addressErr
+	} else if currentAddress != "" {
+		task.CurrentAddress = currentAddress
+	}
+
+	if trackedPlan, mode, reason, resolved, trackedErr := prepareTrackedAWSRebindExecutionPlan(ctx, task, plan, payload, addition, credential); trackedErr != nil {
+		return models.FailoverPlan{}, "", "", trackedErr
+	} else if resolved {
+		return trackedPlan, mode, reason, nil
+	}
 
 	cleanup, err := awsFailoverResolveCurrentInstanceByAddress(ctx, task, plan, payload)
 	if err != nil {
@@ -575,10 +731,7 @@ func prepareAWSRebindExecutionPlan(ctx context.Context, task models.FailoverTask
 		)
 	}
 
-	rebindPlan := plan
-	rebindPlan.ActionType = models.FailoverActionRebindPublicIP
-	rebindPlan.Payload = marshalJSON(resolvedPayload)
-	return rebindPlan, "rebind_existing_instance", "the selected AWS credential already has an instance with the task's current IP, so failover will only replace its public IP", nil
+	return buildAWSRebindExecutionPlan(plan, resolvedPayload), "rebind_existing_instance", "the selected AWS credential already has an instance with the task's current IP, so failover will only replace its public IP", nil
 }
 
 func parseAWSExecutionPayload(plan models.FailoverPlan) (awsRebindPayload, error) {

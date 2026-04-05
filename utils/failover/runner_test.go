@@ -424,6 +424,316 @@ func TestPrepareAWSRebindExecutionPlanFallsBackToProvisionWhenTrackedInstanceMis
 	}
 }
 
+func TestPrepareAWSRebindExecutionPlanUsesTrackedInstanceRefWhenAddressLookupWouldMiss(t *testing.T) {
+	originalLoadCredential := awsFailoverLoadCredential
+	originalResolveCurrent := awsFailoverResolveCurrentInstanceByAddress
+	originalGetDetail := awsFailoverGetEC2InstanceDetail
+	defer func() {
+		awsFailoverLoadCredential = originalLoadCredential
+		awsFailoverResolveCurrentInstanceByAddress = originalResolveCurrent
+		awsFailoverGetEC2InstanceDetail = originalGetDetail
+	}()
+
+	addressLookupCalled := false
+	awsFailoverLoadCredential = func(userUUID, entryID string) (*awscloud.Addition, *awscloud.CredentialRecord, error) {
+		return &awscloud.Addition{ActiveRegion: "us-east-1"}, &awscloud.CredentialRecord{
+			ID:            entryID,
+			Name:          "cred-1",
+			DefaultRegion: "us-east-1",
+		}, nil
+	}
+	awsFailoverResolveCurrentInstanceByAddress = func(ctx context.Context, task models.FailoverTask, plan models.FailoverPlan, payload awsRebindPayload) (*currentInstanceCleanup, error) {
+		addressLookupCalled = true
+		return nil, nil
+	}
+	awsFailoverGetEC2InstanceDetail = func(ctx context.Context, credential *awscloud.CredentialRecord, region, instanceID string) (*awscloud.InstanceDetail, error) {
+		if region != "us-west-2" {
+			t.Fatalf("expected tracked region us-west-2, got %q", region)
+		}
+		if instanceID != "i-tracked" {
+			t.Fatalf("expected tracked instance id i-tracked, got %q", instanceID)
+		}
+		return &awscloud.InstanceDetail{
+			Instance: awscloud.Instance{
+				InstanceID: "i-tracked",
+				State:      "running",
+				PrivateIP:  "172.31.20.10",
+			},
+		}, nil
+	}
+
+	executionPlan, mode, reason, err := prepareAWSRebindExecutionPlan(context.Background(), models.FailoverTask{
+		UserID:             "user-1",
+		CurrentAddress:     "198.51.100.25",
+		CurrentInstanceRef: `{"provider":"aws","service":"ec2","provider_entry_id":"cred-1","region":"us-west-2","instance_id":"i-tracked"}`,
+	}, models.FailoverPlan{
+		Provider:        "aws",
+		ProviderEntryID: "cred-1",
+		ActionType:      models.FailoverActionRebindPublicIP,
+		Payload:         `{"service":"ec2","region":"us-east-1","image_id":"ami-123","instance_type":"t3.micro"}`,
+	})
+	if err != nil {
+		t.Fatalf("expected tracked aws instance ref to stay on rebind path, got %v", err)
+	}
+	if mode != "rebind_existing_instance" {
+		t.Fatalf("expected rebind_existing_instance mode, got %q", mode)
+	}
+	if !strings.Contains(reason, "tracks an AWS EC2 instance") {
+		t.Fatalf("expected tracked ref reason, got %q", reason)
+	}
+	if addressLookupCalled {
+		t.Fatal("expected tracked instance ref to avoid address lookup fallback")
+	}
+
+	var payload awsRebindPayload
+	if err := json.Unmarshal([]byte(executionPlan.Payload), &payload); err != nil {
+		t.Fatalf("expected normalized rebind payload, got %v", err)
+	}
+	if payload.Region != "us-west-2" {
+		t.Fatalf("expected tracked region us-west-2, got %q", payload.Region)
+	}
+	if payload.InstanceID != "i-tracked" {
+		t.Fatalf("expected tracked instance id i-tracked, got %q", payload.InstanceID)
+	}
+	if payload.PrivateIP != "172.31.20.10" {
+		t.Fatalf("expected discovered private ip 172.31.20.10, got %q", payload.PrivateIP)
+	}
+}
+
+func TestPrepareAWSRebindExecutionPlanLoadsCurrentAddressFromWatchClient(t *testing.T) {
+	configureRunnerSQLiteDB(t)
+	db := dbcore.GetDBInstance()
+	if err := db.AutoMigrate(&models.Client{}); err != nil {
+		t.Fatalf("failed to migrate client schema: %v", err)
+	}
+	if err := db.Create(&models.Client{
+		UUID:   "client-1",
+		Token:  "token-1",
+		UserID: "user-1",
+		Name:   "edge-1",
+		IPv4:   "203.0.113.10",
+	}).Error; err != nil {
+		t.Fatalf("failed to seed current client: %v", err)
+	}
+
+	originalLoadCredential := awsFailoverLoadCredential
+	originalResolveCurrent := awsFailoverResolveCurrentInstanceByAddress
+	defer func() {
+		awsFailoverLoadCredential = originalLoadCredential
+		awsFailoverResolveCurrentInstanceByAddress = originalResolveCurrent
+	}()
+
+	addressLookupCalled := false
+	awsFailoverLoadCredential = func(userUUID, entryID string) (*awscloud.Addition, *awscloud.CredentialRecord, error) {
+		return &awscloud.Addition{ActiveRegion: "us-east-1"}, &awscloud.CredentialRecord{
+			ID:            entryID,
+			Name:          "cred-1",
+			DefaultRegion: "us-east-1",
+		}, nil
+	}
+	awsFailoverResolveCurrentInstanceByAddress = func(ctx context.Context, task models.FailoverTask, plan models.FailoverPlan, payload awsRebindPayload) (*currentInstanceCleanup, error) {
+		addressLookupCalled = true
+		if task.CurrentAddress != "203.0.113.10" {
+			t.Fatalf("expected task current address to be refreshed from watch client, got %q", task.CurrentAddress)
+		}
+		return &currentInstanceCleanup{
+			Ref: map[string]interface{}{
+				"provider":          "aws",
+				"service":           "ec2",
+				"provider_entry_id": "cred-1",
+				"region":            "us-east-1",
+				"instance_id":       "i-1234567890",
+			},
+			Addresses: map[string]interface{}{
+				"private_ip": "172.31.10.24",
+			},
+		}, nil
+	}
+
+	executionPlan, mode, reason, err := prepareAWSRebindExecutionPlan(context.Background(), models.FailoverTask{
+		UserID:          "user-1",
+		WatchClientUUID: "client-1",
+	}, models.FailoverPlan{
+		Provider:        "aws",
+		ProviderEntryID: "cred-1",
+		ActionType:      models.FailoverActionRebindPublicIP,
+		Payload:         `{"service":"ec2","region":"us-east-1","image_id":"ami-123","instance_type":"t3.micro"}`,
+	})
+	if err != nil {
+		t.Fatalf("expected watch client address refresh to keep rebind path, got %v", err)
+	}
+	if mode != "rebind_existing_instance" {
+		t.Fatalf("expected rebind_existing_instance mode, got %q", mode)
+	}
+	if !strings.Contains(reason, "current IP") {
+		t.Fatalf("expected current IP reason after address refresh, got %q", reason)
+	}
+	if !addressLookupCalled {
+		t.Fatal("expected current IP lookup to run after refreshing address from watch client")
+	}
+
+	var payload awsRebindPayload
+	if err := json.Unmarshal([]byte(executionPlan.Payload), &payload); err != nil {
+		t.Fatalf("expected normalized rebind payload, got %v", err)
+	}
+	if payload.InstanceID != "i-1234567890" {
+		t.Fatalf("expected discovered instance id i-1234567890, got %q", payload.InstanceID)
+	}
+	if payload.PrivateIP != "172.31.10.24" {
+		t.Fatalf("expected discovered private ip 172.31.10.24, got %q", payload.PrivateIP)
+	}
+}
+
+func TestPrepareAWSRebindExecutionPlanUsesTrackedLightsailRefWhenAddressLookupWouldMiss(t *testing.T) {
+	originalLoadCredential := awsFailoverLoadCredential
+	originalResolveCurrent := awsFailoverResolveCurrentInstanceByAddress
+	originalGetLightsailDetail := awsFailoverGetLightsailDetail
+	defer func() {
+		awsFailoverLoadCredential = originalLoadCredential
+		awsFailoverResolveCurrentInstanceByAddress = originalResolveCurrent
+		awsFailoverGetLightsailDetail = originalGetLightsailDetail
+	}()
+
+	addressLookupCalled := false
+	awsFailoverLoadCredential = func(userUUID, entryID string) (*awscloud.Addition, *awscloud.CredentialRecord, error) {
+		return &awscloud.Addition{ActiveRegion: "us-east-1"}, &awscloud.CredentialRecord{
+			ID:            entryID,
+			Name:          "cred-1",
+			DefaultRegion: "us-east-1",
+		}, nil
+	}
+	awsFailoverResolveCurrentInstanceByAddress = func(ctx context.Context, task models.FailoverTask, plan models.FailoverPlan, payload awsRebindPayload) (*currentInstanceCleanup, error) {
+		addressLookupCalled = true
+		return nil, nil
+	}
+	awsFailoverGetLightsailDetail = func(ctx context.Context, credential *awscloud.CredentialRecord, region, instanceName string) (*awscloud.LightsailInstanceDetail, error) {
+		if region != "us-west-2" {
+			t.Fatalf("expected tracked region us-west-2, got %q", region)
+		}
+		if instanceName != "ls-tracked" {
+			t.Fatalf("expected tracked instance name ls-tracked, got %q", instanceName)
+		}
+		return &awscloud.LightsailInstanceDetail{
+			Instance: awscloud.LightsailInstance{
+				Name:  "ls-tracked",
+				State: "running",
+			},
+		}, nil
+	}
+
+	executionPlan, mode, reason, err := prepareAWSRebindExecutionPlan(context.Background(), models.FailoverTask{
+		UserID:             "user-1",
+		CurrentAddress:     "198.51.100.30",
+		CurrentInstanceRef: `{"provider":"aws","service":"lightsail","provider_entry_id":"cred-1","region":"us-west-2","instance_name":"ls-tracked"}`,
+	}, models.FailoverPlan{
+		Provider:        "aws",
+		ProviderEntryID: "cred-1",
+		ActionType:      models.FailoverActionRebindPublicIP,
+		Payload:         `{"service":"lightsail","region":"us-east-1","availability_zone":"us-east-1a","blueprint_id":"debian_12","bundle_id":"nano_3_0"}`,
+	})
+	if err != nil {
+		t.Fatalf("expected tracked Lightsail ref to stay on rebind path, got %v", err)
+	}
+	if mode != "rebind_existing_instance" {
+		t.Fatalf("expected rebind_existing_instance mode, got %q", mode)
+	}
+	if !strings.Contains(reason, "Lightsail instance") {
+		t.Fatalf("expected tracked Lightsail reason, got %q", reason)
+	}
+	if addressLookupCalled {
+		t.Fatal("expected tracked Lightsail ref to avoid address lookup fallback")
+	}
+
+	var payload awsRebindPayload
+	if err := json.Unmarshal([]byte(executionPlan.Payload), &payload); err != nil {
+		t.Fatalf("expected normalized Lightsail rebind payload, got %v", err)
+	}
+	if payload.Region != "us-west-2" {
+		t.Fatalf("expected tracked region us-west-2, got %q", payload.Region)
+	}
+	if payload.InstanceName != "ls-tracked" {
+		t.Fatalf("expected tracked instance name ls-tracked, got %q", payload.InstanceName)
+	}
+}
+
+func TestPrepareAWSRebindExecutionPlanLoadsCurrentAddressFromWatchClientForLightsail(t *testing.T) {
+	configureRunnerSQLiteDB(t)
+	db := dbcore.GetDBInstance()
+	if err := db.AutoMigrate(&models.Client{}); err != nil {
+		t.Fatalf("failed to migrate client schema: %v", err)
+	}
+	if err := db.Create(&models.Client{
+		UUID:   "client-ls-1",
+		Token:  "token-ls-1",
+		UserID: "user-1",
+		Name:   "edge-ls-1",
+		IPv4:   "203.0.113.20",
+	}).Error; err != nil {
+		t.Fatalf("failed to seed current Lightsail client: %v", err)
+	}
+
+	originalLoadCredential := awsFailoverLoadCredential
+	originalResolveCurrent := awsFailoverResolveCurrentInstanceByAddress
+	defer func() {
+		awsFailoverLoadCredential = originalLoadCredential
+		awsFailoverResolveCurrentInstanceByAddress = originalResolveCurrent
+	}()
+
+	addressLookupCalled := false
+	awsFailoverLoadCredential = func(userUUID, entryID string) (*awscloud.Addition, *awscloud.CredentialRecord, error) {
+		return &awscloud.Addition{ActiveRegion: "us-east-1"}, &awscloud.CredentialRecord{
+			ID:            entryID,
+			Name:          "cred-1",
+			DefaultRegion: "us-east-1",
+		}, nil
+	}
+	awsFailoverResolveCurrentInstanceByAddress = func(ctx context.Context, task models.FailoverTask, plan models.FailoverPlan, payload awsRebindPayload) (*currentInstanceCleanup, error) {
+		addressLookupCalled = true
+		if task.CurrentAddress != "203.0.113.20" {
+			t.Fatalf("expected task current address to be refreshed from watch client, got %q", task.CurrentAddress)
+		}
+		return &currentInstanceCleanup{
+			Ref: map[string]interface{}{
+				"provider":          "aws",
+				"service":           "lightsail",
+				"provider_entry_id": "cred-1",
+				"region":            "us-east-1",
+				"instance_name":     "ls-current",
+			},
+		}, nil
+	}
+
+	executionPlan, mode, reason, err := prepareAWSRebindExecutionPlan(context.Background(), models.FailoverTask{
+		UserID:          "user-1",
+		WatchClientUUID: "client-ls-1",
+	}, models.FailoverPlan{
+		Provider:        "aws",
+		ProviderEntryID: "cred-1",
+		ActionType:      models.FailoverActionRebindPublicIP,
+		Payload:         `{"service":"lightsail","region":"us-east-1","availability_zone":"us-east-1a","blueprint_id":"debian_12","bundle_id":"nano_3_0"}`,
+	})
+	if err != nil {
+		t.Fatalf("expected watch client address refresh to keep Lightsail on rebind path, got %v", err)
+	}
+	if mode != "rebind_existing_instance" {
+		t.Fatalf("expected rebind_existing_instance mode, got %q", mode)
+	}
+	if !strings.Contains(reason, "current IP") {
+		t.Fatalf("expected current IP reason after Lightsail address refresh, got %q", reason)
+	}
+	if !addressLookupCalled {
+		t.Fatal("expected current IP lookup to run after refreshing Lightsail address from watch client")
+	}
+
+	var payload awsRebindPayload
+	if err := json.Unmarshal([]byte(executionPlan.Payload), &payload); err != nil {
+		t.Fatalf("expected normalized Lightsail rebind payload, got %v", err)
+	}
+	if payload.InstanceName != "ls-current" {
+		t.Fatalf("expected discovered instance name ls-current, got %q", payload.InstanceName)
+	}
+}
+
 func TestSameAddressMatchesCIDRAndPlainIP(t *testing.T) {
 	if !sameAddress("2001:db8::10", "2001:db8::10/64") {
 		t.Fatal("expected plain ipv6 and cidr ipv6 to match")
