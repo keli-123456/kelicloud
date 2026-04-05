@@ -1,6 +1,8 @@
 package failover
 
 import (
+	"context"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -237,6 +239,112 @@ func TestFindAliyunDNSRecordExactMatchPrefersDesiredValueWithinDuplicates(t *tes
 	}, "@", "A", "默认", "203.0.113.20")
 	if match.RecordID != "record-keep" {
 		t.Fatalf("expected exact duplicate match to keep record-keep, got %#v", match)
+	}
+}
+
+func TestApplyDNSRecordRetriesTransientAliyunError(t *testing.T) {
+	originalApply := dnsApplyAliyunFunc
+	originalDelay := dnsApplyRetryDelay
+	originalAttempts := dnsApplyMaxAttempts
+	attempts := 0
+
+	dnsApplyAliyunFunc = func(ctx context.Context, userUUID, entryID, payloadJSON, ipv4, ipv6 string) (*dnsUpdateResult, error) {
+		attempts++
+		if attempts < 3 {
+			return nil, errors.New(`Get "https://alidns.aliyuncs.com/": read tcp 172.23.0.2:45970->47.241.205.161:443: read: connection reset by peer`)
+		}
+		return &dnsUpdateResult{
+			Provider: aliyunProviderName,
+			Type:     "A",
+			Value:    ipv4,
+		}, nil
+	}
+	dnsApplyRetryDelay = 0
+	dnsApplyMaxAttempts = 3
+	t.Cleanup(func() {
+		dnsApplyAliyunFunc = originalApply
+		dnsApplyRetryDelay = originalDelay
+		dnsApplyMaxAttempts = originalAttempts
+	})
+
+	result, err := applyDNSRecord(context.Background(), "user-1", aliyunProviderName, "entry-1", `{"domain_name":"example.com","rr":"@"}`, "203.0.113.20", "")
+	if err != nil {
+		t.Fatalf("expected transient aliyun dns error to recover after retry, got %v", err)
+	}
+	if attempts != 3 {
+		t.Fatalf("expected 3 apply attempts, got %d", attempts)
+	}
+	if result == nil || result.Value != "203.0.113.20" {
+		t.Fatalf("expected successful dns update result, got %#v", result)
+	}
+}
+
+func TestApplyDNSRecordDoesNotRetryNonRetryableAliyunError(t *testing.T) {
+	originalApply := dnsApplyAliyunFunc
+	originalDelay := dnsApplyRetryDelay
+	originalAttempts := dnsApplyMaxAttempts
+	attempts := 0
+
+	dnsApplyAliyunFunc = func(ctx context.Context, userUUID, entryID, payloadJSON, ipv4, ipv6 string) (*dnsUpdateResult, error) {
+		attempts++
+		return nil, errors.New("aliyun dns request failed: 400 Bad Request: DomainRecordDuplicate")
+	}
+	dnsApplyRetryDelay = 0
+	dnsApplyMaxAttempts = 3
+	t.Cleanup(func() {
+		dnsApplyAliyunFunc = originalApply
+		dnsApplyRetryDelay = originalDelay
+		dnsApplyMaxAttempts = originalAttempts
+	})
+
+	_, err := applyDNSRecord(context.Background(), "user-1", aliyunProviderName, "entry-1", `{"domain_name":"example.com","rr":"@"}`, "203.0.113.20", "")
+	if err == nil {
+		t.Fatal("expected non-retryable aliyun dns error")
+	}
+	if attempts != 1 {
+		t.Fatalf("expected duplicate-record error not to retry, got %d attempts", attempts)
+	}
+}
+
+func TestIsRetryableDNSApplyError(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{
+			name: "connection reset",
+			err:  errors.New(`Get "https://alidns.aliyuncs.com/": read: connection reset by peer`),
+			want: true,
+		},
+		{
+			name: "timeout",
+			err:  context.DeadlineExceeded,
+			want: true,
+		},
+		{
+			name: "rate limited",
+			err:  errors.New("cloudflare api request failed: 429 Too Many Requests"),
+			want: true,
+		},
+		{
+			name: "duplicate record",
+			err:  errors.New("aliyun dns request failed: 400 Bad Request: DomainRecordDuplicate"),
+			want: false,
+		},
+		{
+			name: "invalid credential",
+			err:  errors.New("aliyun dns request failed: 403 Forbidden: SignatureDoesNotMatch"),
+			want: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isRetryableDNSApplyError(tc.err); got != tc.want {
+				t.Fatalf("expected retryable=%v, got %v for %v", tc.want, got, tc.err)
+			}
+		})
 	}
 }
 

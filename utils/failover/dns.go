@@ -22,6 +22,13 @@ import (
 	"github.com/komari-monitor/komari/utils/outboundproxy"
 )
 
+var (
+	dnsApplyCloudflareFunc = applyCloudflareDNSRecord
+	dnsApplyAliyunFunc     = applyAliyunDNSRecord
+	dnsApplyMaxAttempts    = 3
+	dnsApplyRetryDelay     = 2 * time.Second
+)
+
 type dnsUpdateResult struct {
 	Provider     string                 `json:"provider"`
 	ID           string                 `json:"id,omitempty"`
@@ -228,14 +235,40 @@ func LoadDNSCatalog(userUUID, providerName, entryID, zoneName, domainName string
 }
 
 func applyDNSRecord(ctx context.Context, userUUID, providerName, entryID, payloadJSON, ipv4, ipv6 string) (*dnsUpdateResult, error) {
-	switch strings.ToLower(strings.TrimSpace(providerName)) {
-	case cloudflareProviderName:
-		return applyCloudflareDNSRecord(ctx, userUUID, entryID, payloadJSON, ipv4, ipv6)
-	case aliyunProviderName:
-		return applyAliyunDNSRecord(ctx, userUUID, entryID, payloadJSON, ipv4, ipv6)
-	default:
-		return nil, fmt.Errorf("unsupported dns provider: %s", providerName)
+	providerName = strings.ToLower(strings.TrimSpace(providerName))
+	var (
+		lastResult *dnsUpdateResult
+		lastErr    error
+	)
+
+	for attempt := 1; attempt <= dnsApplyMaxAttempts; attempt++ {
+		var (
+			result *dnsUpdateResult
+			err    error
+		)
+		switch providerName {
+		case cloudflareProviderName:
+			result, err = dnsApplyCloudflareFunc(ctx, userUUID, entryID, payloadJSON, ipv4, ipv6)
+		case aliyunProviderName:
+			result, err = dnsApplyAliyunFunc(ctx, userUUID, entryID, payloadJSON, ipv4, ipv6)
+		default:
+			return nil, fmt.Errorf("unsupported dns provider: %s", providerName)
+		}
+		if err == nil {
+			return result, nil
+		}
+
+		lastResult = result
+		lastErr = err
+		if !isRetryableDNSApplyError(err) || attempt >= dnsApplyMaxAttempts {
+			break
+		}
+		if waitErr := waitContextOrDelay(ctx, dnsApplyRetryDelay); waitErr != nil {
+			return lastResult, waitErr
+		}
 	}
+
+	return lastResult, lastErr
 }
 
 func ApplyDNSRecord(userUUID, providerName, entryID, payloadJSON, ipv4, ipv6 string) (*DNSUpdateResult, error) {
@@ -246,6 +279,45 @@ const (
 	dnsVerificationMaxAttempts = 3
 	dnsVerificationRetryDelay  = 2 * time.Second
 )
+
+func isRetryableDNSApplyError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, net.ErrClosed) {
+		return true
+	}
+
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return true
+	}
+
+	message := strings.ToLower(strings.TrimSpace(err.Error()))
+	for _, marker := range []string{
+		"connection reset by peer",
+		"broken pipe",
+		"tls handshake timeout",
+		"unexpected eof",
+		"timeout",
+		"temporarily unavailable",
+		"too many requests",
+		"rate limit",
+		"429",
+		"500",
+		"502",
+		"503",
+		"504",
+		"bad gateway",
+		"service unavailable",
+		"gateway timeout",
+	} {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+	return false
+}
 
 func verifyDNSRecord(ctx context.Context, userUUID, providerName, entryID, payloadJSON, ipv4, ipv6 string) (*dnsVerificationResult, error) {
 	providerName = strings.ToLower(strings.TrimSpace(providerName))
