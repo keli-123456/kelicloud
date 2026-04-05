@@ -216,6 +216,30 @@ func TestEvaluateDNSVerificationRecordsMatchesAliyunNormalizedLines(t *testing.T
 	}
 }
 
+func TestFindAliyunDNSRecordExactMatchPrefersDesiredValueWithinDuplicates(t *testing.T) {
+	match := findAliyunDNSRecordExactMatch([]aliyunDNSRecord{
+		{
+			RecordID: "record-old",
+			RR:       "@",
+			Type:     "A",
+			Value:    "198.51.100.10",
+			TTL:      600,
+			Line:     "默认",
+		},
+		{
+			RecordID: "record-keep",
+			RR:       "@",
+			Type:     "A",
+			Value:    "203.0.113.20",
+			TTL:      600,
+			Line:     "default",
+		},
+	}, "@", "A", "默认", "203.0.113.20")
+	if match.RecordID != "record-keep" {
+		t.Fatalf("expected exact duplicate match to keep record-keep, got %#v", match)
+	}
+}
+
 func TestFormatAliyunRPCErrorIncludesAPIErrorDetails(t *testing.T) {
 	err := formatAliyunRPCError("400 Bad Request", []byte(`{"Code":"InvalidTTL","Message":"invalid ttl","RequestId":"req-123"}`))
 	if err == nil {

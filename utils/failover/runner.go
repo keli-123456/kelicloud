@@ -40,6 +40,8 @@ var (
 	awsFailoverGetEC2InstanceDetail            = awscloud.GetInstanceDetail
 	awsFailoverGetLightsailDetail              = awscloud.GetLightsailInstanceDetail
 	awsFailoverResolveCurrentInstanceByAddress = resolveAWSCurrentInstanceByAddress
+	failoverDNSApplyFunc                       = applyDNSRecord
+	failoverDNSVerifyFunc                      = verifyDNSRecord
 )
 
 const interruptedExecutionMessage = "failover execution was interrupted before completion"
@@ -1721,6 +1723,12 @@ func (r *executionRunner) finalizePlan(plan models.FailoverPlan, outcome *action
 			err = rollbackErr
 		}
 	}()
+	defer func() {
+		if err == nil || outcome == nil || outcome.Rollback != nil {
+			return
+		}
+		r.syncTaskOutletTracking(outcome)
+	}()
 
 	targetClientUUID := strings.TrimSpace(outcome.TargetClientUUID)
 	if targetClientUUID == "" && strings.TrimSpace(outcome.AutoConnectGroup) != "" {
@@ -1802,7 +1810,7 @@ func (r *executionRunner) finalizePlan(plan models.FailoverPlan, outcome *action
 	_ = failoverdb.UpdateExecutionFields(r.execution.ID, map[string]interface{}{
 		"status": models.FailoverExecutionStatusSwitchingDNS,
 	})
-	dnsResult, err := applyDNSRecord(r.ctx, r.task.UserID, r.task.DNSProvider, r.task.DNSEntryID, r.task.DNSPayload, outcome.IPv4, outcome.IPv6)
+	dnsResult, err := failoverDNSApplyFunc(r.ctx, r.task.UserID, r.task.DNSProvider, r.task.DNSEntryID, r.task.DNSPayload, outcome.IPv4, outcome.IPv6)
 	if err != nil {
 		_ = failoverdb.UpdateExecutionFields(r.execution.ID, map[string]interface{}{
 			"dns_status": models.FailoverDNSStatusFailed,
@@ -1811,7 +1819,7 @@ func (r *executionRunner) finalizePlan(plan models.FailoverPlan, outcome *action
 		r.finishStep(dnsStep, models.FailoverStepStatusFailed, err.Error(), nil)
 		return err
 	}
-	dnsVerification, verifyErr := verifyDNSRecord(r.ctx, r.task.UserID, r.task.DNSProvider, r.task.DNSEntryID, r.task.DNSPayload, outcome.IPv4, outcome.IPv6)
+	dnsVerification, verifyErr := failoverDNSVerifyFunc(r.ctx, r.task.UserID, r.task.DNSProvider, r.task.DNSEntryID, r.task.DNSPayload, outcome.IPv4, outcome.IPv6)
 	if dnsResult == nil {
 		dnsResult = &dnsUpdateResult{
 			Provider: strings.TrimSpace(r.task.DNSProvider),
@@ -2558,18 +2566,11 @@ finalizeExecution:
 		"last_succeeded_at":     models.FromTime(now),
 		"trigger_failure_count": 0,
 	}
-	if outcome != nil {
-		if nextClientUUID := strings.TrimSpace(firstNonEmpty(outcome.NewClientUUID, outcome.TargetClientUUID)); nextClientUUID != "" {
-			taskUpdates["watch_client_uuid"] = nextClientUUID
-		}
-		if nextAddress := primaryOutcomeAddress(outcome); nextAddress != "" {
-			taskUpdates["current_address"] = nextAddress
-		}
-		if nextRef := effectiveCurrentInstanceRef(outcome); len(nextRef) > 0 {
-			taskUpdates["current_instance_ref"] = marshalJSON(nextRef)
-		}
+	for key, value := range buildTaskOutletTrackingFields(outcome) {
+		taskUpdates[key] = value
 	}
 	_ = failoverdb.UpdateTaskFields(r.task.ID, taskUpdates)
+	applyTaskFieldUpdates(&r.task, taskUpdates)
 	r.succeeded = true
 }
 
@@ -2634,6 +2635,61 @@ func effectiveCurrentInstanceRef(outcome *actionOutcome) map[string]interface{} 
 		return outcome.OldInstanceRef
 	}
 	return nil
+}
+
+func buildTaskOutletTrackingFields(outcome *actionOutcome) map[string]interface{} {
+	if outcome == nil {
+		return nil
+	}
+
+	fields := map[string]interface{}{}
+	if nextClientUUID := strings.TrimSpace(firstNonEmpty(outcome.NewClientUUID, outcome.TargetClientUUID)); nextClientUUID != "" {
+		fields["watch_client_uuid"] = nextClientUUID
+	}
+	if nextAddress := primaryOutcomeAddress(outcome); nextAddress != "" {
+		fields["current_address"] = nextAddress
+	}
+	if nextRef := effectiveCurrentInstanceRef(outcome); len(nextRef) > 0 {
+		fields["current_instance_ref"] = marshalJSON(nextRef)
+	}
+	if len(fields) == 0 {
+		return nil
+	}
+	return fields
+}
+
+func applyTaskFieldUpdates(task *models.FailoverTask, fields map[string]interface{}) {
+	if task == nil || len(fields) == 0 {
+		return
+	}
+	if watchClientUUID := strings.TrimSpace(stringMapValue(fields, "watch_client_uuid")); watchClientUUID != "" {
+		task.WatchClientUUID = watchClientUUID
+	}
+	if currentAddress := strings.TrimSpace(stringMapValue(fields, "current_address")); currentAddress != "" {
+		task.CurrentAddress = currentAddress
+	}
+	if rawCurrentInstanceRef, ok := fields["current_instance_ref"]; ok && rawCurrentInstanceRef != nil {
+		task.CurrentInstanceRef = strings.TrimSpace(fmt.Sprintf("%v", rawCurrentInstanceRef))
+	}
+	if lastStatus := strings.TrimSpace(stringMapValue(fields, "last_status")); lastStatus != "" {
+		task.LastStatus = lastStatus
+	}
+	if rawLastMessage, ok := fields["last_message"]; ok && rawLastMessage != nil {
+		task.LastMessage = strings.TrimSpace(fmt.Sprintf("%v", rawLastMessage))
+	}
+}
+
+func (r *executionRunner) syncTaskOutletTracking(outcome *actionOutcome) {
+	fields := buildTaskOutletTrackingFields(outcome)
+	if len(fields) == 0 {
+		return
+	}
+	if r != nil && r.task.ID > 0 {
+		_ = failoverdb.UpdateTaskFields(r.task.ID, fields)
+	}
+	if r != nil {
+		applyTaskFieldUpdates(&r.task, fields)
+	}
 }
 
 func parseJSONMap(raw string) map[string]interface{} {

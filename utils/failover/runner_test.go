@@ -965,6 +965,192 @@ func TestInvalidateProvisionedEntrySnapshotClearsTrackedCapacity(t *testing.T) {
 	}
 }
 
+func TestFinalizePlanPersistsOutletTrackingWhenDNSFailsAfterRebind(t *testing.T) {
+	prepareRetryTestDB(t)
+
+	db := dbcore.GetDBInstance()
+	now := models.FromTime(time.Now())
+	task := &models.FailoverTask{
+		UserID:             "runner-dns-failure-user",
+		Name:               "runner-dns-failure-task",
+		Enabled:            true,
+		WatchClientUUID:    "client-old",
+		CurrentAddress:     "198.51.100.10",
+		CurrentInstanceRef: `{"provider":"aws","service":"ec2","provider_entry_id":"cred-old","region":"us-east-1","instance_id":"i-old"}`,
+		DNSProvider:        aliyunProviderName,
+		DNSEntryID:         "dns-entry-1",
+		DNSPayload:         `{"domain_name":"example.com","rr":"@"}`,
+		CreatedAt:          now,
+		UpdatedAt:          now,
+	}
+	if err := db.Create(task).Error; err != nil {
+		t.Fatalf("failed to create finalize-plan task: %v", err)
+	}
+
+	execution := &models.FailoverExecution{
+		TaskID:          task.ID,
+		Status:          models.FailoverExecutionStatusRebindingIP,
+		WatchClientUUID: task.WatchClientUUID,
+		StartedAt:       now,
+		CreatedAt:       now,
+		UpdatedAt:       now,
+	}
+	if err := db.Create(execution).Error; err != nil {
+		t.Fatalf("failed to create finalize-plan execution: %v", err)
+	}
+
+	originalApply := failoverDNSApplyFunc
+	originalVerify := failoverDNSVerifyFunc
+	failoverDNSApplyFunc = func(ctx context.Context, userUUID, providerName, entryID, payloadJSON, ipv4, ipv6 string) (*dnsUpdateResult, error) {
+		return nil, errors.New("aliyun dns request failed: DomainRecordDuplicate")
+	}
+	failoverDNSVerifyFunc = func(ctx context.Context, userUUID, providerName, entryID, payloadJSON, ipv4, ipv6 string) (*dnsVerificationResult, error) {
+		t.Fatal("did not expect dns verification after apply failure")
+		return nil, nil
+	}
+	t.Cleanup(func() {
+		failoverDNSApplyFunc = originalApply
+		failoverDNSVerifyFunc = originalVerify
+	})
+
+	runner := &executionRunner{
+		task:      *task,
+		execution: execution,
+		ctx:       context.Background(),
+	}
+	err := runner.finalizePlan(models.FailoverPlan{
+		ActionType: models.FailoverActionRebindPublicIP,
+	}, &actionOutcome{
+		IPv4:             "203.0.113.20",
+		TargetClientUUID: "client-new",
+		NewClientUUID:    "client-new",
+		OldInstanceRef: map[string]interface{}{
+			"provider":          "aws",
+			"service":           "ec2",
+			"provider_entry_id": "cred-new",
+			"region":            "us-west-2",
+			"instance_id":       "i-rebound",
+		},
+		NewAddresses: map[string]interface{}{
+			"public_ip": "203.0.113.20",
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "DomainRecordDuplicate") {
+		t.Fatalf("expected dns apply failure, got %v", err)
+	}
+
+	var reloadedTask models.FailoverTask
+	if err := db.First(&reloadedTask, task.ID).Error; err != nil {
+		t.Fatalf("failed to reload finalize-plan task: %v", err)
+	}
+	if reloadedTask.CurrentAddress != "203.0.113.20" {
+		t.Fatalf("expected task current_address to track rebound ip, got %q", reloadedTask.CurrentAddress)
+	}
+	if reloadedTask.WatchClientUUID != "client-new" {
+		t.Fatalf("expected task watch_client_uuid to update, got %q", reloadedTask.WatchClientUUID)
+	}
+	currentRef := parseJSONMap(reloadedTask.CurrentInstanceRef)
+	if stringMapValue(currentRef, "instance_id") != "i-rebound" {
+		t.Fatalf("expected task current_instance_ref to keep rebound instance, got %#v", currentRef)
+	}
+	if runner.task.CurrentAddress != "203.0.113.20" {
+		t.Fatalf("expected runner task current_address to update in-memory, got %q", runner.task.CurrentAddress)
+	}
+}
+
+func TestFinalizePlanKeepsTaskTrackingWhenDNSFailsAndOutcomeRollsBack(t *testing.T) {
+	prepareRetryTestDB(t)
+
+	db := dbcore.GetDBInstance()
+	now := models.FromTime(time.Now())
+	task := &models.FailoverTask{
+		UserID:             "runner-dns-rollback-user",
+		Name:               "runner-dns-rollback-task",
+		Enabled:            true,
+		WatchClientUUID:    "client-old",
+		CurrentAddress:     "198.51.100.11",
+		CurrentInstanceRef: `{"provider":"aws","service":"ec2","provider_entry_id":"cred-old","region":"us-east-1","instance_id":"i-old"}`,
+		DNSProvider:        aliyunProviderName,
+		DNSEntryID:         "dns-entry-1",
+		DNSPayload:         `{"domain_name":"example.com","rr":"@"}`,
+		CreatedAt:          now,
+		UpdatedAt:          now,
+	}
+	if err := db.Create(task).Error; err != nil {
+		t.Fatalf("failed to create rollback finalize-plan task: %v", err)
+	}
+
+	execution := &models.FailoverExecution{
+		TaskID:          task.ID,
+		Status:          models.FailoverExecutionStatusProvisioning,
+		WatchClientUUID: task.WatchClientUUID,
+		StartedAt:       now,
+		CreatedAt:       now,
+		UpdatedAt:       now,
+	}
+	if err := db.Create(execution).Error; err != nil {
+		t.Fatalf("failed to create rollback finalize-plan execution: %v", err)
+	}
+
+	originalApply := failoverDNSApplyFunc
+	originalVerify := failoverDNSVerifyFunc
+	failoverDNSApplyFunc = func(ctx context.Context, userUUID, providerName, entryID, payloadJSON, ipv4, ipv6 string) (*dnsUpdateResult, error) {
+		return nil, errors.New("dns apply failed")
+	}
+	failoverDNSVerifyFunc = func(ctx context.Context, userUUID, providerName, entryID, payloadJSON, ipv4, ipv6 string) (*dnsVerificationResult, error) {
+		t.Fatal("did not expect dns verification after apply failure")
+		return nil, nil
+	}
+	t.Cleanup(func() {
+		failoverDNSApplyFunc = originalApply
+		failoverDNSVerifyFunc = originalVerify
+	})
+
+	rollbackCalled := false
+	runner := &executionRunner{
+		task:      *task,
+		execution: execution,
+		ctx:       context.Background(),
+	}
+	err := runner.finalizePlan(models.FailoverPlan{
+		ActionType: models.FailoverActionProvisionInstance,
+	}, &actionOutcome{
+		IPv4: "203.0.113.21",
+		NewInstanceRef: map[string]interface{}{
+			"provider":          "aws",
+			"service":           "ec2",
+			"provider_entry_id": "cred-new",
+			"region":            "us-west-2",
+			"instance_id":       "i-new",
+		},
+		RollbackLabel: "terminate failed instance",
+		Rollback: func(ctx context.Context) error {
+			rollbackCalled = true
+			return nil
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "dns apply failed") {
+		t.Fatalf("expected dns apply failure, got %v", err)
+	}
+	if !rollbackCalled {
+		t.Fatal("expected rollback to run for rollbackable outcome")
+	}
+
+	var reloadedTask models.FailoverTask
+	if err := db.First(&reloadedTask, task.ID).Error; err != nil {
+		t.Fatalf("failed to reload rollback finalize-plan task: %v", err)
+	}
+	if reloadedTask.CurrentAddress != "198.51.100.11" {
+		t.Fatalf("expected task current_address to remain old after rollback, got %q", reloadedTask.CurrentAddress)
+	}
+	if currentRef := parseJSONMap(reloadedTask.CurrentInstanceRef); stringMapValue(currentRef, "instance_id") != "i-old" {
+		t.Fatalf("expected task current_instance_ref to remain old after rollback, got %#v", currentRef)
+	}
+	if runner.task.CurrentAddress != "198.51.100.11" {
+		t.Fatalf("expected runner task current_address to remain old in-memory, got %q", runner.task.CurrentAddress)
+	}
+}
+
 func TestResolveCurrentInstanceCleanupFromRefTreatsMissingDigitalOceanTokenAsManualReview(t *testing.T) {
 	configureRunnerSQLiteDB(t)
 

@@ -886,9 +886,16 @@ func applyAliyunDNSRecord(ctx context.Context, userUUID, entryID, payloadJSON, i
 		recordIDs := make([]string, 0, len(lines))
 		for _, line := range lines {
 			existingMatch := findAliyunDNSRecord(existingRecords, rr, currentRecordType, line)
-			recordID, err := client.upsertRecord(contextOrBackground(ctx), strings.TrimSpace(existingMatch.RecordID), domainName, rr, currentRecordType, recordValue, ttl, line)
-			if err != nil {
-				return nil, normalizeExecutionStopError(err)
+			exactMatch := findAliyunDNSRecordExactMatch(existingRecords, rr, currentRecordType, line, recordValue)
+			if strings.TrimSpace(exactMatch.RecordID) != "" {
+				existingMatch = exactMatch
+			}
+			recordID := strings.TrimSpace(existingMatch.RecordID)
+			if recordID == "" || (strings.TrimSpace(exactMatch.RecordID) == "" && (!sameAliyunRecordValue(existingMatch.Value, recordValue) || existingMatch.TTL != ttl)) {
+				recordID, err = client.upsertRecord(contextOrBackground(ctx), recordID, domainName, rr, currentRecordType, recordValue, ttl, line)
+				if err != nil {
+					return nil, normalizeExecutionStopError(err)
+				}
 			}
 			recordIDs = append(recordIDs, recordID)
 			for _, existingRecord := range existingRecords {
@@ -1283,9 +1290,29 @@ func sameAliyunRecordIdentity(record aliyunDNSRecord, rr, recordType string) boo
 	return sameAliyunRecordRR(record.RR, rr) && strings.EqualFold(strings.TrimSpace(record.Type), strings.TrimSpace(recordType))
 }
 
+func sameAliyunRecordValue(left, right string) bool {
+	if sameAddress(left, right) {
+		return true
+	}
+	return strings.EqualFold(strings.TrimSpace(left), strings.TrimSpace(right))
+}
+
 func findAliyunDNSRecord(records []aliyunDNSRecord, rr, recordType, line string) aliyunDNSRecord {
 	for _, record := range records {
 		if !sameAliyunRecordIdentity(record, rr, recordType) || !sameAliyunRecordLine(record.Line, line) {
+			continue
+		}
+		return record
+	}
+	return aliyunDNSRecord{}
+}
+
+func findAliyunDNSRecordExactMatch(records []aliyunDNSRecord, rr, recordType, line, value string) aliyunDNSRecord {
+	for _, record := range records {
+		if !sameAliyunRecordIdentity(record, rr, recordType) || !sameAliyunRecordLine(record.Line, line) {
+			continue
+		}
+		if !sameAliyunRecordValue(record.Value, value) {
 			continue
 		}
 		return record
