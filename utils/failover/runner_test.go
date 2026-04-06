@@ -28,8 +28,37 @@ func configureRunnerSQLiteDB(t *testing.T) {
 	_ = os.Remove(flags.DatabaseFile)
 
 	db := dbcore.GetDBInstance()
-	if err := db.AutoMigrate(&models.CloudProvider{}); err != nil {
+	if err := db.AutoMigrate(&models.CloudProvider{}, &models.FailoverPendingCleanup{}); err != nil {
 		t.Fatalf("failed to migrate cloud provider schema: %v", err)
+	}
+}
+
+func resetRunnerRuntimeStateForTest(t *testing.T) {
+	t.Helper()
+
+	runningTasksMu.Lock()
+	runningTasks = map[uint]struct{}{}
+	runningTasksMu.Unlock()
+
+	runningTargetMu.Lock()
+	runningTargets = map[string]uint{}
+	runningTargetMu.Unlock()
+
+	pendingRollbackCleanupRunMu.Lock()
+	pendingRollbackCleanupRunActive = false
+	pendingRollbackCleanupRunMu.Unlock()
+
+	pendingRollbackCleanupResolveFunc = resolveCurrentInstanceCleanupFromRef
+}
+
+func resetRunnerPendingCleanupTable(t *testing.T) {
+	t.Helper()
+
+	configureRunnerSQLiteDB(t)
+	resetRunnerRuntimeStateForTest(t)
+	db := dbcore.GetDBInstance()
+	if err := db.Exec("DELETE FROM failover_pending_cleanups").Error; err != nil {
+		t.Fatalf("failed to reset pending cleanup table: %v", err)
 	}
 }
 
@@ -216,6 +245,33 @@ func TestPickPreferredAutoConnectClientIgnoresOlderSameGroupClients(t *testing.T
 	if got := pickPreferredAutoConnectClient(candidates, startedAt, nil); got != "" {
 		t.Fatalf("expected no client to be selected, got %q", got)
 	}
+}
+
+func TestFailoverTargetRunKeyPrefersTrackedInstanceIdentity(t *testing.T) {
+	key, err := failoverTargetRunKey(models.FailoverTask{
+		UserID:             "user-a",
+		WatchClientUUID:    "client-a",
+		CurrentAddress:     "203.0.113.10",
+		CurrentInstanceRef: `{"provider":"digitalocean","provider_entry_id":"token-1","droplet_id":123}`,
+	})
+	if err != nil {
+		t.Fatalf("expected no error building target run key, got %v", err)
+	}
+	if key != "user-a|ref|digitalocean|token-1|droplet|123" {
+		t.Fatalf("unexpected target run key %q", key)
+	}
+}
+
+func TestClaimTargetRunRejectsConcurrentOutletHandling(t *testing.T) {
+	resetRunnerRuntimeStateForTest(t)
+
+	if activeTaskID, claimed := claimTargetRun("user-a|watch|client-a", 1); !claimed || activeTaskID != 0 {
+		t.Fatalf("expected first target claim to succeed, got claimed=%v active=%d", claimed, activeTaskID)
+	}
+	if activeTaskID, claimed := claimTargetRun("user-a|watch|client-a", 2); claimed || activeTaskID != 1 {
+		t.Fatalf("expected second target claim to fail with task 1, got claimed=%v active=%d", claimed, activeTaskID)
+	}
+	releaseTargetRun("user-a|watch|client-a", 1)
 }
 
 func TestNormalizeIPAddressAcceptsCIDRNotation(t *testing.T) {
@@ -1713,5 +1769,97 @@ func TestBuildUnresolvedCurrentInstanceCleanupAssessmentMarksManualReview(t *tes
 	}
 	if got := stringMapValue(assessment.Result, "current_address"); got != "203.0.113.10" {
 		t.Fatalf("expected current address 203.0.113.10, got %q", got)
+	}
+}
+
+func TestQueuePendingRollbackCleanupPersistsFailedNewInstance(t *testing.T) {
+	resetRunnerPendingCleanupTable(t)
+	db := dbcore.GetDBInstance()
+
+	runner := &executionRunner{
+		task: models.FailoverTask{
+			ID:     11,
+			UserID: "user-a",
+		},
+		execution: &models.FailoverExecution{ID: 22},
+	}
+	pendingCleanup, err := runner.queuePendingRollbackCleanup(&actionOutcome{
+		NewInstanceRef: map[string]interface{}{
+			"provider":          "digitalocean",
+			"provider_entry_id": "token-1",
+			"droplet_id":        123,
+		},
+		RollbackLabel: "delete digitalocean droplet 123",
+	}, errors.New("delete failed"))
+	if err != nil {
+		t.Fatalf("expected pending cleanup to be persisted, got %v", err)
+	}
+	if pendingCleanup == nil {
+		t.Fatal("expected pending cleanup row to be returned")
+	}
+
+	var stored models.FailoverPendingCleanup
+	if err := db.First(&stored, pendingCleanup.ID).Error; err != nil {
+		t.Fatalf("failed to reload pending cleanup: %v", err)
+	}
+	if stored.Provider != "digitalocean" || stored.ResourceType != "droplet" || stored.ResourceID != "123" {
+		t.Fatalf("unexpected stored pending cleanup identity: %+v", stored)
+	}
+	if stored.AttemptCount != 1 {
+		t.Fatalf("expected initial attempt count 1, got %d", stored.AttemptCount)
+	}
+	if stored.Status != models.FailoverPendingCleanupStatusPending {
+		t.Fatalf("expected pending status, got %q", stored.Status)
+	}
+}
+
+func TestRunPendingRollbackCleanupRetriesMarksCleanupSucceeded(t *testing.T) {
+	resetRunnerPendingCleanupTable(t)
+	db := dbcore.GetDBInstance()
+
+	entry := models.FailoverPendingCleanup{
+		UserID:          "user-a",
+		TaskID:          11,
+		ExecutionID:     22,
+		Provider:        "digitalocean",
+		ProviderEntryID: "token-1",
+		ResourceType:    "droplet",
+		ResourceID:      "123",
+		InstanceRef:     `{"provider":"digitalocean","provider_entry_id":"token-1","droplet_id":123}`,
+		CleanupLabel:    "delete digitalocean droplet 123",
+		Status:          models.FailoverPendingCleanupStatusPending,
+	}
+	if err := db.Create(&entry).Error; err != nil {
+		t.Fatalf("failed to seed pending cleanup: %v", err)
+	}
+
+	cleanupCalled := false
+	originalResolve := pendingRollbackCleanupResolveFunc
+	pendingRollbackCleanupResolveFunc = func(ctx context.Context, userUUID string, ref map[string]interface{}) (*currentInstanceCleanup, error) {
+		return &currentInstanceCleanup{
+			Ref: ref,
+			Cleanup: func(ctx context.Context) error {
+				cleanupCalled = true
+				return nil
+			},
+		}, nil
+	}
+	defer func() {
+		pendingRollbackCleanupResolveFunc = originalResolve
+	}()
+
+	if err := runPendingRollbackCleanupRetries(); err != nil {
+		t.Fatalf("expected pending cleanup retries to succeed, got %v", err)
+	}
+	if !cleanupCalled {
+		t.Fatal("expected cleanup callback to run")
+	}
+
+	var stored models.FailoverPendingCleanup
+	if err := db.First(&stored, entry.ID).Error; err != nil {
+		t.Fatalf("failed to reload pending cleanup row: %v", err)
+	}
+	if stored.Status != models.FailoverPendingCleanupStatusSucceeded {
+		t.Fatalf("expected succeeded pending cleanup status, got %q", stored.Status)
 	}
 }

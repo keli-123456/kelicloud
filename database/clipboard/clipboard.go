@@ -77,13 +77,13 @@ func buildClipboardSearchTokens(rawSearch string) []string {
 	return strings.Fields(strings.ToLower(strings.TrimSpace(rawSearch)))
 }
 
-func buildClipboardFuzzyPattern(token string) string {
+func buildClipboardContainsPattern(token string) string {
 	if token == "" {
 		return "%"
 	}
 
 	var builder strings.Builder
-	builder.Grow((len(token) * 2) + 2)
+	builder.Grow(len(token) + 2)
 	builder.WriteByte('%')
 	for _, char := range token {
 		switch char {
@@ -91,14 +91,14 @@ func buildClipboardFuzzyPattern(token string) string {
 			builder.WriteByte(clipboardLikeEscapeChar)
 		}
 		builder.WriteRune(char)
-		builder.WriteByte('%')
 	}
+	builder.WriteByte('%')
 	return builder.String()
 }
 
 func applyClipboardSearchQuery(query *gorm.DB, rawSearch string) *gorm.DB {
 	for _, token := range buildClipboardSearchTokens(rawSearch) {
-		pattern := buildClipboardFuzzyPattern(token)
+		pattern := buildClipboardContainsPattern(token)
 		query = query.Where(
 			`(
 				LOWER(name) LIKE ? ESCAPE '!'

@@ -1,6 +1,7 @@
 package failover
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -277,6 +278,187 @@ func TestListTasksByUserWithDBUsesStableCreationOrder(t *testing.T) {
 	if taskList[1].ID != secondTask.ID {
 		t.Fatalf("expected second created task second, got task id %d", taskList[1].ID)
 	}
+}
+
+func TestCreateOrUpdatePendingCleanupUpsertsByResource(t *testing.T) {
+	db := openFailoverTestDB(t)
+	if err := db.AutoMigrate(&models.FailoverPendingCleanup{}); err != nil {
+		t.Fatalf("failed to migrate pending cleanup schema: %v", err)
+	}
+
+	initialNextRetry := models.FromTime(time.Now().Add(2 * time.Minute))
+	initial, err := createOrUpdatePendingCleanupWithDBForTest(db, &models.FailoverPendingCleanup{
+		UserID:          "user-a",
+		TaskID:          1,
+		ExecutionID:     2,
+		Provider:        "digitalocean",
+		ProviderEntryID: "token-1",
+		ResourceType:    "droplet",
+		ResourceID:      "123",
+		InstanceRef:     `{"provider":"digitalocean","provider_entry_id":"token-1","droplet_id":123}`,
+		CleanupLabel:    "delete digitalocean droplet 123",
+		Status:          models.FailoverPendingCleanupStatusPending,
+		AttemptCount:    1,
+		LastError:       "first failure",
+		NextRetryAt:     &initialNextRetry,
+	})
+	if err != nil {
+		t.Fatalf("failed to create initial pending cleanup: %v", err)
+	}
+
+	updatedNextRetry := models.FromTime(time.Now().Add(10 * time.Minute))
+	updated, err := createOrUpdatePendingCleanupWithDBForTest(db, &models.FailoverPendingCleanup{
+		UserID:          "user-a",
+		TaskID:          3,
+		ExecutionID:     4,
+		Provider:        "digitalocean",
+		ProviderEntryID: "token-1",
+		ResourceType:    "droplet",
+		ResourceID:      "123",
+		InstanceRef:     `{"provider":"digitalocean","provider_entry_id":"token-1","droplet_id":123}`,
+		CleanupLabel:    "delete digitalocean droplet 123",
+		Status:          models.FailoverPendingCleanupStatusPending,
+		AttemptCount:    2,
+		LastError:       "second failure",
+		NextRetryAt:     &updatedNextRetry,
+	})
+	if err != nil {
+		t.Fatalf("failed to update pending cleanup: %v", err)
+	}
+	if updated.ID != initial.ID {
+		t.Fatalf("expected upsert to reuse row %d, got %d", initial.ID, updated.ID)
+	}
+	if updated.TaskID != 3 || updated.ExecutionID != 4 {
+		t.Fatalf("expected identifiers to update, got task=%d execution=%d", updated.TaskID, updated.ExecutionID)
+	}
+	if updated.AttemptCount != 2 {
+		t.Fatalf("expected attempt_count=2, got %d", updated.AttemptCount)
+	}
+	if updated.LastError != "second failure" {
+		t.Fatalf("expected updated last_error, got %q", updated.LastError)
+	}
+
+	var total int64
+	if err := db.Model(&models.FailoverPendingCleanup{}).Count(&total).Error; err != nil {
+		t.Fatalf("failed to count pending cleanup rows: %v", err)
+	}
+	if total != 1 {
+		t.Fatalf("expected exactly one pending cleanup row, got %d", total)
+	}
+}
+
+func TestListDuePendingCleanupsWithDBFiltersStatusAndRetryTime(t *testing.T) {
+	db := openFailoverTestDB(t)
+	if err := db.AutoMigrate(&models.FailoverPendingCleanup{}); err != nil {
+		t.Fatalf("failed to migrate pending cleanup schema: %v", err)
+	}
+
+	now := time.Now()
+	dueTime := models.FromTime(now.Add(-1 * time.Minute))
+	futureTime := models.FromTime(now.Add(10 * time.Minute))
+	rows := []models.FailoverPendingCleanup{
+		{
+			UserID:       "user-a",
+			Provider:     "digitalocean",
+			ResourceType: "droplet",
+			ResourceID:   "due",
+			Status:       models.FailoverPendingCleanupStatusPending,
+			NextRetryAt:  &dueTime,
+		},
+		{
+			UserID:       "user-a",
+			Provider:     "digitalocean",
+			ResourceType: "droplet",
+			ResourceID:   "future",
+			Status:       models.FailoverPendingCleanupStatusPending,
+			NextRetryAt:  &futureTime,
+		},
+		{
+			UserID:       "user-a",
+			Provider:     "digitalocean",
+			ResourceType: "droplet",
+			ResourceID:   "done",
+			Status:       models.FailoverPendingCleanupStatusSucceeded,
+			NextRetryAt:  &dueTime,
+		},
+	}
+	for i := range rows {
+		if err := db.Create(&rows[i]).Error; err != nil {
+			t.Fatalf("failed to seed pending cleanup row %d: %v", i, err)
+		}
+	}
+
+	items, err := listDuePendingCleanupsWithDBForTest(db, 10, now)
+	if err != nil {
+		t.Fatalf("failed to list due pending cleanups: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected exactly one due pending cleanup, got %d", len(items))
+	}
+	if items[0].ResourceID != "due" {
+		t.Fatalf("expected due row, got %q", items[0].ResourceID)
+	}
+}
+
+func createOrUpdatePendingCleanupWithDBForTest(db *gorm.DB, cleanup *models.FailoverPendingCleanup) (*models.FailoverPendingCleanup, error) {
+	applyPendingCleanupDefaults(cleanup)
+	var saved models.FailoverPendingCleanup
+	err := db.Transaction(func(tx *gorm.DB) error {
+		var existing models.FailoverPendingCleanup
+		err := tx.Where(
+			"user_id = ? AND provider = ? AND resource_type = ? AND resource_id = ?",
+			cleanup.UserID,
+			cleanup.Provider,
+			cleanup.ResourceType,
+			cleanup.ResourceID,
+		).First(&existing).Error
+		switch {
+		case err == nil:
+			if err := tx.Model(&models.FailoverPendingCleanup{}).
+				Where("id = ?", existing.ID).
+				Updates(map[string]interface{}{
+					"task_id":           cleanup.TaskID,
+					"execution_id":      cleanup.ExecutionID,
+					"provider_entry_id": cleanup.ProviderEntryID,
+					"instance_ref":      cleanup.InstanceRef,
+					"cleanup_label":     cleanup.CleanupLabel,
+					"status":            cleanup.Status,
+					"attempt_count":     cleanup.AttemptCount,
+					"last_error":        cleanup.LastError,
+					"last_attempted_at": cleanup.LastAttemptedAt,
+					"next_retry_at":     cleanup.NextRetryAt,
+					"resolved_at":       cleanup.ResolvedAt,
+				}).Error; err != nil {
+				return err
+			}
+			return tx.First(&saved, existing.ID).Error
+		case errors.Is(err, gorm.ErrRecordNotFound):
+			if err := tx.Create(cleanup).Error; err != nil {
+				return err
+			}
+			saved = *cleanup
+			return nil
+		default:
+			return err
+		}
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &saved, nil
+}
+
+func listDuePendingCleanupsWithDBForTest(db *gorm.DB, limit int, before time.Time) ([]models.FailoverPendingCleanup, error) {
+	var items []models.FailoverPendingCleanup
+	if err := db.Where("status = ?", models.FailoverPendingCleanupStatusPending).
+		Where("next_retry_at IS NULL OR next_retry_at <= ?", before).
+		Order("next_retry_at ASC").
+		Order("id ASC").
+		Limit(limit).
+		Find(&items).Error; err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 func TestApplyTaskDefaultsSetsProvisionRetryLimit(t *testing.T) {

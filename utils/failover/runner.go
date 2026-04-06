@@ -33,6 +33,8 @@ import (
 var (
 	runningTasksMu   sync.Mutex
 	runningTasks     = map[uint]struct{}{}
+	runningTargetMu  sync.Mutex
+	runningTargets   = map[string]uint{}
 	executionStopMu  sync.Mutex
 	executionCancels = map[uint]context.CancelFunc{}
 
@@ -229,6 +231,12 @@ type noPlanFallbackError struct {
 	err error
 }
 
+type duplicateTargetRunError struct {
+	TaskID       uint
+	ActiveTaskID uint
+	TargetKey    string
+}
+
 func (e *noPlanFallbackError) Error() string {
 	if e == nil || e.err == nil {
 		return ""
@@ -241,6 +249,23 @@ func (e *noPlanFallbackError) Unwrap() error {
 		return nil
 	}
 	return e.err
+}
+
+func (e *duplicateTargetRunError) Error() string {
+	if e == nil {
+		return "another failover task is already handling the same outlet"
+	}
+	if e.ActiveTaskID > 0 {
+		return fmt.Sprintf(
+			"failover task %d is already handling the same outlet target for task %d",
+			e.ActiveTaskID,
+			e.TaskID,
+		)
+	}
+	if strings.TrimSpace(e.TargetKey) != "" {
+		return "another failover task is already handling outlet target " + strings.TrimSpace(e.TargetKey)
+	}
+	return "another failover task is already handling the same outlet"
 }
 
 const (
@@ -817,6 +842,10 @@ func (r *executionRunner) preparePlanForCandidate(plan models.FailoverPlan) (mod
 }
 
 func RunScheduledWork() error {
+	if err := runPendingRollbackCleanupRetries(); err != nil {
+		log.Printf("failover: pending rollback cleanup retry failed: %v", err)
+	}
+
 	taskList, err := failoverdb.ListEnabledTasks()
 	if err != nil {
 		return err
@@ -837,6 +866,15 @@ func RunScheduledWork() error {
 			continue
 		}
 		if _, err := queueExecution(&taskCopy, report, reason); err != nil {
+			var duplicateErr *duplicateTargetRunError
+			if errors.As(err, &duplicateErr) {
+				log.Printf(
+					"failover: skipped task %d because task %d is already handling the same outlet",
+					taskCopy.ID,
+					duplicateErr.ActiveTaskID,
+				)
+				continue
+			}
 			log.Printf("failover: failed to queue task %d: %v", taskCopy.ID, err)
 		}
 	}
@@ -851,6 +889,9 @@ func RecoverInterruptedExecutions() error {
 	}
 	if recovered > 0 {
 		log.Printf("failover: recovered %d interrupted execution(s)", recovered)
+	}
+	if err := runPendingRollbackCleanupRetries(); err != nil {
+		log.Printf("failover: pending rollback cleanup retry failed during recovery: %v", err)
 	}
 	return nil
 }
@@ -967,6 +1008,21 @@ func queueExecution(task *models.FailoverTask, report *common.Report, reason str
 		log.Printf("failover: recovered %d interrupted execution(s) for task %d while queueing", recovered, task.ID)
 	}
 
+	targetRunKey, targetKeyErr := failoverTargetRunKey(*task)
+	if targetKeyErr != nil {
+		releaseTaskRun(task.ID)
+		return nil, targetKeyErr
+	}
+	activeTaskID, claimedTarget := claimTargetRun(targetRunKey, task.ID)
+	if !claimedTarget {
+		releaseTaskRun(task.ID)
+		return nil, &duplicateTargetRunError{
+			TaskID:       task.ID,
+			ActiveTaskID: activeTaskID,
+			TargetKey:    targetRunKey,
+		}
+	}
+
 	now := time.Now()
 	snapshot := buildTriggerSnapshot(report)
 	execution, err := failoverdb.CreateExecution(&models.FailoverExecution{
@@ -982,6 +1038,7 @@ func queueExecution(task *models.FailoverTask, report *common.Report, reason str
 		StartedAt:       models.FromTime(now),
 	})
 	if err != nil {
+		releaseTargetRun(targetRunKey, task.ID)
 		releaseTaskRun(task.ID)
 		return nil, err
 	}
@@ -992,11 +1049,13 @@ func queueExecution(task *models.FailoverTask, report *common.Report, reason str
 		"last_message":      strings.TrimSpace(reason),
 		"last_triggered_at": models.FromTime(now),
 	}); err != nil {
+		releaseTargetRun(targetRunKey, task.ID)
 		releaseTaskRun(task.ID)
 		return nil, err
 	}
 
-	go func(taskCopy models.FailoverTask, execCopy models.FailoverExecution, reportCopy *common.Report) {
+	go func(taskCopy models.FailoverTask, execCopy models.FailoverExecution, reportCopy *common.Report, runKey string) {
+		defer releaseTargetRun(runKey, taskCopy.ID)
 		defer releaseTaskRun(taskCopy.ID)
 		ctx, cancel := context.WithCancel(context.Background())
 		registerExecutionCancel(execCopy.ID, cancel)
@@ -1008,7 +1067,7 @@ func queueExecution(task *models.FailoverTask, report *common.Report, reason str
 			startedAt: now,
 		}
 		runner.run(reportCopy)
-	}(*task, *execution, cloneReport(report))
+	}(*task, *execution, cloneReport(report), targetRunKey)
 
 	return execution, nil
 }
@@ -2259,6 +2318,15 @@ func (r *executionRunner) rollbackOutcome(outcome *actionOutcome, originalErr er
 			"label": outcome.RollbackLabel,
 			"error": err.Error(),
 		}
+		if pendingCleanup, saveErr := r.queuePendingRollbackCleanup(outcome, err); saveErr != nil {
+			detail["compensation_error"] = saveErr.Error()
+		} else if pendingCleanup != nil {
+			detail["compensation_cleanup_id"] = pendingCleanup.ID
+			detail["compensation_status"] = pendingCleanup.Status
+			if pendingCleanup.NextRetryAt != nil {
+				detail["compensation_next_retry_at"] = pendingCleanup.NextRetryAt
+			}
+		}
 		r.finishStep(rollbackStep, models.FailoverStepStatusFailed, err.Error(), detail)
 		return fmt.Errorf("%w; rollback failed: %v", originalErr, err)
 	}
@@ -2283,6 +2351,44 @@ func (r *executionRunner) invalidateProvisionedEntrySnapshot(outcome *actionOutc
 	}
 
 	invalidateProviderEntrySnapshot(r.task.UserID, provider, entryID)
+}
+
+func (r *executionRunner) queuePendingRollbackCleanup(outcome *actionOutcome, rollbackErr error) (*models.FailoverPendingCleanup, error) {
+	if r == nil || outcome == nil || rollbackErr == nil {
+		return nil, nil
+	}
+
+	ref := cloneJSONMap(outcome.NewInstanceRef)
+	provider, resourceType, resourceID, providerEntryID := pendingCleanupIdentityFromRef(ref)
+	if provider == "" || resourceType == "" || resourceID == "" {
+		return nil, nil
+	}
+
+	now := time.Now()
+	lastAttemptedAt := models.FromTime(now)
+	nextRetryAt := models.FromTime(now.Add(pendingCleanupRetryBackoff(provider, rollbackErr, 1)))
+	cleanup := &models.FailoverPendingCleanup{
+		UserID: strings.TrimSpace(r.task.UserID),
+		TaskID: r.task.ID,
+		ExecutionID: func() uint {
+			if r.execution != nil {
+				return r.execution.ID
+			}
+			return 0
+		}(),
+		Provider:        provider,
+		ProviderEntryID: providerEntryID,
+		ResourceType:    resourceType,
+		ResourceID:      resourceID,
+		InstanceRef:     marshalJSON(ref),
+		CleanupLabel:    strings.TrimSpace(outcome.RollbackLabel),
+		Status:          models.FailoverPendingCleanupStatusPending,
+		AttemptCount:    1,
+		LastError:       strings.TrimSpace(rollbackErr.Error()),
+		LastAttemptedAt: &lastAttemptedAt,
+		NextRetryAt:     &nextRetryAt,
+	}
+	return failoverdb.CreateOrUpdatePendingCleanup(cleanup)
 }
 
 func (r *executionRunner) executeProvisionPlan(plan models.FailoverPlan) (*actionOutcome, error) {
@@ -4172,6 +4278,95 @@ func releaseTaskRun(taskID uint) {
 	runningTasksMu.Lock()
 	defer runningTasksMu.Unlock()
 	delete(runningTasks, taskID)
+}
+
+func claimTargetRun(targetKey string, taskID uint) (uint, bool) {
+	targetKey = strings.TrimSpace(targetKey)
+	if targetKey == "" || taskID == 0 {
+		return 0, true
+	}
+
+	runningTargetMu.Lock()
+	defer runningTargetMu.Unlock()
+	if activeTaskID, exists := runningTargets[targetKey]; exists && activeTaskID != taskID {
+		return activeTaskID, false
+	}
+	runningTargets[targetKey] = taskID
+	return 0, true
+}
+
+func releaseTargetRun(targetKey string, taskID uint) {
+	targetKey = strings.TrimSpace(targetKey)
+	if targetKey == "" || taskID == 0 {
+		return
+	}
+
+	runningTargetMu.Lock()
+	defer runningTargetMu.Unlock()
+	if activeTaskID, exists := runningTargets[targetKey]; exists && activeTaskID == taskID {
+		delete(runningTargets, targetKey)
+	}
+}
+
+func failoverTargetRunKey(task models.FailoverTask) (string, error) {
+	userUUID := strings.TrimSpace(task.UserID)
+	if userUUID == "" {
+		return "", nil
+	}
+
+	if refKey := currentInstanceRunKey(parseJSONMap(task.CurrentInstanceRef)); refKey != "" {
+		return userUUID + "|ref|" + refKey, nil
+	}
+
+	address := strings.TrimSpace(task.CurrentAddress)
+	if address == "" {
+		resolvedAddress, err := resolveTaskCurrentAddress(task)
+		if err == nil {
+			address = resolvedAddress
+		}
+	}
+	if normalizedAddress := normalizeIPAddress(address); normalizedAddress != "" {
+		return userUUID + "|addr|" + normalizedAddress, nil
+	}
+
+	if watchClientUUID := strings.TrimSpace(task.WatchClientUUID); watchClientUUID != "" {
+		return userUUID + "|watch|" + watchClientUUID, nil
+	}
+
+	return "", nil
+}
+
+func currentInstanceRunKey(ref map[string]interface{}) string {
+	if len(ref) == 0 {
+		return ""
+	}
+
+	provider := strings.ToLower(strings.TrimSpace(stringMapValue(ref, "provider")))
+	entryID := strings.TrimSpace(providerEntryIDFromRef(ref))
+	switch provider {
+	case "digitalocean":
+		if dropletID := intMapValue(ref, "droplet_id"); dropletID > 0 {
+			return fmt.Sprintf("digitalocean|%s|droplet|%d", entryID, dropletID)
+		}
+	case "linode":
+		if instanceID := intMapValue(ref, "instance_id"); instanceID > 0 {
+			return fmt.Sprintf("linode|%s|instance|%d", entryID, instanceID)
+		}
+	case "aws":
+		service := strings.ToLower(strings.TrimSpace(firstNonEmpty(stringMapValue(ref, "service"), "ec2")))
+		switch service {
+		case "lightsail":
+			if instanceName := strings.TrimSpace(stringMapValue(ref, "instance_name")); instanceName != "" {
+				return fmt.Sprintf("aws|%s|lightsail|%s|%s", entryID, strings.TrimSpace(stringMapValue(ref, "region")), instanceName)
+			}
+		default:
+			if instanceID := strings.TrimSpace(stringMapValue(ref, "instance_id")); instanceID != "" {
+				return fmt.Sprintf("aws|%s|ec2|%s|%s", entryID, strings.TrimSpace(stringMapValue(ref, "region")), instanceID)
+			}
+		}
+	}
+
+	return ""
 }
 
 func registerExecutionCancel(executionID uint, cancel context.CancelFunc) {

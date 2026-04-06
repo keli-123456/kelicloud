@@ -1,6 +1,7 @@
 package failover
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -638,6 +639,200 @@ func containsString(values []string, target string) bool {
 		}
 	}
 	return false
+}
+
+func applyPendingCleanupDefaults(cleanup *models.FailoverPendingCleanup) {
+	if cleanup == nil {
+		return
+	}
+
+	cleanup.UserID = strings.TrimSpace(cleanup.UserID)
+	cleanup.Provider = strings.TrimSpace(cleanup.Provider)
+	cleanup.ProviderEntryID = strings.TrimSpace(cleanup.ProviderEntryID)
+	cleanup.ResourceType = strings.TrimSpace(cleanup.ResourceType)
+	cleanup.ResourceID = strings.TrimSpace(cleanup.ResourceID)
+	cleanup.InstanceRef = strings.TrimSpace(cleanup.InstanceRef)
+	cleanup.CleanupLabel = strings.TrimSpace(cleanup.CleanupLabel)
+	cleanup.LastError = strings.TrimSpace(cleanup.LastError)
+	cleanup.Status = strings.TrimSpace(cleanup.Status)
+	if cleanup.Status == "" {
+		cleanup.Status = models.FailoverPendingCleanupStatusPending
+	}
+	if cleanup.AttemptCount < 0 {
+		cleanup.AttemptCount = 0
+	}
+}
+
+func CreateOrUpdatePendingCleanup(cleanup *models.FailoverPendingCleanup) (*models.FailoverPendingCleanup, error) {
+	if cleanup == nil {
+		return nil, fmt.Errorf("pending cleanup is required")
+	}
+	if _, err := normalizeFailoverUserID(cleanup.UserID); err != nil {
+		return nil, err
+	}
+
+	applyPendingCleanupDefaults(cleanup)
+	if cleanup.Provider == "" {
+		return nil, fmt.Errorf("provider is required")
+	}
+	if cleanup.ResourceType == "" {
+		return nil, fmt.Errorf("resource type is required")
+	}
+	if cleanup.ResourceID == "" {
+		return nil, fmt.Errorf("resource id is required")
+	}
+
+	db := dbcore.GetDBInstance()
+	var saved models.FailoverPendingCleanup
+	err := db.Transaction(func(tx *gorm.DB) error {
+		var existing models.FailoverPendingCleanup
+		err := tx.Where(
+			"user_id = ? AND provider = ? AND resource_type = ? AND resource_id = ?",
+			cleanup.UserID,
+			cleanup.Provider,
+			cleanup.ResourceType,
+			cleanup.ResourceID,
+		).First(&existing).Error
+		switch {
+		case errors.Is(err, gorm.ErrRecordNotFound):
+			if err := tx.Create(cleanup).Error; err != nil {
+				return err
+			}
+			saved = *cleanup
+			return nil
+		case err != nil:
+			return err
+		}
+
+		updates := map[string]interface{}{
+			"task_id":           cleanup.TaskID,
+			"execution_id":      cleanup.ExecutionID,
+			"provider_entry_id": cleanup.ProviderEntryID,
+			"instance_ref":      cleanup.InstanceRef,
+			"cleanup_label":     cleanup.CleanupLabel,
+			"status":            cleanup.Status,
+			"attempt_count":     cleanup.AttemptCount,
+			"last_error":        cleanup.LastError,
+			"last_attempted_at": cleanup.LastAttemptedAt,
+			"next_retry_at":     cleanup.NextRetryAt,
+			"resolved_at":       cleanup.ResolvedAt,
+		}
+		if err := tx.Model(&models.FailoverPendingCleanup{}).
+			Where("id = ?", existing.ID).
+			Updates(updates).Error; err != nil {
+			return err
+		}
+		return tx.First(&saved, existing.ID).Error
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &saved, nil
+}
+
+func ListDuePendingCleanups(limit int, before time.Time) ([]models.FailoverPendingCleanup, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	if before.IsZero() {
+		before = time.Now()
+	}
+
+	var cleanups []models.FailoverPendingCleanup
+	db := dbcore.GetDBInstance()
+	if err := db.Where("status = ?", models.FailoverPendingCleanupStatusPending).
+		Where("next_retry_at IS NULL OR next_retry_at <= ?", before).
+		Order("next_retry_at ASC").
+		Order("id ASC").
+		Limit(limit).
+		Find(&cleanups).Error; err != nil {
+		return nil, err
+	}
+	return cleanups, nil
+}
+
+func MarkPendingCleanupSucceeded(cleanupID uint) error {
+	if cleanupID == 0 {
+		return nil
+	}
+	now := models.FromTime(time.Now())
+	db := dbcore.GetDBInstance()
+	result := db.Model(&models.FailoverPendingCleanup{}).
+		Where("id = ?", cleanupID).
+		Updates(map[string]interface{}{
+			"status":            models.FailoverPendingCleanupStatusSucceeded,
+			"last_error":        "",
+			"next_retry_at":     nil,
+			"last_attempted_at": now,
+			"resolved_at":       now,
+		})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return gorm.ErrRecordNotFound
+	}
+	return nil
+}
+
+func SchedulePendingCleanupRetry(cleanupID uint, attemptCount int, lastError string, nextRetryAt time.Time) error {
+	if cleanupID == 0 {
+		return nil
+	}
+	if attemptCount < 0 {
+		attemptCount = 0
+	}
+	now := models.FromTime(time.Now())
+	next := models.FromTime(nextRetryAt)
+	db := dbcore.GetDBInstance()
+	result := db.Model(&models.FailoverPendingCleanup{}).
+		Where("id = ?", cleanupID).
+		Updates(map[string]interface{}{
+			"status":            models.FailoverPendingCleanupStatusPending,
+			"attempt_count":     attemptCount,
+			"last_error":        strings.TrimSpace(lastError),
+			"last_attempted_at": now,
+			"next_retry_at":     next,
+			"resolved_at":       nil,
+		})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return gorm.ErrRecordNotFound
+	}
+	return nil
+}
+
+func MarkPendingCleanupManualReview(cleanupID uint, attemptCount int, lastError string) error {
+	if cleanupID == 0 {
+		return nil
+	}
+	if attemptCount < 0 {
+		attemptCount = 0
+	}
+	now := models.FromTime(time.Now())
+	db := dbcore.GetDBInstance()
+	result := db.Model(&models.FailoverPendingCleanup{}).
+		Where("id = ?", cleanupID).
+		Updates(map[string]interface{}{
+			"status":            models.FailoverPendingCleanupStatusManualReview,
+			"attempt_count":     attemptCount,
+			"last_error":        strings.TrimSpace(lastError),
+			"last_attempted_at": now,
+			"next_retry_at":     nil,
+			"resolved_at":       nil,
+		})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return gorm.ErrRecordNotFound
+	}
+	return nil
 }
 
 func CreateExecution(execution *models.FailoverExecution) (*models.FailoverExecution, error) {

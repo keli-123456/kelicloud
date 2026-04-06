@@ -130,7 +130,7 @@ func TestListClipboardPageByUserRespectsPaginationAndOrder(t *testing.T) {
 	}
 }
 
-func TestListClipboardPageByUserSearchesFuzzilyAndKeepsStableOrderAfterEdit(t *testing.T) {
+func TestListClipboardPageByUserSearchesByTokenAndKeepsStableOrderAfterEdit(t *testing.T) {
 	db := openClipboardTestDB(t)
 
 	if err := db.AutoMigrate(&models.Clipboard{}); err != nil {
@@ -158,15 +158,15 @@ func TestListClipboardPageByUserSearchesFuzzilyAndKeepsStableOrderAfterEdit(t *t
 		}
 	}
 
-	searchResult, total, err := listClipboardPageByUserWithDB(db, "user-a", 1, 20, "sg1 rst")
+	searchResult, total, err := listClipboardPageByUserWithDB(db, "user-a", 1, 20, "sg1 rollout")
 	if err != nil {
 		t.Fatalf("failed to search clipboard entries: %v", err)
 	}
 	if total != 1 {
-		t.Fatalf("expected exactly one fuzzy search match, got %d", total)
+		t.Fatalf("expected exactly one token search match, got %d", total)
 	}
 	if len(searchResult) != 1 || searchResult[0].Id != older.Id {
-		t.Fatalf("unexpected fuzzy search result: %+v", searchResult)
+		t.Fatalf("unexpected token search result: %+v", searchResult)
 	}
 
 	if err := updateClipboardFieldsForUserWithDB(db, older.Id, "user-a", map[string]interface{}{
@@ -187,6 +187,46 @@ func TestListClipboardPageByUserSearchesFuzzilyAndKeepsStableOrderAfterEdit(t *t
 	}
 	if page[0].Id != newer.Id || page[1].Id != older.Id {
 		t.Fatalf("expected stable id-based order after edit, got %+v", page)
+	}
+}
+
+func TestListClipboardPageByUserSearchDoesNotMatchCharacterSequenceOnly(t *testing.T) {
+	db := openClipboardTestDB(t)
+
+	if err := db.AutoMigrate(&models.Clipboard{}); err != nil {
+		t.Fatalf("failed to migrate test schema: %v", err)
+	}
+
+	exact := models.Clipboard{
+		UserID: "user-a",
+		Name:   "Singapore Bootstrap",
+		Text:   "echo deploy",
+		Remark: "sg1 edge rollout",
+		Weight: 5,
+	}
+	falsePositive := models.Clipboard{
+		UserID: "user-a",
+		Name:   "Staging Zone 1",
+		Text:   "echo staging",
+		Remark: "regional bootstrap",
+		Weight: 4,
+	}
+
+	for _, item := range []*models.Clipboard{&exact, &falsePositive} {
+		if err := db.Create(item).Error; err != nil {
+			t.Fatalf("failed to create clipboard entry: %v", err)
+		}
+	}
+
+	searchResult, total, err := listClipboardPageByUserWithDB(db, "user-a", 1, 20, "sg1")
+	if err != nil {
+		t.Fatalf("failed to search clipboard entries: %v", err)
+	}
+	if total != 1 {
+		t.Fatalf("expected exact token match only, got %d", total)
+	}
+	if len(searchResult) != 1 || searchResult[0].Id != exact.Id {
+		t.Fatalf("unexpected exact token search result: %+v", searchResult)
 	}
 }
 

@@ -85,6 +85,12 @@ const (
 	FailoverCleanupStatusWarning = "warning"
 )
 
+const (
+	FailoverPendingCleanupStatusPending      = "pending"
+	FailoverPendingCleanupStatusSucceeded    = "succeeded"
+	FailoverPendingCleanupStatusManualReview = "manual_review"
+)
+
 type FailoverTask struct {
 	ID                            uint                `json:"id,omitempty" gorm:"primaryKey;autoIncrement"`
 	UserID                        string              `json:"user_id,omitempty" gorm:"type:varchar(36);index"`
@@ -172,6 +178,27 @@ type FailoverExecution struct {
 	Steps                 []FailoverExecutionStep `json:"steps,omitempty" gorm:"foreignKey:ExecutionID;references:ID;constraint:OnDelete:CASCADE,OnUpdate:CASCADE"`
 	CreatedAt             LocalTime               `json:"created_at"`
 	UpdatedAt             LocalTime               `json:"updated_at"`
+}
+
+type FailoverPendingCleanup struct {
+	ID              uint       `json:"id,omitempty" gorm:"primaryKey;autoIncrement"`
+	UserID          string     `json:"user_id" gorm:"type:varchar(36);index;uniqueIndex:idx_failover_pending_cleanup_resource"`
+	TaskID          uint       `json:"task_id,omitempty" gorm:"index"`
+	ExecutionID     uint       `json:"execution_id,omitempty" gorm:"index"`
+	Provider        string     `json:"provider" gorm:"type:varchar(32);not null;index;uniqueIndex:idx_failover_pending_cleanup_resource"`
+	ProviderEntryID string     `json:"provider_entry_id" gorm:"type:varchar(64);index"`
+	ResourceType    string     `json:"resource_type" gorm:"type:varchar(32);not null;uniqueIndex:idx_failover_pending_cleanup_resource"`
+	ResourceID      string     `json:"resource_id" gorm:"type:varchar(128);not null;index;uniqueIndex:idx_failover_pending_cleanup_resource"`
+	InstanceRef     string     `json:"instance_ref" gorm:"type:longtext"`
+	CleanupLabel    string     `json:"cleanup_label" gorm:"type:varchar(255)"`
+	Status          string     `json:"status" gorm:"type:varchar(32);not null;default:'pending';index"`
+	AttemptCount    int        `json:"attempt_count" gorm:"type:int;not null;default:0"`
+	LastError       string     `json:"last_error" gorm:"type:longtext"`
+	LastAttemptedAt *LocalTime `json:"last_attempted_at" gorm:"type:timestamp"`
+	NextRetryAt     *LocalTime `json:"next_retry_at" gorm:"type:timestamp;index"`
+	ResolvedAt      *LocalTime `json:"resolved_at" gorm:"type:timestamp"`
+	CreatedAt       LocalTime  `json:"created_at"`
+	UpdatedAt       LocalTime  `json:"updated_at"`
 }
 
 func NormalizeFailoverScriptClipboardIDs(primary *int, raw string) []int {
