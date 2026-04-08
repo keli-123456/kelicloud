@@ -1,9 +1,6 @@
 package records
 
 import (
-	"encoding/csv"
-	"os"
-	"strconv"
 	"testing"
 	"time"
 
@@ -25,7 +22,7 @@ var _ = func() bool {
 // then running migrateOldRecords and verifying the aggregation and cleanup.
 func TestCompactRecord(t *testing.T) {
 	const totalMinutes = 12*60 + 30
-	now := time.Now()
+	now := time.Date(2026, time.April, 8, 12, 30, 0, 0, time.UTC)
 	threshold := now.Add(-4 * time.Hour)
 
 	// 使用 sqlite 内存数据库并迁移表结构
@@ -52,30 +49,8 @@ func TestCompactRecord(t *testing.T) {
 		}
 	}
 
-	// 导出原始数据到 CSV
-	os.MkdirAll("../../data", 0755)
-	var origRecs []models.Record
-	db.Order("time desc").Find(&origRecs)
-	fOrig, err := os.Create("../../data/original.csv")
-	assert.NoError(t, err)
-	defer fOrig.Close()
-	wOrig := csv.NewWriter(fOrig)
-	defer wOrig.Flush()
-	wOrig.Write([]string{"Client", "Time", "Cpu", "Gpu", "Load", "Temp", "Ram"})
-	for _, r := range origRecs {
-		wOrig.Write([]string{
-			r.Client,
-			r.Time.ToTime().Format(time.RFC3339),
-			strconv.FormatFloat(float64(r.Cpu), 'f', -1, 32),
-			strconv.FormatFloat(float64(r.Gpu), 'f', -1, 32),
-			strconv.FormatFloat(float64(r.Load), 'f', -1, 32),
-			strconv.FormatFloat(float64(r.Temp), 'f', -1, 32),
-			strconv.FormatInt(r.Ram, 10),
-		})
-	}
-
 	// 运行压缩（迁移）逻辑
-	err = migrateOldRecords(db)
+	err = migrateOldRecordsBefore(db, threshold)
 	assert.NoError(t, err)
 
 	// 验证 long-term 表中的聚合记录数
@@ -86,52 +61,13 @@ func TestCompactRecord(t *testing.T) {
 	// 验证原始表中剩余记录数
 	var remainCount int64
 	assert.NoError(t, db.Table("records").Count(&remainCount).Error)
-	assert.Equal(t, int64(expectedRemain), remainCount+1)
+	assert.Equal(t, int64(expectedRemain), remainCount)
 
-	// 导出压缩后的数据到 CSV
-	var compRecs []models.Record
-	db.Table("records_long_term").Order("time desc").Find(&compRecs)
-	fComp, err := os.Create("../../data/compressed.csv")
-	assert.NoError(t, err)
-	defer fComp.Close()
-	wComp := csv.NewWriter(fComp)
-	defer wComp.Flush()
-	wComp.Write([]string{"Client", "Time", "Cpu", "Gpu", "Load", "Temp", "Ram"})
-	for _, r := range compRecs {
-		wComp.Write([]string{
-			r.Client,
-			r.Time.ToTime().Format(time.RFC3339),
-			strconv.FormatFloat(float64(r.Cpu), 'f', -1, 32),
-			strconv.FormatFloat(float64(r.Gpu), 'f', -1, 32),
-			strconv.FormatFloat(float64(r.Load), 'f', -1, 32),
-			strconv.FormatFloat(float64(r.Temp), 'f', -1, 32),
-			strconv.FormatInt(r.Ram, 10),
-		})
-	}
-
-	db.Table("records").Order("time desc").Find(&compRecs)
-	fComp, err = os.Create("../../data/compressed_records.csv")
-	assert.NoError(t, err)
-	defer fComp.Close()
-	wComp = csv.NewWriter(fComp)
-	defer wComp.Flush()
-	wComp.Write([]string{"Client", "Time", "Cpu", "Gpu", "Load", "Temp", "Ram"})
-	for _, r := range compRecs {
-		wComp.Write([]string{
-			r.Client,
-			r.Time.ToTime().Format(time.RFC3339),
-			strconv.FormatFloat(float64(r.Cpu), 'f', -1, 32),
-			strconv.FormatFloat(float64(r.Gpu), 'f', -1, 32),
-			strconv.FormatFloat(float64(r.Load), 'f', -1, 32),
-			strconv.FormatFloat(float64(r.Temp), 'f', -1, 32),
-			strconv.FormatInt(r.Ram, 10),
-		})
-	}
 }
 
 func TestCompactGPURecord(t *testing.T) {
 	const totalMinutes = 12*60 + 30
-	now := time.Now()
+	now := time.Date(2026, time.April, 8, 12, 30, 0, 0, time.UTC)
 	threshold := now.Add(-4 * time.Hour)
 
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
@@ -165,7 +101,7 @@ func TestCompactGPURecord(t *testing.T) {
 		}
 	}
 
-	err = migrateGPURecords(db)
+	err = migrateGPURecordsBefore(db, threshold)
 	assert.NoError(t, err)
 
 	var longCount int64
@@ -174,5 +110,5 @@ func TestCompactGPURecord(t *testing.T) {
 
 	var remainCount int64
 	assert.NoError(t, db.Table("gpu_records").Count(&remainCount).Error)
-	assert.Equal(t, int64(expectedRemain), remainCount+1)
+	assert.Equal(t, int64(expectedRemain), remainCount)
 }

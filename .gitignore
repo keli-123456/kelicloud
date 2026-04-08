@@ -44,3 +44,4 @@ public/frontend/
 /package-lock.json
 utils/cloudflared/data/
 utils/cloudprovider/digitalocean/data/
+utils/cloudprovider/aws/data/

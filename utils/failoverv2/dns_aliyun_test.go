@@ -1,0 +1,283 @@
+package failoverv2
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+
+	"github.com/komari-monitor/komari/database/models"
+)
+
+type mockAliyunDNSClient struct {
+	records        []aliyunDNSRecord
+	listErr        error
+	upsertErr      error
+	deleteErr      error
+	upsertCalls    []mockAliyunUpsertCall
+	deleteCalls    []string
+	upsertRecordID string
+}
+
+type mockAliyunUpsertCall struct {
+	ExistingRecordID string
+	DomainName       string
+	RR               string
+	RecordType       string
+	Value            string
+	TTL              int
+	Line             string
+}
+
+func (m *mockAliyunDNSClient) listRecords(ctx context.Context, domainName string) ([]aliyunDNSRecord, error) {
+	if m.listErr != nil {
+		return nil, m.listErr
+	}
+	return cloneAliyunRecords(m.records), nil
+}
+
+func (m *mockAliyunDNSClient) upsertRecord(ctx context.Context, existingRecordID, domainName, rr, recordType, value string, ttl int, line string) (string, error) {
+	m.upsertCalls = append(m.upsertCalls, mockAliyunUpsertCall{
+		ExistingRecordID: existingRecordID,
+		DomainName:       domainName,
+		RR:               rr,
+		RecordType:       recordType,
+		Value:            value,
+		TTL:              ttl,
+		Line:             line,
+	})
+	if m.upsertErr != nil {
+		return "", m.upsertErr
+	}
+	if m.upsertRecordID != "" {
+		return m.upsertRecordID, nil
+	}
+	if existingRecordID != "" {
+		return existingRecordID, nil
+	}
+	return "generated-record-id", nil
+}
+
+func (m *mockAliyunDNSClient) deleteRecord(ctx context.Context, recordID string) error {
+	m.deleteCalls = append(m.deleteCalls, recordID)
+	if m.deleteErr != nil {
+		return m.deleteErr
+	}
+	return nil
+}
+
+func useMockAliyunDNSDependencies(t *testing.T, client aliyunRecordClient) {
+	t.Helper()
+
+	previousLoadConfig := loadAliyunDNSConfigFunc
+	previousNewClient := newAliyunDNSClientFunc
+	loadAliyunDNSConfigFunc = func(userUUID, entryID string) (*aliyunDNSConfig, error) {
+		return &aliyunDNSConfig{
+			AccessKeyID:     "ak",
+			AccessKeySecret: "sk",
+			DomainName:      "example.com",
+		}, nil
+	}
+	newAliyunDNSClientFunc = func(configValue *aliyunDNSConfig) aliyunRecordClient {
+		return client
+	}
+	t.Cleanup(func() {
+		loadAliyunDNSConfigFunc = previousLoadConfig
+		newAliyunDNSClientFunc = previousNewClient
+	})
+}
+
+func TestAliyunDNSClientListRecordsPaginates(t *testing.T) {
+	client := &aliyunDNSClient{
+		accessKeyID:     "ak",
+		accessKeySecret: "sk",
+		endpoint:        "http://aliyun.test/",
+		httpClient: &http.Client{
+			Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+				recorder := httptest.NewRecorder()
+				if action := request.URL.Query().Get("Action"); action != "DescribeDomainRecords" {
+					t.Fatalf("unexpected aliyun action %q", action)
+				}
+				pageNumber := request.URL.Query().Get("PageNumber")
+				records := make([]aliyunDNSRecord, 0, 100)
+				start := 1
+				end := 100
+				if pageNumber == "2" {
+					start = 101
+					end = 101
+				}
+				for i := start; i <= end; i++ {
+					records = append(records, aliyunDNSRecord{
+						RecordID: fmt.Sprintf("record-%03d", i),
+						RR:       "@",
+						Type:     "A",
+						Value:    fmt.Sprintf("203.0.113.%d", i%255),
+						TTL:      60,
+						Line:     "telecom",
+					})
+				}
+				_ = json.NewEncoder(recorder).Encode(aliyunDescribeRecordsResponse{
+					DomainRecords: struct {
+						Record []aliyunDNSRecord `json:"Record"`
+					}{Record: records},
+					PageNumber: 1,
+					PageSize:   100,
+					TotalCount: 101,
+				})
+				return recorder.Result(), nil
+			}),
+		},
+	}
+	records, err := client.listRecords(context.Background(), "example.com")
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if len(records) != 101 {
+		t.Fatalf("expected 101 records across pages, got %d", len(records))
+	}
+	if records[100].RecordID != "record-101" {
+		t.Fatalf("expected second page record to be included, got %#v", records[100])
+	}
+}
+
+func testAliyunService() *models.FailoverV2Service {
+	return &models.FailoverV2Service{
+		DNSProvider: models.FailoverDNSProviderAliyun,
+		DNSEntryID:  "default",
+		DNSPayload:  `{"domain_name":"example.com","rr":"@","record_type":"A","ttl":60}`,
+	}
+}
+
+func testAliyunMember() *models.FailoverV2Member {
+	return &models.FailoverV2Member{
+		DNSLine:       "telecom",
+		DNSRecordRefs: `{"A":"record-telecom-a"}`,
+	}
+}
+
+func TestApplyAliyunMemberDNSAttachUpdatesOnlyTargetLine(t *testing.T) {
+	client := &mockAliyunDNSClient{
+		records: []aliyunDNSRecord{
+			{RecordID: "record-default-a", RR: "@", Type: "A", Value: "198.51.100.10", TTL: 60, Line: "default"},
+			{RecordID: "record-telecom-a", RR: "@", Type: "A", Value: "198.51.100.11", TTL: 60, Line: "telecom"},
+			{RecordID: "record-telecom-a-duplicate", RR: "@", Type: "A", Value: "198.51.100.12", TTL: 60, Line: "telecom"},
+			{RecordID: "record-telecom-aaaa", RR: "@", Type: "AAAA", Value: "2001:db8::12", TTL: 60, Line: "telecom"},
+		},
+	}
+	useMockAliyunDNSDependencies(t, client)
+
+	result, err := ApplyAliyunMemberDNSAttach(context.Background(), "user-a", testAliyunService(), testAliyunMember(), "203.0.113.8", "")
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if len(client.upsertCalls) != 1 {
+		t.Fatalf("expected 1 upsert call, got %#v", client.upsertCalls)
+	}
+	if client.upsertCalls[0].ExistingRecordID != "record-telecom-a" {
+		t.Fatalf("expected existing telecom record to be updated, got %#v", client.upsertCalls[0])
+	}
+	if client.upsertCalls[0].Line != "telecom" || client.upsertCalls[0].Value != "203.0.113.8" {
+		t.Fatalf("unexpected upsert call: %#v", client.upsertCalls[0])
+	}
+	if len(client.deleteCalls) != 2 {
+		t.Fatalf("expected 2 delete calls, got %#v", client.deleteCalls)
+	}
+	if client.deleteCalls[0] != "record-telecom-a-duplicate" || client.deleteCalls[1] != "record-telecom-aaaa" {
+		t.Fatalf("unexpected delete calls: %#v", client.deleteCalls)
+	}
+	if len(result.Records) != 1 || result.Records[0].Line != "telecom" || result.Records[0].Value != "203.0.113.8" {
+		t.Fatalf("unexpected result records: %#v", result.Records)
+	}
+	if len(result.Removed) != 2 {
+		t.Fatalf("expected removed records to be captured, got %#v", result.Removed)
+	}
+	if got := result.RecordRefs["A"]; got != "record-telecom-a" {
+		t.Fatalf("expected updated record ref, got %#v", result.RecordRefs)
+	}
+	if len(result.PrunedTypes) != 1 || result.PrunedTypes[0] != "AAAA" {
+		t.Fatalf("expected AAAA to be pruned, got %#v", result.PrunedTypes)
+	}
+}
+
+func TestApplyAliyunMemberDNSDetachRemovesOnlyManagedTargetLine(t *testing.T) {
+	service := testAliyunService()
+	service.DNSPayload = `{"domain_name":"example.com","rr":"@","record_type":"A","sync_ipv6":true,"ttl":60}`
+
+	client := &mockAliyunDNSClient{
+		records: []aliyunDNSRecord{
+			{RecordID: "record-default-a", RR: "@", Type: "A", Value: "198.51.100.10", TTL: 60, Line: "default"},
+			{RecordID: "record-telecom-a", RR: "@", Type: "A", Value: "198.51.100.11", TTL: 60, Line: "telecom"},
+			{RecordID: "record-telecom-aaaa", RR: "@", Type: "AAAA", Value: "2001:db8::11", TTL: 60, Line: "telecom"},
+			{RecordID: "record-telecom-txt", RR: "@", Type: "TXT", Value: "ignore-me", TTL: 60, Line: "telecom"},
+		},
+	}
+	useMockAliyunDNSDependencies(t, client)
+
+	result, err := ApplyAliyunMemberDNSDetach(context.Background(), "user-a", service, testAliyunMember())
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if len(client.deleteCalls) != 2 {
+		t.Fatalf("expected 2 delete calls, got %#v", client.deleteCalls)
+	}
+	if client.deleteCalls[0] != "record-telecom-a" || client.deleteCalls[1] != "record-telecom-aaaa" {
+		t.Fatalf("unexpected delete calls: %#v", client.deleteCalls)
+	}
+	if len(result.RecordRefs) != 0 {
+		t.Fatalf("expected record refs to be cleared, got %#v", result.RecordRefs)
+	}
+	if len(result.Removed) != 2 {
+		t.Fatalf("expected removed records, got %#v", result.Removed)
+	}
+}
+
+func TestVerifyAliyunMemberDNSAttachedDetectsUnexpectedCounterpart(t *testing.T) {
+	client := &mockAliyunDNSClient{
+		records: []aliyunDNSRecord{
+			{RecordID: "record-telecom-a", RR: "@", Type: "A", Value: "203.0.113.8", TTL: 60, Line: "电信"},
+			{RecordID: "record-telecom-aaaa", RR: "@", Type: "AAAA", Value: "2001:db8::11", TTL: 60, Line: "telecom"},
+		},
+	}
+	useMockAliyunDNSDependencies(t, client)
+
+	verification, err := VerifyAliyunMemberDNSAttached(context.Background(), "user-a", testAliyunService(), testAliyunMember(), "203.0.113.8", "")
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if verification.Success {
+		t.Fatalf("expected verification to fail, got %#v", verification)
+	}
+	if len(verification.Unexpected) != 1 || verification.Unexpected[0].Type != "AAAA" {
+		t.Fatalf("expected stale AAAA record to be unexpected, got %#v", verification.Unexpected)
+	}
+}
+
+func TestVerifyAliyunMemberDNSDetachedIgnoresOtherLines(t *testing.T) {
+	client := &mockAliyunDNSClient{
+		records: []aliyunDNSRecord{
+			{RecordID: "record-default-a", RR: "@", Type: "A", Value: "203.0.113.8", TTL: 60, Line: "default"},
+			{RecordID: "record-default-aaaa", RR: "@", Type: "AAAA", Value: "2001:db8::8", TTL: 60, Line: "default"},
+		},
+	}
+	useMockAliyunDNSDependencies(t, client)
+
+	verification, err := VerifyAliyunMemberDNSDetached(context.Background(), "user-a", testAliyunService(), testAliyunMember())
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if !verification.Success {
+		t.Fatalf("expected verification to pass, got %#v", verification)
+	}
+}
+
+func TestApplyAliyunMemberDNSAttachReturnsListError(t *testing.T) {
+	client := &mockAliyunDNSClient{listErr: errors.New("boom")}
+	useMockAliyunDNSDependencies(t, client)
+
+	if _, err := ApplyAliyunMemberDNSAttach(context.Background(), "user-a", testAliyunService(), testAliyunMember(), "203.0.113.8", ""); err == nil {
+		t.Fatal("expected list error")
+	}
+}

@@ -61,6 +61,7 @@ var systemSettingKeys = map[string]struct{}{
 	config.OfflineCleanupTimeKey:              {},
 	config.OfflineCleanupGraceHoursKey:        {},
 	config.OfflineCleanupLastRunAtKey:         {},
+	config.FailoverV2SchedulerEnabledKey:      {},
 }
 
 var readableSystemSettingKeys = map[string]struct{}{
@@ -447,6 +448,11 @@ func validateSystemSettingUpdates(values map[string]any) error {
 	if rawEnabled, exists := values[config.OfflineCleanupEnabledKey]; exists {
 		if _, ok := rawEnabled.(bool); !ok {
 			return fmt.Errorf("%s must be a boolean", config.OfflineCleanupEnabledKey)
+		}
+	}
+	if rawEnabled, exists := values[config.FailoverV2SchedulerEnabledKey]; exists {
+		if _, ok := rawEnabled.(bool); !ok {
+			return fmt.Errorf("%s must be a boolean", config.FailoverV2SchedulerEnabledKey)
 		}
 	}
 

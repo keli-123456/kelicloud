@@ -690,6 +690,12 @@ func GetDBInstance() *gorm.DB {
 			&models.FailoverExecution{},
 			&models.FailoverExecutionStep{},
 			&models.FailoverPendingCleanup{},
+			&models.FailoverV2Service{},
+			&models.FailoverV2Member{},
+			&models.FailoverV2Execution{},
+			&models.FailoverV2ExecutionStep{},
+			&models.FailoverV2PendingCleanup{},
+			&models.FailoverV2RunLock{},
 		)
 		if err != nil {
 			log.Printf("Failed to create failover tables, it may already exist: %v", err)

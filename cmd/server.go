@@ -41,6 +41,7 @@ import (
 	"github.com/komari-monitor/komari/utils/cloudflared"
 	_ "github.com/komari-monitor/komari/utils/cloudprovider"
 	"github.com/komari-monitor/komari/utils/failover"
+	"github.com/komari-monitor/komari/utils/failoverv2"
 	"github.com/komari-monitor/komari/utils/geoip"
 	logutil "github.com/komari-monitor/komari/utils/log"
 	"github.com/komari-monitor/komari/utils/messageSender"
@@ -472,6 +473,40 @@ func RunServer() {
 			failoverGroup.POST("/executions/:id/retry-cleanup", admin.RetryFailoverExecutionCleanup)
 		}
 
+		failoverV2Group := adminAuthrized.Group(
+			"/failover-v2",
+			admin.RequireUserFeatureMiddleware(config.UserFeatureCloudFailover),
+			admin.RequireUserFeatureMiddleware(config.UserFeatureCNConnectivity),
+		)
+		{
+			failoverV2Group.GET("/services", admin.GetFailoverV2Services)
+			failoverV2Group.POST("/services/validate-all", admin.ValidateAllFailoverV2Services)
+			failoverV2Group.POST("/services/validate", admin.ValidateFailoverV2Service)
+			failoverV2Group.POST("/services", admin.CreateFailoverV2Service)
+			failoverV2Group.GET("/services/:id", admin.GetFailoverV2Service)
+			failoverV2Group.GET("/services/:id/executions", admin.GetFailoverV2Executions)
+			failoverV2Group.GET("/services/:id/executions/:execution_id", admin.GetFailoverV2Execution)
+			failoverV2Group.GET("/services/:id/pending-cleanups", admin.GetFailoverV2PendingCleanups)
+			failoverV2Group.POST("/services/:id/executions/:execution_id/stop", admin.StopFailoverV2Execution)
+			failoverV2Group.POST("/services/:id/executions/:execution_id/retry-attach-dns", admin.RetryFailoverV2ExecutionAttachDNS)
+			failoverV2Group.POST("/services/:id/executions/:execution_id/retry-cleanup", admin.RetryFailoverV2ExecutionCleanup)
+			failoverV2Group.POST("/services/:id/pending-cleanups/:cleanup_id/retry", admin.RetryFailoverV2PendingCleanup)
+			failoverV2Group.POST("/services/:id/pending-cleanups/:cleanup_id/resolve", admin.ResolveFailoverV2PendingCleanup)
+			failoverV2Group.POST("/services/:id/pending-cleanups/:cleanup_id/mark-manual-review", admin.MarkFailoverV2PendingCleanupManualReview)
+			failoverV2Group.POST("/services/:id/validate", admin.ValidateFailoverV2Service)
+			failoverV2Group.POST("/services/:id", admin.UpdateFailoverV2Service)
+			failoverV2Group.POST("/services/:id/toggle-enabled", admin.SetFailoverV2ServiceEnabled)
+			failoverV2Group.POST("/services/:id/remove", admin.DeleteFailoverV2Service)
+			failoverV2Group.POST("/services/:id/members/validate", admin.ValidateFailoverV2Member)
+			failoverV2Group.POST("/services/:id/members", admin.CreateFailoverV2Member)
+			failoverV2Group.POST("/services/:id/members/:member_id/validate", admin.ValidateFailoverV2Member)
+			failoverV2Group.POST("/services/:id/members/:member_id", admin.UpdateFailoverV2Member)
+			failoverV2Group.POST("/services/:id/members/:member_id/toggle-enabled", admin.SetFailoverV2MemberEnabled)
+			failoverV2Group.POST("/services/:id/members/:member_id/remove", admin.DeleteFailoverV2Member)
+			failoverV2Group.POST("/services/:id/members/:member_id/detach-dns", admin.DetachFailoverV2MemberDNS)
+			failoverV2Group.POST("/services/:id/members/:member_id/failover-now", admin.RunFailoverV2Member)
+		}
+
 	}
 
 	public.Static(r.Group("/"), func(handlers ...gin.HandlerFunc) {
@@ -531,6 +566,9 @@ func DoScheduledWork() {
 	if err := failover.RecoverInterruptedExecutions(); err != nil {
 		log.Printf("failover: failed to recover interrupted executions: %v", err)
 	}
+	if err := failoverv2.RecoverInterruptedExecutions(); err != nil {
+		log.Printf("failoverv2: failed to recover interrupted executions: %v", err)
+	}
 	d_notification.ReloadLoadNotificationSchedule()
 	ticker := time.NewTicker(time.Minute * 30)
 	minute := time.NewTicker(60 * time.Second)
@@ -556,6 +594,9 @@ func DoScheduledWork() {
 			// 每分钟检查一次流量提醒
 			go notifier.CheckTraffic()
 			failover.RunScheduledWork()
+			if err := failoverv2.RunScheduledWork(); err != nil {
+				log.Printf("failoverv2: scheduled work failed: %v", err)
+			}
 			clientddns.RunScheduledSync()
 			offlinecleanup.RunScheduledWork()
 		case <-quarterMinute.C:

@@ -47,14 +47,15 @@ type Legacy struct {
 	LoginNotification          bool    `json:"login_notification" default:"true"`          // 登录通知
 	TrafficLimitPercentage     float64 `json:"traffic_limit_percentage" default:"80.00"`   // 流量限制百分比，默认80.00%
 	// Record
-	RecordEnabled            bool   `json:"record_enabled" default:"true"`            // 是否启用记录功能
-	RecordPreserveTime       int    `json:"record_preserve_time" default:"720"`       // 记录保留时间，单位小时，默认30天
-	PingRecordPreserveTime   int    `json:"ping_record_preserve_time" default:"24"`   // Ping 记录保留时间，单位小时，默认1天
-	OfflineCleanupEnabled    bool   `json:"offline_cleanup_enabled" default:"false"`  // 是否启用每日自动清理离线节点
-	OfflineCleanupTime       string `json:"offline_cleanup_time" default:"03:00"`     // 每日自动清理离线节点的执行时间，24小时制 HH:MM
-	OfflineCleanupGraceHours int    `json:"offline_cleanup_grace_hours" default:"24"` // 离线超过多少小时后才允许自动清理
-	OfflineCleanupLastRunAt  string `json:"offline_cleanup_last_run_at" default:""`   // 最近一次自动清理离线节点的执行时间（内部使用）
-	UpdatedAt                time.Time
+	RecordEnabled              bool   `json:"record_enabled" default:"true"`                 // 是否启用记录功能
+	RecordPreserveTime         int    `json:"record_preserve_time" default:"720"`            // 记录保留时间，单位小时，默认30天
+	PingRecordPreserveTime     int    `json:"ping_record_preserve_time" default:"24"`        // Ping 记录保留时间，单位小时，默认1天
+	OfflineCleanupEnabled      bool   `json:"offline_cleanup_enabled" default:"false"`       // 是否启用每日自动清理离线节点
+	OfflineCleanupTime         string `json:"offline_cleanup_time" default:"03:00"`          // 每日自动清理离线节点的执行时间，24小时制 HH:MM
+	OfflineCleanupGraceHours   int    `json:"offline_cleanup_grace_hours" default:"24"`      // 离线超过多少小时后才允许自动清理
+	OfflineCleanupLastRunAt    string `json:"offline_cleanup_last_run_at" default:""`        // 最近一次自动清理离线节点的执行时间（内部使用）
+	FailoverV2SchedulerEnabled bool   `json:"failover_v2_scheduler_enabled" default:"false"` // 是否启用 V2 自动故障转移调度
+	UpdatedAt                  time.Time
 }
 
 const (
@@ -106,6 +107,7 @@ const (
 	OfflineCleanupTimeKey                  = "offline_cleanup_time"
 	OfflineCleanupGraceHoursKey            = "offline_cleanup_grace_hours"
 	OfflineCleanupLastRunAtKey             = "offline_cleanup_last_run_at"
+	FailoverV2SchedulerEnabledKey          = "failover_v2_scheduler_enabled"
 	TempShareTokenKey                      = "tempory_share_token"
 	TempShareTokenExpireAtKey              = "tempory_share_token_expire_at"
 	UpdatedAtKey                           = "updated_at"

@@ -289,9 +289,10 @@ func CompactRecord() error {
 }
 
 func migrateOldRecords(db *gorm.DB) error {
-	// 计算 4 小时前的时间
-	fourHoursAgo := time.Now().Add(-4 * time.Hour)
+	return migrateOldRecordsBefore(db, time.Now().Add(-4*time.Hour))
+}
 
+func migrateOldRecordsBefore(db *gorm.DB, fourHoursAgo time.Time) error {
 	// 查询 records 表中超过 4 小时的记录
 	var records []models.Record
 	if err := db.Table("records").Where("time < ?", fourHoursAgo).Find(&records).Error; err != nil {
@@ -469,8 +470,10 @@ func migrateOldRecords(db *gorm.DB) error {
 
 // migrateGPURecords 压缩GPU记录数据
 func migrateGPURecords(db *gorm.DB) error {
-	fourHoursAgo := time.Now().Add(-4 * time.Hour)
+	return migrateGPURecordsBefore(db, time.Now().Add(-4*time.Hour))
+}
 
+func migrateGPURecordsBefore(db *gorm.DB, fourHoursAgo time.Time) error {
 	// 查询超过4小时的GPU记录
 	var gpuRecords []models.GPURecord
 	if err := db.Where("time < ?", fourHoursAgo).Find(&gpuRecords).Error; err != nil {

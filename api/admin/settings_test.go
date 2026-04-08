@@ -223,6 +223,31 @@ func TestEditSettingsOnlyAllowsDelegatedCNConnectivityEditors(t *testing.T) {
 	}
 }
 
+func TestEditSystemSettingsUpdatesFailoverV2SchedulerFlag(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	setupAdminSettingsTestDB(t)
+
+	ctx, recorder := newSettingsTestContext(
+		t,
+		http.MethodPost,
+		[]byte(`{"failover_v2_scheduler_enabled":true}`),
+		"platform-admin",
+		"admin",
+	)
+	EditSystemSettings(ctx)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", recorder.Code)
+	}
+
+	enabled, err := config.GetAs[bool](config.FailoverV2SchedulerEnabledKey)
+	if err != nil {
+		t.Fatalf("failed to reload failover v2 scheduler flag: %v", err)
+	}
+	if !enabled {
+		t.Fatal("expected failover v2 scheduler flag to be enabled")
+	}
+}
+
 func TestEditSettingsValidatesOfflineCleanupSchedule(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	setupAdminSettingsTestDB(t)
