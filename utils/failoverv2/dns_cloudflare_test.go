@@ -289,6 +289,35 @@ func TestApplyCloudflareMemberDNSDetachRemovesOnlyReferencedRecord(t *testing.T)
 	}
 }
 
+func TestApplyCloudflareMemberDNSDetachRemovesStoredAAAAWhenCurrentAddressIsIPv4(t *testing.T) {
+	service := testCloudflareService()
+	service.DNSPayload = `{"zone_name":"example.com","record_name":"app.example.com","record_type":"A","sync_ipv6":true,"ttl":120}`
+
+	api := newTestCloudflareAPI([]cloudflareDNSRecord{
+		{ID: "rec-member-a", Name: "app.example.com", Type: "A", Content: "198.51.100.10", TTL: 120},
+		{ID: "rec-member-aaaa", Name: "app.example.com", Type: "AAAA", Content: "2001:db8::10", TTL: 120},
+	})
+	useMockCloudflareDNSDependencies(t, api)
+
+	member := testCloudflareMember()
+	member.DNSRecordRefs = `{"A":"rec-member-a","AAAA":"rec-member-aaaa"}`
+	member.CurrentAddress = "198.51.100.10"
+
+	result, err := ApplyCloudflareMemberDNSDetach(context.Background(), "user-a", service, member)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if len(result.Removed) != 2 {
+		t.Fatalf("expected both managed records to be removed, got %#v", result.Removed)
+	}
+	if _, ok := api.records["rec-member-a"]; ok {
+		t.Fatalf("expected referenced A record to be deleted, got %#v", api.records)
+	}
+	if _, ok := api.records["rec-member-aaaa"]; ok {
+		t.Fatalf("expected referenced AAAA record to be deleted, got %#v", api.records)
+	}
+}
+
 func TestApplyCloudflareMemberDNSDetachSkipsStaleRefWhenCurrentAddressMismatches(t *testing.T) {
 	api := newTestCloudflareAPI([]cloudflareDNSRecord{
 		{ID: "rec-member-1-a", Name: "app.example.com", Type: "A", Content: "198.51.100.10", TTL: 120},

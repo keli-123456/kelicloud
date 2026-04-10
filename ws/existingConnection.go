@@ -125,3 +125,18 @@ func DeleteLatestReport(uuid string) {
 	defer mu.Unlock()
 	delete(latestReport, uuid)
 }
+
+// DeleteLatestReportIfOffline removes the cached latest report only when the
+// client has no active WebSocket connection and no active presence lease.
+func DeleteLatestReportIfOffline(uuid string) {
+	mu.Lock()
+	defer mu.Unlock()
+
+	if _, exists := connectedClients[uuid]; exists {
+		return
+	}
+	if state, exists := presenceOnly[uuid]; exists && state.expire.After(time.Now()) {
+		return
+	}
+	delete(latestReport, uuid)
+}
