@@ -140,6 +140,25 @@ func TestDescribeExecutionAvailableActionsAllowsStoppingActiveExecution(t *testi
 	actions = DescribeExecutionAvailableActions(
 		&models.FailoverV2Service{},
 		&models.FailoverV2Member{},
+		&models.FailoverV2Execution{Status: "running"},
+	)
+	if !actions.StopExecution.Available {
+		t.Fatalf("expected legacy running execution to expose stop action, got reason %q", actions.StopExecution.Reason)
+	}
+
+	finishedAt := models.FromTime(time.Now())
+	actions = DescribeExecutionAvailableActions(
+		&models.FailoverV2Service{},
+		&models.FailoverV2Member{},
+		&models.FailoverV2Execution{Status: "running", FinishedAt: &finishedAt},
+	)
+	if actions.StopExecution.Available {
+		t.Fatal("expected finished legacy execution stop action to be unavailable")
+	}
+
+	actions = DescribeExecutionAvailableActions(
+		&models.FailoverV2Service{},
+		&models.FailoverV2Member{},
 		&models.FailoverV2Execution{Status: models.FailoverV2ExecutionStatusFailed},
 	)
 	if actions.StopExecution.Available {

@@ -878,7 +878,7 @@ func UpdateActiveExecutionFields(executionID uint, fields map[string]interface{}
 	result := dbcore.GetDBInstance().Model(&models.FailoverV2Execution{}).
 		Where("id = ?", executionID).
 		Where("finished_at IS NULL").
-		Where("status IN ?", activeFailoverV2ExecutionStatuses).
+		Where("status NOT IN ?", terminalFailoverV2ExecutionStatuses).
 		Updates(fields)
 	if result.Error != nil {
 		return false, result.Error
@@ -1078,10 +1078,7 @@ func hasActiveExecutionForServiceWithDB(db *gorm.DB, userUUID string, serviceID 
 	if err := db.Model(&models.FailoverV2Execution{}).
 		Where("service_id = ?", service.ID).
 		Where("finished_at IS NULL").
-		Where("status NOT IN ?", []string{
-			models.FailoverV2ExecutionStatusSuccess,
-			models.FailoverV2ExecutionStatusFailed,
-		}).
+		Where("status NOT IN ?", terminalFailoverV2ExecutionStatuses).
 		Count(&count).Error; err != nil {
 		return false, err
 	}
@@ -1126,7 +1123,9 @@ func recoverInterruptedExecutionsWithDB(db *gorm.DB, userUUID string, serviceID 
 		service = loaded
 	}
 
-	query := db.Where("status IN ?", activeFailoverV2ExecutionStatuses)
+	query := db.
+		Where("finished_at IS NULL").
+		Where("status NOT IN ?", terminalFailoverV2ExecutionStatuses)
 	if service != nil {
 		query = query.Where("service_id = ?", service.ID)
 	}
