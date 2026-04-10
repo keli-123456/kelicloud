@@ -169,7 +169,15 @@ func TestApplyAliyunMemberDNSAttachUpdatesOnlyTargetLine(t *testing.T) {
 	}
 	useMockAliyunDNSDependencies(t, client)
 
-	result, err := ApplyAliyunMemberDNSAttach(context.Background(), "user-a", testAliyunService(), testAliyunMember(), "203.0.113.8", "")
+	service := testAliyunService()
+	service.Members = []models.FailoverV2Member{
+		{ID: 1, Enabled: true, DNSLine: "telecom", CurrentAddress: "198.51.100.11"},
+		{ID: 2, Enabled: true, DNSLine: "telecom", CurrentAddress: "198.51.100.12"},
+	}
+	member := testAliyunMember()
+	member.ID = 1
+
+	result, err := ApplyAliyunMemberDNSAttach(context.Background(), "user-a", service, member, "203.0.113.8", "")
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
@@ -182,14 +190,14 @@ func TestApplyAliyunMemberDNSAttachUpdatesOnlyTargetLine(t *testing.T) {
 	if client.upsertCalls[0].Line != "telecom" || client.upsertCalls[0].Value != "203.0.113.8" {
 		t.Fatalf("unexpected upsert call: %#v", client.upsertCalls[0])
 	}
-	if len(client.deleteCalls) != 0 {
-		t.Fatalf("expected no delete calls for unowned records, got %#v", client.deleteCalls)
+	if len(client.deleteCalls) != 1 || client.deleteCalls[0] != "record-telecom-aaaa" {
+		t.Fatalf("expected stale AAAA record to be pruned, got %#v", client.deleteCalls)
 	}
 	if len(result.Records) != 1 || result.Records[0].Line != "telecom" || result.Records[0].Value != "203.0.113.8" {
 		t.Fatalf("unexpected result records: %#v", result.Records)
 	}
-	if len(result.Removed) != 0 {
-		t.Fatalf("expected no removed records, got %#v", result.Removed)
+	if len(result.Removed) != 1 || result.Removed[0].ID != "record-telecom-aaaa" {
+		t.Fatalf("expected removed stale AAAA record, got %#v", result.Removed)
 	}
 	if got := result.RecordRefs["A"]; got != "record-telecom-a" {
 		t.Fatalf("expected updated record ref, got %#v", result.RecordRefs)
@@ -309,7 +317,7 @@ func TestVerifyAliyunMemberDNSAttachedDetectsUnexpectedCounterpart(t *testing.T)
 	}
 }
 
-func TestVerifyAliyunMemberDNSAttachedIgnoresOtherMemberSameLineRecords(t *testing.T) {
+func TestVerifyAliyunMemberDNSAttachedDetectsUnexpectedNonMemberRecord(t *testing.T) {
 	client := &mockAliyunDNSClient{
 		records: []aliyunDNSRecord{
 			{RecordID: "record-owned-a", RR: "@", Type: "A", Value: "203.0.113.8", TTL: 60, Line: "telecom"},
@@ -325,8 +333,38 @@ func TestVerifyAliyunMemberDNSAttachedIgnoresOtherMemberSameLineRecords(t *testi
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
+	if verification.Success {
+		t.Fatalf("expected verification to fail on non-member record, got %#v", verification)
+	}
+	if len(verification.Unexpected) != 1 || verification.Unexpected[0].ID != "record-other-a" {
+		t.Fatalf("expected non-member record to be unexpected, got %#v", verification.Unexpected)
+	}
+}
+
+func TestVerifyAliyunMemberDNSAttachedAcceptsServiceMemberSet(t *testing.T) {
+	client := &mockAliyunDNSClient{
+		records: []aliyunDNSRecord{
+			{RecordID: "record-member-1-a", RR: "@", Type: "A", Value: "203.0.113.8", TTL: 60, Line: "telecom"},
+			{RecordID: "record-member-2-a", RR: "@", Type: "A", Value: "203.0.113.9", TTL: 60, Line: "telecom"},
+		},
+	}
+	useMockAliyunDNSDependencies(t, client)
+
+	service := testAliyunService()
+	service.Members = []models.FailoverV2Member{
+		{ID: 1, Enabled: true, DNSLine: "telecom", CurrentAddress: "203.0.113.8"},
+		{ID: 2, Enabled: true, DNSLine: "telecom", CurrentAddress: "203.0.113.9"},
+	}
+	member := testAliyunMember()
+	member.ID = 1
+	member.DNSRecordRefs = `{"A":"record-member-1-a"}`
+
+	verification, err := VerifyAliyunMemberDNSAttached(context.Background(), "user-a", service, member, "203.0.113.8", "")
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
 	if !verification.Success {
-		t.Fatalf("expected verification to ignore other member record, got %#v", verification)
+		t.Fatalf("expected verification to pass for service member set, got %#v", verification)
 	}
 }
 

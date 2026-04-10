@@ -216,7 +216,7 @@ func TestCloudflareDNSClientListRecordsPaginates(t *testing.T) {
 	}
 }
 
-func TestApplyCloudflareMemberDNSAttachKeepsOtherMemberRecords(t *testing.T) {
+func TestApplyCloudflareMemberDNSAttachPrunesNonMemberRecords(t *testing.T) {
 	api := newTestCloudflareAPI([]cloudflareDNSRecord{
 		{ID: "rec-other-a", Name: "app.example.com", Type: "A", Content: "198.51.100.20", TTL: 120},
 		{ID: "rec-owned-aaaa", Name: "app.example.com", Type: "AAAA", Content: "2001:db8::20", TTL: 120},
@@ -233,8 +233,12 @@ func TestApplyCloudflareMemberDNSAttachKeepsOtherMemberRecords(t *testing.T) {
 	if got := result.RecordRefs["A"]; got == "" {
 		t.Fatalf("expected A record ref, got %#v", result.RecordRefs)
 	}
-	if _, ok := api.records["rec-other-a"]; !ok {
-		t.Fatalf("expected other member record to remain, got %#v", api.records)
+	record, ok := api.records["rec-other-a"]
+	if !ok {
+		t.Fatalf("expected provider record to be reused, got %#v", api.records)
+	}
+	if record.Content != "203.0.113.8" {
+		t.Fatalf("expected reused record to carry target value, got %#v", record)
 	}
 	if _, ok := api.records["rec-owned-aaaa"]; ok {
 		t.Fatalf("expected owned stale AAAA record to be pruned, got %#v", api.records)
@@ -308,7 +312,7 @@ func TestApplyCloudflareMemberDNSDetachSkipsStaleRefWhenCurrentAddressMismatches
 	}
 }
 
-func TestVerifyCloudflareMemberDNSAttachedIgnoresOtherMemberRecords(t *testing.T) {
+func TestVerifyCloudflareMemberDNSAttachedDetectsUnexpectedNonMemberRecord(t *testing.T) {
 	api := newTestCloudflareAPI([]cloudflareDNSRecord{
 		{ID: "rec-owned-a", Name: "app.example.com", Type: "A", Content: "203.0.113.8", TTL: 120},
 		{ID: "rec-other-a", Name: "app.example.com", Type: "A", Content: "203.0.113.9", TTL: 120},
@@ -322,7 +326,35 @@ func TestVerifyCloudflareMemberDNSAttachedIgnoresOtherMemberRecords(t *testing.T
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
+	if verification.Success {
+		t.Fatalf("expected verification to fail, got %#v", verification)
+	}
+	if len(verification.Unexpected) != 1 || verification.Unexpected[0].ID != "rec-other-a" {
+		t.Fatalf("expected non-member record to be unexpected, got %#v", verification.Unexpected)
+	}
+}
+
+func TestVerifyCloudflareMemberDNSAttachedAcceptsServiceMemberSet(t *testing.T) {
+	api := newTestCloudflareAPI([]cloudflareDNSRecord{
+		{ID: "rec-member-1-a", Name: "app.example.com", Type: "A", Content: "203.0.113.8", TTL: 120},
+		{ID: "rec-member-2-a", Name: "app.example.com", Type: "A", Content: "203.0.113.9", TTL: 120},
+	})
+	useMockCloudflareDNSDependencies(t, api)
+
+	service := testCloudflareService()
+	service.Members = []models.FailoverV2Member{
+		{ID: 1, Enabled: true, DNSLine: "telecom", CurrentAddress: "203.0.113.8"},
+		{ID: 2, Enabled: true, DNSLine: "unicom", CurrentAddress: "203.0.113.9"},
+	}
+	member := testCloudflareMember()
+	member.ID = 1
+	member.DNSRecordRefs = `{"A":"rec-member-1-a"}`
+
+	verification, err := VerifyCloudflareMemberDNSAttached(context.Background(), "user-a", service, member, "203.0.113.8", "")
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
 	if !verification.Success {
-		t.Fatalf("expected verification to succeed, got %#v", verification)
+		t.Fatalf("expected verification to pass for service member set, got %#v", verification)
 	}
 }
