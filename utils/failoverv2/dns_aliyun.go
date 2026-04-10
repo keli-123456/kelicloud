@@ -106,69 +106,108 @@ func ApplyAliyunMemberDNSAttach(ctx context.Context, userUUID string, service *m
 
 	for _, recordType := range plan.RecordTypes {
 		recordType = strings.ToUpper(strings.TrimSpace(recordType))
-		recordValue, err := selectAliyunRecordValue(recordType, ipv4, ipv6)
+		targetValue, err := selectAliyunRecordValue(recordType, ipv4, ipv6)
 		if err != nil {
 			return nil, err
 		}
 
-		storedRecordID := strings.TrimSpace(operation.recordRefs[recordType])
-		existingMatch := findAliyunDNSRecord(existingRecords, operation.rr, recordType, operation.line)
-		if referenced := findAliyunDNSRecordByID(existingRecords, storedRecordID); strings.TrimSpace(referenced.RecordID) != "" && sameAliyunRecordIdentity(referenced, operation.rr, recordType) && sameAliyunRecordLine(referenced.Line, operation.line) {
-			existingMatch = referenced
-		}
-		if exactMatch := findAliyunDNSRecordExactMatch(existingRecords, operation.rr, recordType, operation.line, recordValue); strings.TrimSpace(exactMatch.RecordID) != "" {
-			existingMatch = exactMatch
+		expectedValues, err := buildServiceMemberExpectedRecordValues(
+			service,
+			member,
+			recordType,
+			ipv4,
+			ipv6,
+			func(candidate *models.FailoverV2Member) bool {
+				return memberHasAliyunLine(candidate, operation.line)
+			},
+		)
+		if err != nil {
+			return nil, err
 		}
 
-		recordID := strings.TrimSpace(existingMatch.RecordID)
-		if recordID == "" || !sameAliyunRecordIdentity(existingMatch, operation.rr, recordType) || !sameAliyunRecordLine(existingMatch.Line, operation.line) || !sameAliyunRecordValue(existingMatch.Value, recordValue) || existingMatch.TTL != operation.ttl {
-			recordID, err = operation.client.upsertRecord(contextOrBackground(ctx), recordID, operation.domainName, operation.rr, recordType, recordValue, operation.ttl, operation.line)
-			if err != nil {
-				return nil, err
+		selectedRecordIDs := map[string]struct{}{}
+		targetRecordID := ""
+
+		for _, expectedValue := range expectedValues {
+			existingMatch := findAliyunDNSRecordExactMatch(existingRecords, operation.rr, recordType, operation.line, expectedValue)
+			if strings.TrimSpace(existingMatch.RecordID) == "" {
+				existingMatch = findAliyunDNSRecordForAssignment(existingRecords, selectedRecordIDs, operation.rr, recordType, operation.line)
 			}
-		}
-
-		recordRefs[recordType] = recordID
-		records = append(records, buildAliyunMemberDNSRecord(operation.domainName, operation.rr, operation.line, recordType, recordValue, recordID))
-
-		if storedRecordID != "" && storedRecordID != strings.TrimSpace(recordID) {
-			referenced := findAliyunDNSRecordByID(existingRecords, storedRecordID)
-			if strings.TrimSpace(referenced.RecordID) != "" &&
-				sameAliyunRecordIdentity(referenced, operation.rr, recordType) &&
-				sameAliyunRecordLine(referenced.Line, operation.line) {
-				if _, ok := removedRecordIDs[storedRecordID]; !ok {
-					if err := operation.client.deleteRecord(contextOrBackground(ctx), storedRecordID); err != nil {
-						return nil, err
-					}
-					removedRecordIDs[storedRecordID] = struct{}{}
-					removed = append(removed, buildAliyunMemberDNSRecordFromExisting(operation.domainName, referenced))
+			recordID := strings.TrimSpace(existingMatch.RecordID)
+			if recordID == "" || !sameAliyunRecordValue(existingMatch.Value, expectedValue) || existingMatch.TTL != operation.ttl {
+				recordID, err = operation.client.upsertRecord(
+					contextOrBackground(ctx),
+					recordID,
+					operation.domainName,
+					operation.rr,
+					recordType,
+					expectedValue,
+					operation.ttl,
+					operation.line,
+				)
+				if err != nil {
+					return nil, err
 				}
 			}
+			recordID = strings.TrimSpace(recordID)
+			if recordID == "" {
+				return nil, fmt.Errorf("aliyun %s record id is empty after upsert", recordType)
+			}
+			selectedRecordIDs[recordID] = struct{}{}
+			if targetRecordID == "" && sameAddress(expectedValue, targetValue) {
+				targetRecordID = recordID
+			}
+		}
+
+		for _, existingRecord := range existingRecords {
+			if !sameAliyunRecordIdentity(existingRecord, operation.rr, recordType) || !sameAliyunRecordLine(existingRecord.Line, operation.line) {
+				continue
+			}
+			existingRecordID := strings.TrimSpace(existingRecord.RecordID)
+			if existingRecordID == "" {
+				continue
+			}
+			if _, ok := selectedRecordIDs[existingRecordID]; ok {
+				continue
+			}
+			if _, ok := removedRecordIDs[existingRecordID]; ok {
+				continue
+			}
+			if err := operation.client.deleteRecord(contextOrBackground(ctx), existingRecordID); err != nil {
+				return nil, err
+			}
+			removedRecordIDs[existingRecordID] = struct{}{}
+			removed = append(removed, buildAliyunMemberDNSRecordFromExisting(operation.domainName, existingRecord))
+		}
+
+		if targetValue != "" && targetRecordID == "" {
+			return nil, fmt.Errorf("aliyun target %s record not found for line %s", recordType, operation.line)
+		}
+		if targetRecordID != "" {
+			recordRefs[recordType] = targetRecordID
+			records = append(records, buildAliyunMemberDNSRecord(operation.domainName, operation.rr, operation.line, recordType, targetValue, targetRecordID))
 		}
 	}
 
 	for _, recordType := range plan.PrunedTypes {
 		recordType = strings.ToUpper(strings.TrimSpace(recordType))
-		recordID := strings.TrimSpace(operation.recordRefs[recordType])
-		if recordID == "" {
-			continue
+		for _, existingRecord := range existingRecords {
+			if !sameAliyunRecordIdentity(existingRecord, operation.rr, recordType) || !sameAliyunRecordLine(existingRecord.Line, operation.line) {
+				continue
+			}
+			existingRecordID := strings.TrimSpace(existingRecord.RecordID)
+			if existingRecordID == "" {
+				continue
+			}
+			if _, ok := removedRecordIDs[existingRecordID]; ok {
+				continue
+			}
+			if err := operation.client.deleteRecord(contextOrBackground(ctx), existingRecordID); err != nil {
+				return nil, err
+			}
+			removedRecordIDs[existingRecordID] = struct{}{}
+			removed = append(removed, buildAliyunMemberDNSRecordFromExisting(operation.domainName, existingRecord))
 		}
-		existingRecord := findAliyunDNSRecordByID(existingRecords, recordID)
-		existingRecordID := strings.TrimSpace(existingRecord.RecordID)
-		if existingRecordID == "" {
-			continue
-		}
-		if _, ok := removedRecordIDs[existingRecordID]; ok {
-			continue
-		}
-		if !sameAliyunRecordIdentity(existingRecord, operation.rr, recordType) || !sameAliyunRecordLine(existingRecord.Line, operation.line) {
-			continue
-		}
-		if err := operation.client.deleteRecord(contextOrBackground(ctx), existingRecordID); err != nil {
-			return nil, err
-		}
-		removedRecordIDs[existingRecordID] = struct{}{}
-		removed = append(removed, buildAliyunMemberDNSRecordFromExisting(operation.domainName, existingRecord))
 	}
 
 	return &AliyunMemberDNSResult{
@@ -289,33 +328,41 @@ func VerifyAliyunMemberDNSAttached(ctx context.Context, userUUID string, service
 	}
 
 	expected := make([]AliyunMemberDNSRecord, 0, len(plan.RecordTypes))
-	observed := make([]AliyunMemberDNSRecord, 0, len(plan.RecordTypes))
+	observed := make([]AliyunMemberDNSRecord, 0)
 	for _, recordType := range plan.RecordTypes {
 		recordType = strings.ToUpper(strings.TrimSpace(recordType))
-		recordValue, err := selectAliyunRecordValue(recordType, ipv4, ipv6)
+		expectedValues, err := buildServiceMemberExpectedRecordValues(
+			service,
+			member,
+			recordType,
+			ipv4,
+			ipv6,
+			func(candidate *models.FailoverV2Member) bool {
+				return memberHasAliyunLine(candidate, operation.line)
+			},
+		)
 		if err != nil {
 			return nil, err
 		}
-		expected = append(expected, buildAliyunMemberDNSRecord(operation.domainName, operation.rr, operation.line, recordType, recordValue, ""))
-		if record := findOwnedOrMatchingAliyunRecord(existingRecords, operation.recordRefs[recordType], operation.rr, recordType, operation.line, recordValue); strings.TrimSpace(record.RecordID) != "" {
+		for _, expectedValue := range expectedValues {
+			expected = append(expected, buildAliyunMemberDNSRecord(operation.domainName, operation.rr, operation.line, recordType, expectedValue, ""))
+		}
+		for _, record := range existingRecords {
+			if !sameAliyunRecordIdentity(record, operation.rr, recordType) || !sameAliyunRecordLine(record.Line, operation.line) {
+				continue
+			}
 			observed = append(observed, buildAliyunMemberDNSRecordFromExisting(operation.domainName, record))
 		}
 	}
 
-	for _, recordType := range managedAliyunRecordTypes(operation.payload.RecordType) {
+	for _, recordType := range plan.PrunedTypes {
 		recordType = strings.ToUpper(strings.TrimSpace(recordType))
-		recordID := strings.TrimSpace(operation.recordRefs[recordType])
-		if recordID == "" {
-			continue
+		for _, record := range existingRecords {
+			if !sameAliyunRecordIdentity(record, operation.rr, recordType) || !sameAliyunRecordLine(record.Line, operation.line) {
+				continue
+			}
+			observed = append(observed, buildAliyunMemberDNSRecordFromExisting(operation.domainName, record))
 		}
-		record := findAliyunDNSRecordByID(existingRecords, recordID)
-		if strings.TrimSpace(record.RecordID) == "" {
-			continue
-		}
-		if containsAliyunRecord(observed, record.RecordID) {
-			continue
-		}
-		observed = append(observed, buildAliyunMemberDNSRecordFromExisting(operation.domainName, record))
 	}
 
 	return evaluateAliyunMemberDNSVerification(operation.domainName, operation.rr, operation.line, expected, observed), nil
@@ -787,6 +834,25 @@ func findAliyunDNSRecordExactMatch(records []aliyunDNSRecord, rr, recordType, li
 		}
 		if !sameAliyunRecordValue(record.Value, value) {
 			continue
+		}
+		return record
+	}
+	return aliyunDNSRecord{}
+}
+
+func findAliyunDNSRecordForAssignment(records []aliyunDNSRecord, selectedRecordIDs map[string]struct{}, rr, recordType, line string) aliyunDNSRecord {
+	for _, record := range records {
+		if !sameAliyunRecordIdentity(record, rr, recordType) || !sameAliyunRecordLine(record.Line, line) {
+			continue
+		}
+		recordID := strings.TrimSpace(record.RecordID)
+		if recordID == "" {
+			continue
+		}
+		if selectedRecordIDs != nil {
+			if _, ok := selectedRecordIDs[recordID]; ok {
+				continue
+			}
 		}
 		return record
 	}

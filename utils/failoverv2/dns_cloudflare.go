@@ -148,68 +148,108 @@ func ApplyCloudflareMemberDNSAttach(ctx context.Context, userUUID string, servic
 	removedIDs := map[string]struct{}{}
 
 	for _, recordType := range plan.RecordTypes {
-		recordValue, err := selectAliyunRecordValue(recordType, ipv4, ipv6)
+		recordType = strings.ToUpper(strings.TrimSpace(recordType))
+		targetValue, err := selectAliyunRecordValue(recordType, ipv4, ipv6)
 		if err != nil {
 			return nil, err
 		}
 
-		existingRecordID := strings.TrimSpace(operation.recordRefs[strings.ToUpper(strings.TrimSpace(recordType))])
-		record, err := operation.client.upsertRecord(
-			contextOrBackground(ctx),
-			operation.zoneID,
-			existingRecordID,
-			operation.recordName,
+		expectedValues, err := buildServiceMemberExpectedRecordValues(
+			service,
+			member,
 			recordType,
-			recordValue,
-			operation.ttl,
-			operation.proxied,
+			ipv4,
+			ipv6,
+			nil,
 		)
 		if err != nil {
 			return nil, err
 		}
 
-		recordRefs[strings.ToUpper(strings.TrimSpace(recordType))] = strings.TrimSpace(record.ID)
-		records = append(records, buildCloudflareMemberDNSRecord(operation.zoneID, operation.zoneName, operation.recordName, operation.line, *record))
+		selectedRecordIDs := map[string]struct{}{}
+		targetRecordID := ""
+		targetRecord := cloudflareDNSRecord{}
+
+		for _, expectedValue := range expectedValues {
+			existingMatch := findCloudflareMatchingRecord(existingRecords, operation.recordName, recordType, expectedValue)
+			if strings.TrimSpace(existingMatch.ID) == "" {
+				existingMatch = findCloudflareRecordForAssignment(existingRecords, selectedRecordIDs, operation.recordName, recordType)
+			}
+			existingRecordID := strings.TrimSpace(existingMatch.ID)
+
+			record, err := operation.client.upsertRecord(
+				contextOrBackground(ctx),
+				operation.zoneID,
+				existingRecordID,
+				operation.recordName,
+				recordType,
+				expectedValue,
+				operation.ttl,
+				operation.proxied,
+			)
+			if err != nil {
+				return nil, err
+			}
+			recordID := strings.TrimSpace(record.ID)
+			if recordID == "" {
+				return nil, fmt.Errorf("cloudflare %s record id is empty after upsert", recordType)
+			}
+			selectedRecordIDs[recordID] = struct{}{}
+			if targetRecordID == "" && sameAddress(expectedValue, targetValue) {
+				targetRecordID = recordID
+				targetRecord = *record
+			}
+		}
+
+		for _, existingRecord := range existingRecords {
+			if !sameCloudflareRecordIdentity(existingRecord, operation.recordName, recordType) {
+				continue
+			}
+			existingRecordID := strings.TrimSpace(existingRecord.ID)
+			if existingRecordID == "" {
+				continue
+			}
+			if _, ok := selectedRecordIDs[existingRecordID]; ok {
+				continue
+			}
+			if _, ok := removedIDs[existingRecordID]; ok {
+				continue
+			}
+			if err := operation.client.deleteRecord(contextOrBackground(ctx), operation.zoneID, existingRecordID); err != nil {
+				return nil, err
+			}
+			removedIDs[existingRecordID] = struct{}{}
+			removed = append(removed, buildCloudflareMemberDNSRecord(operation.zoneID, operation.zoneName, operation.recordName, operation.line, existingRecord))
+		}
+
+		if targetValue != "" && targetRecordID == "" {
+			return nil, fmt.Errorf("cloudflare target %s record not found", recordType)
+		}
+		if targetRecordID != "" {
+			recordRefs[recordType] = targetRecordID
+			records = append(records, buildCloudflareMemberDNSRecord(operation.zoneID, operation.zoneName, operation.recordName, operation.line, targetRecord))
+		}
 	}
 
 	for _, recordType := range plan.PrunedTypes {
 		recordType = strings.ToUpper(strings.TrimSpace(recordType))
-		recordID := strings.TrimSpace(operation.recordRefs[recordType])
-		if recordID == "" {
-			continue
+		for _, existingRecord := range existingRecords {
+			if !sameCloudflareRecordIdentity(existingRecord, operation.recordName, recordType) {
+				continue
+			}
+			existingRecordID := strings.TrimSpace(existingRecord.ID)
+			if existingRecordID == "" {
+				continue
+			}
+			if _, ok := removedIDs[existingRecordID]; ok {
+				continue
+			}
+			if err := operation.client.deleteRecord(contextOrBackground(ctx), operation.zoneID, existingRecordID); err != nil {
+				return nil, err
+			}
+			removedIDs[existingRecordID] = struct{}{}
+			removed = append(removed, buildCloudflareMemberDNSRecord(operation.zoneID, operation.zoneName, operation.recordName, operation.line, existingRecord))
 		}
-		record := findCloudflareDNSRecordByID(existingRecords, recordID)
-		if strings.TrimSpace(record.ID) == "" {
-			continue
-		}
-		if err := operation.client.deleteRecord(contextOrBackground(ctx), operation.zoneID, record.ID); err != nil {
-			return nil, err
-		}
-		removedIDs[record.ID] = struct{}{}
-		removed = append(removed, buildCloudflareMemberDNSRecord(operation.zoneID, operation.zoneName, operation.recordName, operation.line, record))
-	}
-
-	for recordType, recordID := range operation.recordRefs {
-		recordType = strings.ToUpper(strings.TrimSpace(recordType))
-		recordID = strings.TrimSpace(recordID)
-		if recordID == "" {
-			continue
-		}
-		if _, ok := removedIDs[recordID]; ok {
-			continue
-		}
-		if _, ok := recordRefs[recordType]; ok {
-			continue
-		}
-		record := findCloudflareDNSRecordByID(existingRecords, recordID)
-		if strings.TrimSpace(record.ID) == "" {
-			continue
-		}
-		if err := operation.client.deleteRecord(contextOrBackground(ctx), operation.zoneID, record.ID); err != nil {
-			return nil, err
-		}
-		removedIDs[record.ID] = struct{}{}
-		removed = append(removed, buildCloudflareMemberDNSRecord(operation.zoneID, operation.zoneName, operation.recordName, operation.line, record))
 	}
 
 	return &CloudflareMemberDNSResult{
@@ -321,64 +361,82 @@ func VerifyCloudflareMemberDNSAttached(ctx context.Context, userUUID string, ser
 	}
 
 	expected := make([]CloudflareMemberDNSRecord, 0, len(plan.RecordTypes))
-	observed := make([]CloudflareMemberDNSRecord, 0, len(plan.RecordTypes))
+	observed := make([]CloudflareMemberDNSRecord, 0)
 	missing := make([]CloudflareMemberDNSRecord, 0)
 	unexpected := make([]CloudflareMemberDNSRecord, 0)
 
 	for _, recordType := range plan.RecordTypes {
-		recordValue, err := selectAliyunRecordValue(recordType, ipv4, ipv6)
+		recordType = strings.ToUpper(strings.TrimSpace(recordType))
+		expectedValues, err := buildServiceMemberExpectedRecordValues(
+			service,
+			member,
+			recordType,
+			ipv4,
+			ipv6,
+			nil,
+		)
 		if err != nil {
 			return nil, err
 		}
-		expectedRecord := CloudflareMemberDNSRecord{
-			Provider: models.FailoverDNSProviderCloudflare,
-			Name:     operation.recordName,
-			Type:     strings.ToUpper(strings.TrimSpace(recordType)),
-			Value:    recordValue,
-			ZoneID:   operation.zoneID,
-			ZoneName: operation.zoneName,
-			Line:     operation.line,
-			TTL:      operation.ttl,
-			Proxied:  ptrBool(operation.proxied),
+		for _, expectedValue := range expectedValues {
+			expected = append(expected, CloudflareMemberDNSRecord{
+				Provider: models.FailoverDNSProviderCloudflare,
+				Name:     operation.recordName,
+				Type:     recordType,
+				Value:    expectedValue,
+				ZoneID:   operation.zoneID,
+				ZoneName: operation.zoneName,
+				Line:     operation.line,
+				TTL:      operation.ttl,
+				Proxied:  ptrBool(operation.proxied),
+			})
 		}
-		expected = append(expected, expectedRecord)
-
-		if record := findOwnedOrMatchingCloudflareRecord(existingRecords, operation.recordRefs[recordType], operation.recordName, recordType, recordValue); strings.TrimSpace(record.ID) != "" {
+		for _, record := range existingRecords {
+			if !sameCloudflareRecordIdentity(record, operation.recordName, recordType) {
+				continue
+			}
 			observed = append(observed, buildCloudflareMemberDNSRecord(operation.zoneID, operation.zoneName, operation.recordName, operation.line, record))
-		} else {
-			missing = append(missing, expectedRecord)
 		}
 	}
 
-	for _, recordType := range managedAliyunRecordTypes(operation.payload.RecordType) {
+	for _, recordType := range plan.PrunedTypes {
 		recordType = strings.ToUpper(strings.TrimSpace(recordType))
-		recordID := strings.TrimSpace(operation.recordRefs[recordType])
-		if recordID == "" {
-			continue
-		}
-		record := findCloudflareDNSRecordByID(existingRecords, recordID)
-		if strings.TrimSpace(record.ID) == "" {
-			continue
-		}
-		if !sameCloudflareRecordIdentity(record, operation.recordName, recordType) {
-			unexpected = append(unexpected, buildCloudflareMemberDNSRecord(operation.zoneID, operation.zoneName, operation.recordName, operation.line, record))
-			continue
-		}
-		if containsCloudflareRecord(observed, record.ID) {
-			continue
-		}
-		if containsRecordType(plan.RecordTypes, recordType) {
-			expectedValue, valueErr := selectAliyunRecordValue(recordType, ipv4, ipv6)
-			if valueErr == nil && sameAddress(record.Content, expectedValue) {
-				observed = append(observed, buildCloudflareMemberDNSRecord(operation.zoneID, operation.zoneName, operation.recordName, operation.line, record))
+		for _, record := range existingRecords {
+			if !sameCloudflareRecordIdentity(record, operation.recordName, recordType) {
 				continue
 			}
+			observed = append(observed, buildCloudflareMemberDNSRecord(operation.zoneID, operation.zoneName, operation.recordName, operation.line, record))
 		}
-		unexpected = append(unexpected, buildCloudflareMemberDNSRecord(operation.zoneID, operation.zoneName, operation.recordName, operation.line, record))
 	}
 
 	sortCloudflareMemberDNSRecords(expected)
 	sortCloudflareMemberDNSRecords(observed)
+
+	matchedObserved := make([]bool, len(observed))
+	for _, expectedRecord := range expected {
+		found := false
+		for index, observedRecord := range observed {
+			if matchedObserved[index] {
+				continue
+			}
+			if !cloudflareMemberDNSRecordsMatch(expectedRecord, observedRecord) {
+				continue
+			}
+			matchedObserved[index] = true
+			found = true
+			break
+		}
+		if !found {
+			missing = append(missing, expectedRecord)
+		}
+	}
+	for index, observedRecord := range observed {
+		if matchedObserved[index] {
+			continue
+		}
+		unexpected = append(unexpected, observedRecord)
+	}
+
 	sortCloudflareMemberDNSRecords(missing)
 	sortCloudflareMemberDNSRecords(unexpected)
 
@@ -637,6 +695,12 @@ func containsRecordType(values []string, target string) bool {
 	return false
 }
 
+func cloudflareMemberDNSRecordsMatch(expected, observed CloudflareMemberDNSRecord) bool {
+	return strings.EqualFold(strings.TrimSpace(expected.Name), strings.TrimSpace(observed.Name)) &&
+		strings.EqualFold(strings.TrimSpace(expected.Type), strings.TrimSpace(observed.Type)) &&
+		sameAddress(expected.Value, observed.Value)
+}
+
 func sameCloudflareRecordIdentity(record cloudflareDNSRecord, name, recordType string) bool {
 	return strings.EqualFold(strings.TrimSpace(record.Name), strings.TrimSpace(name)) &&
 		strings.EqualFold(strings.TrimSpace(record.Type), strings.TrimSpace(recordType))
@@ -659,6 +723,25 @@ func findCloudflareMatchingRecord(records []cloudflareDNSRecord, name, recordTyp
 	for _, record := range records {
 		if !sameCloudflareRecordIdentity(record, name, recordType) || !sameAddress(record.Content, content) {
 			continue
+		}
+		return record
+	}
+	return cloudflareDNSRecord{}
+}
+
+func findCloudflareRecordForAssignment(records []cloudflareDNSRecord, selectedRecordIDs map[string]struct{}, name, recordType string) cloudflareDNSRecord {
+	for _, record := range records {
+		if !sameCloudflareRecordIdentity(record, name, recordType) {
+			continue
+		}
+		recordID := strings.TrimSpace(record.ID)
+		if recordID == "" {
+			continue
+		}
+		if selectedRecordIDs != nil {
+			if _, ok := selectedRecordIDs[recordID]; ok {
+				continue
+			}
 		}
 		return record
 	}

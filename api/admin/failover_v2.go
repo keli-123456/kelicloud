@@ -7,14 +7,17 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/api"
+	"github.com/komari-monitor/komari/common"
 	clientdb "github.com/komari-monitor/komari/database/clients"
 	clipboarddb "github.com/komari-monitor/komari/database/clipboard"
 	failoverv2db "github.com/komari-monitor/komari/database/failoverv2"
 	"github.com/komari-monitor/komari/database/models"
 	failoverv2svc "github.com/komari-monitor/komari/utils/failoverv2"
+	"github.com/komari-monitor/komari/ws"
 	"gorm.io/gorm"
 )
 
@@ -117,8 +120,20 @@ type failoverV2MemberView struct {
 	LastTriggeredAt     *models.LocalTime          `json:"last_triggered_at"`
 	LastSucceededAt     *models.LocalTime          `json:"last_succeeded_at"`
 	LastFailedAt        *models.LocalTime          `json:"last_failed_at"`
+	Probe               failoverV2ProbeView        `json:"probe"`
 	CreatedAt           models.LocalTime           `json:"created_at"`
 	UpdatedAt           models.LocalTime           `json:"updated_at"`
+}
+
+type failoverV2ProbeView struct {
+	Status              string            `json:"status"`
+	Target              string            `json:"target,omitempty"`
+	Latency             int64             `json:"latency,omitempty"`
+	Message             string            `json:"message,omitempty"`
+	CheckedAt           *models.LocalTime `json:"checked_at"`
+	ReportUpdatedAt     *models.LocalTime `json:"report_updated_at"`
+	ConsecutiveFailures int               `json:"consecutive_failures"`
+	Stale               bool              `json:"stale"`
 }
 
 type failoverV2ExecutionSummaryView struct {
@@ -516,7 +531,54 @@ func normalizeFailoverV2MemberDNSLines(req *failoverV2MemberRequest) []string {
 	return lines
 }
 
-func buildFailoverV2MemberView(member models.FailoverV2Member) failoverV2MemberView {
+func buildFailoverV2ProbeView(member *models.FailoverV2Member, report *common.Report, now time.Time) failoverV2ProbeView {
+	view := failoverV2ProbeView{
+		Status: "unavailable",
+		Stale:  true,
+	}
+	if member != nil && strings.TrimSpace(member.WatchClientUUID) == "" {
+		if strings.TrimSpace(member.Mode) == models.FailoverV2MemberModeExistingClient {
+			view.Message = "existing_client member requires watch_client_uuid"
+		} else {
+			view.Message = "member is not initialized"
+		}
+		return view
+	}
+	if member == nil || report == nil || report.CNConnectivity == nil {
+		return view
+	}
+
+	view.Status = strings.TrimSpace(report.CNConnectivity.Status)
+	view.Target = strings.TrimSpace(report.CNConnectivity.Target)
+	view.Latency = report.CNConnectivity.Latency
+	view.Message = strings.TrimSpace(report.CNConnectivity.Message)
+	view.ConsecutiveFailures = report.CNConnectivity.ConsecutiveFailures
+
+	if !report.CNConnectivity.CheckedAt.IsZero() {
+		checkedAt := models.FromTime(report.CNConnectivity.CheckedAt)
+		view.CheckedAt = &checkedAt
+	}
+	if !report.UpdatedAt.IsZero() {
+		reportUpdatedAt := models.FromTime(report.UpdatedAt)
+		view.ReportUpdatedAt = &reportUpdatedAt
+	}
+
+	staleAfterSeconds := member.StaleAfterSeconds
+	if staleAfterSeconds <= 0 {
+		staleAfterSeconds = 300
+	}
+	reportTime := report.UpdatedAt
+	if report.CNConnectivity.CheckedAt.After(reportTime) {
+		reportTime = report.CNConnectivity.CheckedAt
+	}
+	view.Stale = reportTime.IsZero() || now.Sub(reportTime) > time.Duration(staleAfterSeconds)*time.Second
+	if view.Status == "" {
+		view.Status = "unknown"
+	}
+	return view
+}
+
+func buildFailoverV2MemberView(member models.FailoverV2Member, probe failoverV2ProbeView) failoverV2MemberView {
 	return failoverV2MemberView{
 		ID:                  member.ID,
 		ServiceID:           member.ServiceID,
@@ -545,6 +607,7 @@ func buildFailoverV2MemberView(member models.FailoverV2Member) failoverV2MemberV
 		LastTriggeredAt:     member.LastTriggeredAt,
 		LastSucceededAt:     member.LastSucceededAt,
 		LastFailedAt:        member.LastFailedAt,
+		Probe:               probe,
 		CreatedAt:           member.CreatedAt,
 		UpdatedAt:           member.UpdatedAt,
 	}
@@ -751,11 +814,12 @@ func loadFailoverV2ExecutionView(scope ownerScope, serviceID, executionID uint) 
 	return &view, nil
 }
 
-func buildFailoverV2ServiceView(service *models.FailoverV2Service, recentExecutions []models.FailoverV2Execution) failoverV2ServiceView {
+func buildFailoverV2ServiceView(service *models.FailoverV2Service, recentExecutions []models.FailoverV2Execution, latestReports map[string]*common.Report, now time.Time) failoverV2ServiceView {
 	members := make([]failoverV2MemberView, 0, len(service.Members))
 	enabledMemberCount := 0
 	for _, member := range service.Members {
-		members = append(members, buildFailoverV2MemberView(member))
+		report := latestReports[strings.TrimSpace(member.WatchClientUUID)]
+		members = append(members, buildFailoverV2MemberView(member, buildFailoverV2ProbeView(&member, report, now)))
 		if member.Enabled {
 			enabledMemberCount++
 		}
@@ -803,7 +867,7 @@ func loadFailoverV2ServiceView(scope ownerScope, serviceID uint) (*failoverV2Ser
 		return nil, err
 	}
 
-	view := buildFailoverV2ServiceView(service, recentExecutions)
+	view := buildFailoverV2ServiceView(service, recentExecutions, ws.GetLatestReport(), time.Now())
 	return &view, nil
 }
 
@@ -1392,6 +1456,8 @@ func GetFailoverV2Services(c *gin.Context) {
 	}
 
 	const listRecentExecutionLimit = 50
+	now := time.Now()
+	latestReports := ws.GetLatestReport()
 	response := make([]failoverV2ServiceView, 0, len(services))
 	for i := range services {
 		recentExecutions, execErr := failoverv2db.ListExecutionsByServiceForUser(scope.UserUUID, services[i].ID, listRecentExecutionLimit)
@@ -1399,7 +1465,7 @@ func GetFailoverV2Services(c *gin.Context) {
 			api.RespondError(c, http.StatusInternalServerError, "Failed to list failover v2 service executions: "+execErr.Error())
 			return
 		}
-		response = append(response, buildFailoverV2ServiceView(&services[i], recentExecutions))
+		response = append(response, buildFailoverV2ServiceView(&services[i], recentExecutions, latestReports, now))
 	}
 	api.RespondSuccess(c, response)
 }
@@ -1432,7 +1498,7 @@ func CreateFailoverV2Service(c *gin.Context) {
 		return
 	}
 
-	api.RespondSuccess(c, buildFailoverV2ServiceView(created, nil))
+	api.RespondSuccess(c, buildFailoverV2ServiceView(created, nil, ws.GetLatestReport(), time.Now()))
 }
 
 func GetFailoverV2Service(c *gin.Context) {
