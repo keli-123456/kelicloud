@@ -182,17 +182,14 @@ func TestApplyAliyunMemberDNSAttachUpdatesOnlyTargetLine(t *testing.T) {
 	if client.upsertCalls[0].Line != "telecom" || client.upsertCalls[0].Value != "203.0.113.8" {
 		t.Fatalf("unexpected upsert call: %#v", client.upsertCalls[0])
 	}
-	if len(client.deleteCalls) != 2 {
-		t.Fatalf("expected 2 delete calls, got %#v", client.deleteCalls)
-	}
-	if client.deleteCalls[0] != "record-telecom-a-duplicate" || client.deleteCalls[1] != "record-telecom-aaaa" {
-		t.Fatalf("unexpected delete calls: %#v", client.deleteCalls)
+	if len(client.deleteCalls) != 0 {
+		t.Fatalf("expected no delete calls for unowned records, got %#v", client.deleteCalls)
 	}
 	if len(result.Records) != 1 || result.Records[0].Line != "telecom" || result.Records[0].Value != "203.0.113.8" {
 		t.Fatalf("unexpected result records: %#v", result.Records)
 	}
-	if len(result.Removed) != 2 {
-		t.Fatalf("expected removed records to be captured, got %#v", result.Removed)
+	if len(result.Removed) != 0 {
+		t.Fatalf("expected no removed records, got %#v", result.Removed)
 	}
 	if got := result.RecordRefs["A"]; got != "record-telecom-a" {
 		t.Fatalf("expected updated record ref, got %#v", result.RecordRefs)
@@ -210,13 +207,17 @@ func TestApplyAliyunMemberDNSDetachRemovesOnlyManagedTargetLine(t *testing.T) {
 		records: []aliyunDNSRecord{
 			{RecordID: "record-default-a", RR: "@", Type: "A", Value: "198.51.100.10", TTL: 60, Line: "default"},
 			{RecordID: "record-telecom-a", RR: "@", Type: "A", Value: "198.51.100.11", TTL: 60, Line: "telecom"},
+			{RecordID: "record-telecom-a-other-member", RR: "@", Type: "A", Value: "198.51.100.12", TTL: 60, Line: "telecom"},
 			{RecordID: "record-telecom-aaaa", RR: "@", Type: "AAAA", Value: "2001:db8::11", TTL: 60, Line: "telecom"},
 			{RecordID: "record-telecom-txt", RR: "@", Type: "TXT", Value: "ignore-me", TTL: 60, Line: "telecom"},
 		},
 	}
 	useMockAliyunDNSDependencies(t, client)
 
-	result, err := ApplyAliyunMemberDNSDetach(context.Background(), "user-a", service, testAliyunMember())
+	member := testAliyunMember()
+	member.DNSRecordRefs = `{"A":"record-telecom-a","AAAA":"record-telecom-aaaa"}`
+
+	result, err := ApplyAliyunMemberDNSDetach(context.Background(), "user-a", service, member)
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
@@ -234,6 +235,56 @@ func TestApplyAliyunMemberDNSDetachRemovesOnlyManagedTargetLine(t *testing.T) {
 	}
 }
 
+func TestApplyAliyunMemberDNSDetachFallsBackToCurrentAddress(t *testing.T) {
+	client := &mockAliyunDNSClient{
+		records: []aliyunDNSRecord{
+			{RecordID: "record-telecom-a-old", RR: "@", Type: "A", Value: "198.51.100.10", TTL: 60, Line: "telecom"},
+			{RecordID: "record-telecom-a-other", RR: "@", Type: "A", Value: "198.51.100.11", TTL: 60, Line: "telecom"},
+		},
+	}
+	useMockAliyunDNSDependencies(t, client)
+
+	member := testAliyunMember()
+	member.DNSRecordRefs = `{}`
+	member.CurrentAddress = "198.51.100.10"
+
+	result, err := ApplyAliyunMemberDNSDetach(context.Background(), "user-a", testAliyunService(), member)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if len(client.deleteCalls) != 1 || client.deleteCalls[0] != "record-telecom-a-old" {
+		t.Fatalf("expected only current address record to be deleted, got %#v", client.deleteCalls)
+	}
+	if len(result.Removed) != 1 || result.Removed[0].ID != "record-telecom-a-old" {
+		t.Fatalf("expected removed record to match fallback address, got %#v", result.Removed)
+	}
+}
+
+func TestApplyAliyunMemberDNSDetachSkipsStaleRefWhenCurrentAddressMismatches(t *testing.T) {
+	client := &mockAliyunDNSClient{
+		records: []aliyunDNSRecord{
+			{RecordID: "record-member-1-a", RR: "@", Type: "A", Value: "198.51.100.10", TTL: 60, Line: "telecom"},
+			{RecordID: "record-member-2-a", RR: "@", Type: "A", Value: "198.51.100.11", TTL: 60, Line: "telecom"},
+		},
+	}
+	useMockAliyunDNSDependencies(t, client)
+
+	member := testAliyunMember()
+	member.DNSRecordRefs = `{"A":"record-member-2-a"}`
+	member.CurrentAddress = "198.51.100.10"
+
+	result, err := ApplyAliyunMemberDNSDetach(context.Background(), "user-a", testAliyunService(), member)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if len(client.deleteCalls) != 1 || client.deleteCalls[0] != "record-member-1-a" {
+		t.Fatalf("expected only current-address record to be deleted, got %#v", client.deleteCalls)
+	}
+	if len(result.Removed) != 1 || result.Removed[0].ID != "record-member-1-a" {
+		t.Fatalf("expected removed record to match current address, got %#v", result.Removed)
+	}
+}
+
 func TestVerifyAliyunMemberDNSAttachedDetectsUnexpectedCounterpart(t *testing.T) {
 	client := &mockAliyunDNSClient{
 		records: []aliyunDNSRecord{
@@ -243,7 +294,10 @@ func TestVerifyAliyunMemberDNSAttachedDetectsUnexpectedCounterpart(t *testing.T)
 	}
 	useMockAliyunDNSDependencies(t, client)
 
-	verification, err := VerifyAliyunMemberDNSAttached(context.Background(), "user-a", testAliyunService(), testAliyunMember(), "203.0.113.8", "")
+	member := testAliyunMember()
+	member.DNSRecordRefs = `{"A":"record-telecom-a","AAAA":"record-telecom-aaaa"}`
+
+	verification, err := VerifyAliyunMemberDNSAttached(context.Background(), "user-a", testAliyunService(), member, "203.0.113.8", "")
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
@@ -252,6 +306,27 @@ func TestVerifyAliyunMemberDNSAttachedDetectsUnexpectedCounterpart(t *testing.T)
 	}
 	if len(verification.Unexpected) != 1 || verification.Unexpected[0].Type != "AAAA" {
 		t.Fatalf("expected stale AAAA record to be unexpected, got %#v", verification.Unexpected)
+	}
+}
+
+func TestVerifyAliyunMemberDNSAttachedIgnoresOtherMemberSameLineRecords(t *testing.T) {
+	client := &mockAliyunDNSClient{
+		records: []aliyunDNSRecord{
+			{RecordID: "record-owned-a", RR: "@", Type: "A", Value: "203.0.113.8", TTL: 60, Line: "telecom"},
+			{RecordID: "record-other-a", RR: "@", Type: "A", Value: "203.0.113.9", TTL: 60, Line: "telecom"},
+		},
+	}
+	useMockAliyunDNSDependencies(t, client)
+
+	member := testAliyunMember()
+	member.DNSRecordRefs = `{"A":"record-owned-a"}`
+
+	verification, err := VerifyAliyunMemberDNSAttached(context.Background(), "user-a", testAliyunService(), member, "203.0.113.8", "")
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if !verification.Success {
+		t.Fatalf("expected verification to ignore other member record, got %#v", verification)
 	}
 }
 

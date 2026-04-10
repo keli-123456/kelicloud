@@ -45,7 +45,7 @@ func runAWSProvisionFollowUp(ctx context.Context, action func(context.Context) e
 			followUpDeadline = shortened
 		}
 		var cancel context.CancelFunc
-		runCtx, cancel = context.WithDeadline(context.Background(), followUpDeadline)
+		runCtx, cancel = context.WithDeadline(runCtx, followUpDeadline)
 		defer cancel()
 	}
 	return action(runCtx)

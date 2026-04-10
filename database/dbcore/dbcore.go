@@ -394,34 +394,80 @@ func prepareFailoverV2MemberSchemaCompatibility(db *gorm.DB) {
 		return
 	}
 
-	rebuildLegacyUniqueIndex := func(model interface{}, modelIndexes []gorm.Index, indexName, subject string) {
+	rebuildLegacyUniqueIndex := func(model interface{}, modelIndexes []gorm.Index, subject string, indexName string, columns []string) {
+		normalizedColumns := make([]string, len(columns))
+		for i, c := range columns {
+			normalizedColumns[i] = strings.ToLower(strings.TrimSpace(c))
+		}
+
+		hasTargetIndex := false
+		targetIsUnique := false
 		for _, index := range modelIndexes {
 			if index.Name() != indexName {
 				continue
 			}
-			if unique, ok := index.Unique(); !ok || !unique {
+			hasTargetIndex = true
+			if unique, ok := index.Unique(); ok {
+				targetIsUnique = unique
+			}
+		}
+
+		needsRecreate := false
+		hasMatchingTargetColumns := func(index gorm.Index) bool {
+			indexColumns := index.Columns()
+			if len(indexColumns) != len(normalizedColumns) {
+				return false
+			}
+			for i, c := range indexColumns {
+				if strings.ToLower(strings.TrimSpace(c)) != normalizedColumns[i] {
+					return false
+				}
+			}
+			return true
+		}
+
+		for _, index := range modelIndexes {
+			if !hasMatchingTargetColumns(index) {
+				continue
+			}
+			unique, ok := index.Unique()
+			if !ok || !unique {
+				continue
+			}
+
+			if err := migrator.DropIndex(model, index.Name()); err != nil {
+				log.Printf("Failed to drop legacy failover v2 %s unique index %s: %v", subject, index.Name(), err)
 				return
 			}
-			if err := migrator.DropIndex(model, indexName); err != nil {
-				log.Printf("Failed to drop legacy failover v2 %s unique index: %v", subject, err)
-				return
-			}
-			if err := migrator.CreateIndex(model, indexName); err != nil {
-				log.Printf("Failed to recreate failover v2 %s index: %v", subject, err)
-			}
+			needsRecreate = true
+		}
+
+		if needsRecreate && hasTargetIndex && targetIsUnique {
+			hasTargetIndex = false
+		}
+
+		if !needsRecreate {
 			return
+		}
+
+		if hasTargetIndex {
+			// target index is already non-unique, keep it as-is.
+			return
+		}
+		if err := migrator.CreateIndex(model, indexName); err != nil {
+			log.Printf("Failed to recreate failover v2 %s index: %v", subject, err)
 		}
 	}
 
-	rebuildLegacyUniqueIndex(&models.FailoverV2Member{}, indexes, "idx_failover_v2_service_client", "member watch client")
-	rebuildLegacyUniqueIndex(&models.FailoverV2Member{}, indexes, "idx_failover_v2_service_line", "member dns line")
+	rebuildLegacyUniqueIndex(&models.FailoverV2Member{}, indexes, "member watch client", "idx_failover_v2_service_client", []string{"service_id", "watch_client_uuid"})
+	rebuildLegacyUniqueIndex(&models.FailoverV2Member{}, indexes, "member dns line", "idx_failover_v2_service_line", []string{"service_id", "dns_line"})
 
 	if migrator.HasTable(&models.FailoverV2MemberLine{}) {
 		lineIndexes, err := migrator.GetIndexes(&models.FailoverV2MemberLine{})
 		if err != nil {
 			log.Printf("Failed to inspect failover v2 member line indexes: %v", err)
 		} else {
-			rebuildLegacyUniqueIndex(&models.FailoverV2MemberLine{}, lineIndexes, "idx_failover_v2_service_line_code", "member line code")
+			rebuildLegacyUniqueIndex(&models.FailoverV2MemberLine{}, lineIndexes, "member line code", "idx_failover_v2_service_line_code", []string{"service_id", "line_code"})
 		}
 
 		if err := db.Model(&models.FailoverV2Member{}).

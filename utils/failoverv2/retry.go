@@ -141,8 +141,13 @@ func RetryAttachDNSForUser(userUUID string, serviceID, executionID uint) (*model
 	_ = failoverv2db.UpdateExecutionFields(ctx.execution.ID, fields)
 
 	memberMessage := buildRetryAttachMemberMessage(ctx.execution, cleanupStatus)
-	if memberUpdates := buildRetryAttachMemberFields(ctx.member, ctx.execution, attachResult, memberMessage, now); len(memberUpdates) > 0 {
-		_ = failoverv2db.UpdateMemberFieldsForUser(userUUID, ctx.service.ID, ctx.member.ID, memberUpdates)
+	memberUpdates := buildRetryAttachMemberFields(ctx.member, ctx.execution, attachResult, memberMessage, now)
+	lineRecordRefs := extractMemberLineRecordRefs(attachResult)
+	if len(lineRecordRefs) == 0 {
+		lineRecordRefs = nil
+	}
+	if len(memberUpdates) > 0 || lineRecordRefs != nil {
+		_ = failoverv2db.UpdateMemberFieldsAndLineRecordRefsForUser(userUUID, ctx.service.ID, ctx.member.ID, memberUpdates, lineRecordRefs)
 	}
 	if serviceUpdates := buildRetryAttachServiceFields(ctx.service, ctx.execution, memberMessage, now); len(serviceUpdates) > 0 {
 		_ = failoverv2db.UpdateServiceFieldsForUser(userUUID, ctx.service.ID, serviceUpdates)
@@ -529,9 +534,6 @@ func buildRetryAttachMemberFields(member *models.FailoverV2Member, execution *mo
 	}
 	if nextRef := parseJSONMap(execution.NewInstanceRef); len(nextRef) > 0 {
 		fields["current_instance_ref"] = string(marshalJSON(nextRef))
-	}
-	if recordRefs := extractMemberDNSRecordRefs(attachResult); len(recordRefs) > 0 {
-		fields["dns_record_refs"] = encodeMemberDNSRecordRefs(recordRefs)
 	}
 	return fields
 }

@@ -111,6 +111,22 @@ func useMockFailoverV2RunnerDeps(t *testing.T) {
 			DomainName:      "example.com",
 		}, nil
 	}
+	failoverV2ResolveOldInstanceCleanupFunc = func(userUUID string, member *models.FailoverV2Member) (*oldInstanceCleanup, error) {
+		if member == nil {
+			return nil, nil
+		}
+		provider := strings.ToLower(strings.TrimSpace(member.Provider))
+		if provider != "digitalocean" && provider != "linode" {
+			return nil, nil
+		}
+		return &oldInstanceCleanup{
+			Ref:   resolvedMemberCurrentInstanceRef(member),
+			Label: "mock old instance cleanup",
+			Cleanup: func(ctx context.Context) error {
+				return nil
+			},
+		}, nil
+	}
 
 	t.Cleanup(func() {
 		failoverV2DetachDNSFunc = previousDetach
@@ -631,6 +647,9 @@ func TestMemberExecutionRunnerRunFailoverQueuesPendingCleanupWhenOldCleanupFails
 
 	service, member, execution := createTestRunnerState(t)
 	service.DeleteStrategy = models.FailoverDeleteStrategyDeleteAfterSuccess
+	member.Provider = "aws"
+	member.ProviderEntryID = "cred-1"
+	member.CurrentInstanceRef = `{"provider":"aws","service":"ec2","provider_entry_id":"cred-1","region":"us-east-1","instance_id":"i-old"}`
 
 	failoverV2DetachDNSFunc = func(ctx context.Context, userUUID string, service *models.FailoverV2Service, member *models.FailoverV2Member) (interface{}, error) {
 		return &AliyunMemberDNSResult{Line: "telecom", RecordRefs: map[string]string{}}, nil
@@ -642,7 +661,7 @@ func TestMemberExecutionRunnerRunFailoverQueuesPendingCleanupWhenOldCleanupFails
 		return &memberProvisionOutcome{
 			IPv4:             "203.0.113.11",
 			AutoConnectGroup: "failover-v2/1/1",
-			NewInstanceRef:   map[string]interface{}{"provider": "digitalocean", "provider_entry_id": "token-1", "droplet_id": 334},
+			NewInstanceRef:   map[string]interface{}{"provider": "aws", "service": "ec2", "provider_entry_id": "cred-1", "region": "us-east-1", "instance_id": "i-new"},
 			NewAddresses:     map[string]interface{}{"ipv4": "203.0.113.11"},
 		}, nil
 	}
@@ -701,5 +720,202 @@ func TestMemberExecutionRunnerRunFailoverQueuesPendingCleanupWhenOldCleanupFails
 	}
 	if count != 1 {
 		t.Fatalf("expected one pending cleanup row, got %d", count)
+	}
+}
+
+func TestMemberExecutionRunnerRunFailoverDeletesOldInstanceBeforeProvisionForDigitalOcean(t *testing.T) {
+	configureFailoverV2RunnerTestDB(t)
+	useMockFailoverV2RunnerDeps(t)
+
+	service, member, execution := createTestRunnerState(t)
+	service.DeleteStrategy = models.FailoverDeleteStrategyKeep
+
+	callOrder := make([]string, 0, 2)
+	oldCleanupCalls := 0
+
+	failoverV2DetachDNSFunc = func(ctx context.Context, userUUID string, service *models.FailoverV2Service, member *models.FailoverV2Member) (interface{}, error) {
+		return &AliyunMemberDNSResult{Line: "telecom", RecordRefs: map[string]string{}}, nil
+	}
+	failoverV2VerifyDetachDNSFunc = func(ctx context.Context, userUUID string, service *models.FailoverV2Service, member *models.FailoverV2Member) (interface{}, error) {
+		return &AliyunMemberDNSVerification{Line: "telecom", Success: true}, nil
+	}
+	failoverV2ResolveOldInstanceCleanupFunc = func(userUUID string, member *models.FailoverV2Member) (*oldInstanceCleanup, error) {
+		return &oldInstanceCleanup{
+			Ref:   map[string]interface{}{"provider": "digitalocean", "provider_entry_id": "token-1", "droplet_id": 100},
+			Label: "delete digitalocean droplet 100",
+			Cleanup: func(ctx context.Context) error {
+				oldCleanupCalls++
+				callOrder = append(callOrder, "cleanup_old")
+				return nil
+			},
+		}, nil
+	}
+	failoverV2ProvisionFunc = func(ctx context.Context, userUUID string, service *models.FailoverV2Service, member *models.FailoverV2Member) (*memberProvisionOutcome, error) {
+		callOrder = append(callOrder, "provision")
+		return &memberProvisionOutcome{
+			IPv4:             "203.0.113.12",
+			AutoConnectGroup: "failover-v2/1/1",
+			NewInstanceRef:   map[string]interface{}{"provider": "digitalocean", "provider_entry_id": "token-1", "droplet_id": 335},
+			NewAddresses:     map[string]interface{}{"ipv4": "203.0.113.12"},
+		}, nil
+	}
+	failoverV2WaitClientFunc = func(ctx context.Context, userUUID, group, excludeUUID string, startedAt time.Time, timeoutSeconds int, expectedAddresses map[string]struct{}) (string, error) {
+		return "client-new", nil
+	}
+	failoverV2ValidateOutletFunc = func(ctx context.Context, userUUID, clientUUID string, startedAt time.Time) (*common.Report, error) {
+		return &common.Report{CNConnectivity: &common.CNConnectivityReport{Status: "ok"}}, nil
+	}
+	failoverV2RunScriptsFunc = func(ctx context.Context, userUUID, clientUUID string, service *models.FailoverV2Service) (interface{}, error) {
+		return map[string]interface{}{"count": 0}, nil
+	}
+	failoverV2AttachDNSFunc = func(ctx context.Context, userUUID string, service *models.FailoverV2Service, member *models.FailoverV2Member, ipv4, ipv6 string) (interface{}, error) {
+		return &AliyunMemberDNSResult{Line: member.DNSLine, RecordRefs: map[string]string{"A": "record-new"}}, nil
+	}
+	failoverV2VerifyAttachDNSFunc = func(ctx context.Context, userUUID string, service *models.FailoverV2Service, member *models.FailoverV2Member, ipv4, ipv6 string) (interface{}, error) {
+		return &AliyunMemberDNSVerification{Line: member.DNSLine, Success: true}, nil
+	}
+
+	runner := &memberExecutionRunner{
+		userUUID:  "user-a",
+		service:   service,
+		member:    member,
+		execution: execution,
+		ctx:       context.Background(),
+	}
+	runner.runFailover()
+
+	if oldCleanupCalls != 1 {
+		t.Fatalf("expected one pre-provision cleanup call, got %d", oldCleanupCalls)
+	}
+	if strings.Join(callOrder, ",") != "cleanup_old,provision" {
+		t.Fatalf("expected cleanup then provision order, got %q", strings.Join(callOrder, ","))
+	}
+
+	storedExecution, err := failoverv2db.GetExecutionByIDForUser("user-a", service.ID, execution.ID)
+	if err != nil {
+		t.Fatalf("failed to reload execution: %v", err)
+	}
+	if storedExecution.Status != models.FailoverV2ExecutionStatusSuccess {
+		t.Fatalf("expected execution success, got %q", storedExecution.Status)
+	}
+	if storedExecution.CleanupStatus != models.FailoverCleanupStatusSuccess {
+		t.Fatalf("expected cleanup status success from pre-provision deletion, got %q", storedExecution.CleanupStatus)
+	}
+	if !strings.Contains(storedExecution.CleanupResult, "instance_deleted_before_provision") {
+		t.Fatalf("expected cleanup result to note pre-provision deletion, got %q", storedExecution.CleanupResult)
+	}
+}
+
+func TestMemberExecutionRunnerRunFailoverRebindAWSUsesExistingClientWithoutWaitOrScripts(t *testing.T) {
+	configureFailoverV2RunnerTestDB(t)
+	useMockFailoverV2RunnerDeps(t)
+
+	service, member, execution := createTestRunnerState(t)
+	member.Provider = "aws"
+	member.ProviderEntryID = "cred-1"
+	member.CurrentInstanceRef = `{"provider":"aws","service":"ec2","provider_entry_id":"cred-1","region":"us-east-1","instance_id":"i-old"}`
+	member.PlanPayload = `{"service":"ec2","region":"us-east-1","image_id":"ami-123","instance_type":"t3.micro"}`
+
+	waitCalled := false
+	scriptsCalled := false
+
+	failoverV2DetachDNSFunc = func(ctx context.Context, userUUID string, service *models.FailoverV2Service, member *models.FailoverV2Member) (interface{}, error) {
+		return &AliyunMemberDNSResult{Line: "telecom", RecordRefs: map[string]string{}}, nil
+	}
+	failoverV2VerifyDetachDNSFunc = func(ctx context.Context, userUUID string, service *models.FailoverV2Service, member *models.FailoverV2Member) (interface{}, error) {
+		return &AliyunMemberDNSVerification{Line: "telecom", Success: true}, nil
+	}
+	failoverV2ProvisionFunc = func(ctx context.Context, userUUID string, service *models.FailoverV2Service, member *models.FailoverV2Member) (*memberProvisionOutcome, error) {
+		return &memberProvisionOutcome{
+			IPv4:             "203.0.113.22",
+			TargetClientUUID: "client-old",
+			NewInstanceRef: map[string]interface{}{
+				"provider":          "aws",
+				"service":           "ec2",
+				"region":            "us-east-1",
+				"instance_id":       "i-old",
+				"rebind_public_ip":  true,
+				"provider_entry_id": "cred-1",
+			},
+			NewAddresses: map[string]interface{}{
+				"public_ip": "203.0.113.22",
+			},
+			SkipScripts:     true,
+			SkipPostCleanup: true,
+			CleanupStatus:   models.FailoverCleanupStatusSkipped,
+			CleanupResult: map[string]interface{}{
+				"classification": "cleanup_skipped_rebind_existing_instance",
+			},
+		}, nil
+	}
+	failoverV2WaitClientFunc = func(ctx context.Context, userUUID, group, excludeUUID string, startedAt time.Time, timeoutSeconds int, expectedAddresses map[string]struct{}) (string, error) {
+		waitCalled = true
+		return "", errors.New("wait client should not be called for aws rebind")
+	}
+	failoverV2ValidateOutletFunc = func(ctx context.Context, userUUID, clientUUID string, startedAt time.Time) (*common.Report, error) {
+		if clientUUID != "client-old" {
+			t.Fatalf("expected validate to target existing client-old, got %q", clientUUID)
+		}
+		return &common.Report{CNConnectivity: &common.CNConnectivityReport{Status: "ok"}}, nil
+	}
+	failoverV2RunScriptsFunc = func(ctx context.Context, userUUID, clientUUID string, service *models.FailoverV2Service) (interface{}, error) {
+		scriptsCalled = true
+		return map[string]interface{}{"count": 1}, nil
+	}
+	failoverV2AttachDNSFunc = func(ctx context.Context, userUUID string, service *models.FailoverV2Service, member *models.FailoverV2Member, ipv4, ipv6 string) (interface{}, error) {
+		return &AliyunMemberDNSResult{Line: member.DNSLine, RecordRefs: map[string]string{"A": "record-new"}}, nil
+	}
+	failoverV2VerifyAttachDNSFunc = func(ctx context.Context, userUUID string, service *models.FailoverV2Service, member *models.FailoverV2Member, ipv4, ipv6 string) (interface{}, error) {
+		return &AliyunMemberDNSVerification{Line: member.DNSLine, Success: true}, nil
+	}
+
+	runner := &memberExecutionRunner{
+		userUUID:  "user-a",
+		service:   service,
+		member:    member,
+		execution: execution,
+		ctx:       context.Background(),
+	}
+	runner.runFailover()
+
+	if waitCalled {
+		t.Fatal("did not expect wait client function to run for aws rebind")
+	}
+	if scriptsCalled {
+		t.Fatal("did not expect scripts dispatcher to run for aws rebind")
+	}
+
+	storedExecution, err := failoverv2db.GetExecutionByIDForUser("user-a", service.ID, execution.ID)
+	if err != nil {
+		t.Fatalf("failed to reload execution: %v", err)
+	}
+	if storedExecution.Status != models.FailoverV2ExecutionStatusSuccess {
+		t.Fatalf("expected execution success, got %q", storedExecution.Status)
+	}
+	if storedExecution.NewClientUUID != "client-old" {
+		t.Fatalf("expected execution to reuse existing client, got %q", storedExecution.NewClientUUID)
+	}
+	if storedExecution.CleanupStatus != models.FailoverCleanupStatusSkipped {
+		t.Fatalf("expected cleanup skipped for aws rebind, got %q", storedExecution.CleanupStatus)
+	}
+	if !strings.Contains(storedExecution.CleanupResult, "cleanup_skipped_rebind_existing_instance") {
+		t.Fatalf("expected cleanup result to mention rebind skip, got %q", storedExecution.CleanupResult)
+	}
+
+	waitSkipped := false
+	scriptsSkipped := false
+	for _, step := range storedExecution.Steps {
+		if step.StepKey == "wait_agent" && step.Status == models.FailoverStepStatusSkipped {
+			waitSkipped = true
+		}
+		if step.StepKey == "run_scripts" && step.Status == models.FailoverStepStatusSkipped {
+			scriptsSkipped = true
+		}
+	}
+	if !waitSkipped {
+		t.Fatal("expected wait_agent step to be skipped for aws rebind")
+	}
+	if !scriptsSkipped {
+		t.Fatal("expected run_scripts step to be skipped for aws rebind")
 	}
 }

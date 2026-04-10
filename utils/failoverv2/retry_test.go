@@ -91,6 +91,9 @@ func TestRetryAttachDNSForUserMarksExecutionAndMemberHealthy(t *testing.T) {
 	if !strings.Contains(reloadedMember.DNSRecordRefs, "record-new") {
 		t.Fatalf("expected dns record refs to include new record, got %q", reloadedMember.DNSRecordRefs)
 	}
+	if len(reloadedMember.Lines) == 0 || !strings.Contains(reloadedMember.Lines[0].DNSRecordRefs, "record-new") {
+		t.Fatalf("expected member line dns record refs to include new record, got %#v", reloadedMember.Lines)
+	}
 	if reloadedMember.LastStatus != models.FailoverV2MemberStatusHealthy {
 		t.Fatalf("expected member status healthy, got %q", reloadedMember.LastStatus)
 	}
@@ -98,6 +101,94 @@ func TestRetryAttachDNSForUserMarksExecutionAndMemberHealthy(t *testing.T) {
 		t.Fatalf("expected service status healthy, got %q", reloadedService.LastStatus)
 	}
 	requireFailoverV2Notification(t, *events, failoverV2EventActionCompleted, "retry attach dns completed")
+}
+
+func TestRetryAttachDNSForUserUpdatesLineRecordRefsForAllLines(t *testing.T) {
+	configureFailoverV2RunnerTestDB(t)
+	useMockFailoverV2RunnerDeps(t)
+
+	service, member, execution := createTestRunnerState(t)
+	finishedAt := models.FromTime(time.Now())
+
+	if err := dbcore.GetDBInstance().Create(&models.FailoverV2MemberLine{
+		ServiceID:     service.ID,
+		MemberID:      member.ID,
+		LineCode:      "mobile",
+		DNSRecordRefs: `{"A":"record-mobile-old"}`,
+	}).Error; err != nil {
+		t.Fatalf("failed to seed extra member line: %v", err)
+	}
+
+	if err := failoverv2db.UpdateServiceFieldsForUser("user-a", service.ID, map[string]interface{}{
+		"last_execution_id": execution.ID,
+		"last_status":       models.FailoverV2ServiceStatusFailed,
+		"last_message":      "attach failed",
+	}); err != nil {
+		t.Fatalf("failed to seed service state: %v", err)
+	}
+	if err := failoverv2db.UpdateMemberFieldsForUser("user-a", service.ID, member.ID, map[string]interface{}{
+		"last_execution_id": execution.ID,
+		"last_status":       models.FailoverV2MemberStatusFailed,
+		"last_message":      "attach failed",
+	}); err != nil {
+		t.Fatalf("failed to seed member state: %v", err)
+	}
+	if err := failoverv2db.UpdateExecutionFields(execution.ID, map[string]interface{}{
+		"status":            models.FailoverV2ExecutionStatusFailed,
+		"detach_dns_status": models.FailoverDNSStatusSuccess,
+		"attach_dns_status": models.FailoverDNSStatusFailed,
+		"cleanup_status":    models.FailoverCleanupStatusSkipped,
+		"new_client_uuid":   "client-new",
+		"new_instance_ref":  `{"provider":"digitalocean","provider_entry_id":"token-1","droplet_id":321}`,
+		"new_addresses":     `{"ipv4":[{"ip_address":"203.0.113.8"}],"ipv6":[]}`,
+		"error_message":     "attach failed",
+		"finished_at":       finishedAt,
+	}); err != nil {
+		t.Fatalf("failed to seed execution state: %v", err)
+	}
+
+	failoverV2AttachDNSFunc = func(ctx context.Context, userUUID string, service *models.FailoverV2Service, member *models.FailoverV2Member, ipv4, ipv6 string) (interface{}, error) {
+		return &multiLineMemberDNSResult{
+			Provider: "aliyun",
+			Lines: []memberDNSResultLine{
+				{Line: "telecom", RecordRefs: map[string]string{"A": "record-telecom-new"}},
+				{Line: "mobile", RecordRefs: map[string]string{"A": "record-mobile-new"}},
+			},
+		}, nil
+	}
+	failoverV2VerifyAttachDNSFunc = func(ctx context.Context, userUUID string, service *models.FailoverV2Service, member *models.FailoverV2Member, ipv4, ipv6 string) (interface{}, error) {
+		return &multiLineMemberDNSVerification{Provider: "aliyun", Success: true}, nil
+	}
+
+	if _, err := RetryAttachDNSForUser("user-a", service.ID, execution.ID); err != nil {
+		t.Fatalf("RetryAttachDNSForUser returned error: %v", err)
+	}
+
+	reloadedService, err := failoverv2db.GetServiceByIDForUser("user-a", service.ID)
+	if err != nil {
+		t.Fatalf("failed to reload service: %v", err)
+	}
+	reloadedMember, err := findMemberOnService(reloadedService, member.ID)
+	if err != nil {
+		t.Fatalf("failed to reload member: %v", err)
+	}
+	if len(reloadedMember.Lines) < 2 {
+		t.Fatalf("expected multiple member lines after retry attach, got %#v", reloadedMember.Lines)
+	}
+
+	refsByLine := map[string]string{}
+	for _, line := range reloadedMember.Lines {
+		refsByLine[strings.TrimSpace(line.LineCode)] = strings.TrimSpace(line.DNSRecordRefs)
+	}
+	if !strings.Contains(refsByLine["telecom"], "record-telecom-new") {
+		t.Fatalf("expected telecom line refs to be updated, got %#v", refsByLine)
+	}
+	if !strings.Contains(refsByLine["mobile"], "record-mobile-new") {
+		t.Fatalf("expected mobile line refs to be updated, got %#v", refsByLine)
+	}
+	if strings.TrimSpace(reloadedMember.DNSRecordRefs) != strings.TrimSpace(reloadedMember.Lines[0].DNSRecordRefs) {
+		t.Fatalf("expected legacy dns_record_refs to mirror first line, got member=%q line=%q", reloadedMember.DNSRecordRefs, reloadedMember.Lines[0].DNSRecordRefs)
+	}
 }
 
 func TestRetryCleanupForUserMarksPendingCleanupSucceeded(t *testing.T) {

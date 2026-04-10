@@ -254,6 +254,12 @@ func ApplyCloudflareMemberDNSDetach(ctx context.Context, userUUID string, servic
 		if strings.TrimSpace(record.ID) == "" {
 			continue
 		}
+		if !sameCloudflareRecordIdentity(record, operation.recordName, recordType) {
+			continue
+		}
+		if currentAddress != "" && !sameAddress(record.Content, currentAddress) {
+			continue
+		}
 		if err := operation.client.deleteRecord(contextOrBackground(ctx), operation.zoneID, record.ID); err != nil {
 			return nil, err
 		}

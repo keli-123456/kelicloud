@@ -8,7 +8,7 @@ import (
 	"gorm.io/gorm"
 )
 
-func TestPrepareFailoverV2MemberSchemaCompatibilityRebuildsLegacyUniqueIndex(t *testing.T) {
+func testPrepareFailoverV2MemberSchemaCompatibilityRebuildsLegacyUniqueIndexWithLegacyLineIndex(t *testing.T, legacyLineIndex string) {
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	if err != nil {
 		t.Fatalf("failed to open sqlite database: %v", err)
@@ -18,26 +18,34 @@ func TestPrepareFailoverV2MemberSchemaCompatibilityRebuildsLegacyUniqueIndex(t *
 	}
 
 	migrator := db.Migrator()
-	for _, indexName := range []string{
+	indexNamesToDrop := []string{
 		"idx_failover_v2_service_client",
 		"idx_failover_v2_service_line",
-	} {
+		"idx_failover_v2_service_line_code",
+		legacyLineIndex,
+	}
+	uniqueIndexNames := make(map[string]struct{}, len(indexNamesToDrop)*2)
+	for _, indexName := range indexNamesToDrop {
+		uniqueIndexNames[indexName] = struct{}{}
+	}
+
+	for indexName := range uniqueIndexNames {
 		if migrator.HasIndex(&models.FailoverV2Member{}, indexName) {
 			if err := migrator.DropIndex(&models.FailoverV2Member{}, indexName); err != nil {
 				t.Fatalf("failed to drop current failover v2 member index %s: %v", indexName, err)
 			}
 		}
-	}
-	if migrator.HasIndex(&models.FailoverV2MemberLine{}, "idx_failover_v2_service_line_code") {
-		if err := migrator.DropIndex(&models.FailoverV2MemberLine{}, "idx_failover_v2_service_line_code"); err != nil {
-			t.Fatalf("failed to drop current failover v2 member line index: %v", err)
+		if migrator.HasIndex(&models.FailoverV2MemberLine{}, indexName) {
+			if err := migrator.DropIndex(&models.FailoverV2MemberLine{}, indexName); err != nil {
+				t.Fatalf("failed to drop current failover v2 member line index %s: %v", indexName, err)
+			}
 		}
 	}
 
 	for _, statement := range []string{
 		"CREATE UNIQUE INDEX idx_failover_v2_service_client ON failover_v2_members(service_id, watch_client_uuid)",
 		"CREATE UNIQUE INDEX idx_failover_v2_service_line ON failover_v2_members(service_id, dns_line)",
-		"CREATE UNIQUE INDEX idx_failover_v2_service_line_code ON failover_v2_member_lines(service_id, line_code)",
+		"CREATE UNIQUE INDEX " + legacyLineIndex + " ON failover_v2_member_lines(service_id, line_code)",
 	} {
 		if err := db.Exec(statement).Error; err != nil {
 			t.Fatalf("failed to create legacy unique failover v2 index with %q: %v", statement, err)
@@ -136,4 +144,14 @@ func TestPrepareFailoverV2MemberSchemaCompatibilityRebuildsLegacyUniqueIndex(t *
 	if err := db.Create(&memberLines).Error; err != nil {
 		t.Fatalf("expected shared member line codes after index rebuild, got %v", err)
 	}
+}
+
+func TestPrepareFailoverV2MemberSchemaCompatibilityRebuildsLegacyUniqueIndex(t *testing.T) {
+	t.Run("default legacy line index name", func(t *testing.T) {
+		testPrepareFailoverV2MemberSchemaCompatibilityRebuildsLegacyUniqueIndexWithLegacyLineIndex(t, "idx_failover_v2_service_line_code")
+	})
+
+	t.Run("renamed legacy line index name", func(t *testing.T) {
+		testPrepareFailoverV2MemberSchemaCompatibilityRebuildsLegacyUniqueIndexWithLegacyLineIndex(t, "idx_failover_v2_service_line_code_legacy")
+	})
 }

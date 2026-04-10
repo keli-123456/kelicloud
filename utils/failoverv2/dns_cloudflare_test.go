@@ -263,6 +263,51 @@ func TestApplyCloudflareMemberDNSDetachFallsBackToCurrentAddress(t *testing.T) {
 	}
 }
 
+func TestApplyCloudflareMemberDNSDetachRemovesOnlyReferencedRecord(t *testing.T) {
+	api := newTestCloudflareAPI([]cloudflareDNSRecord{
+		{ID: "rec-member-1-a", Name: "app.example.com", Type: "A", Content: "198.51.100.10", TTL: 120},
+		{ID: "rec-member-2-a", Name: "app.example.com", Type: "A", Content: "198.51.100.11", TTL: 120},
+	})
+	useMockCloudflareDNSDependencies(t, api)
+
+	member := testCloudflareMember()
+	member.DNSRecordRefs = `{"A":"rec-member-1-a"}`
+
+	result, err := ApplyCloudflareMemberDNSDetach(context.Background(), "user-a", testCloudflareService(), member)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if len(result.Removed) != 1 || result.Removed[0].ID != "rec-member-1-a" {
+		t.Fatalf("expected only referenced record to be removed, got %#v", result.Removed)
+	}
+	if _, ok := api.records["rec-member-2-a"]; !ok {
+		t.Fatalf("expected other member record to remain, got %#v", api.records)
+	}
+}
+
+func TestApplyCloudflareMemberDNSDetachSkipsStaleRefWhenCurrentAddressMismatches(t *testing.T) {
+	api := newTestCloudflareAPI([]cloudflareDNSRecord{
+		{ID: "rec-member-1-a", Name: "app.example.com", Type: "A", Content: "198.51.100.10", TTL: 120},
+		{ID: "rec-member-2-a", Name: "app.example.com", Type: "A", Content: "198.51.100.11", TTL: 120},
+	})
+	useMockCloudflareDNSDependencies(t, api)
+
+	member := testCloudflareMember()
+	member.DNSRecordRefs = `{"A":"rec-member-2-a"}`
+	member.CurrentAddress = "198.51.100.10"
+
+	result, err := ApplyCloudflareMemberDNSDetach(context.Background(), "user-a", testCloudflareService(), member)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if len(result.Removed) != 1 || result.Removed[0].ID != "rec-member-1-a" {
+		t.Fatalf("expected only current-address record to be removed, got %#v", result.Removed)
+	}
+	if _, ok := api.records["rec-member-2-a"]; !ok {
+		t.Fatalf("expected stale-ref record to remain, got %#v", api.records)
+	}
+}
+
 func TestVerifyCloudflareMemberDNSAttachedIgnoresOtherMemberRecords(t *testing.T) {
 	api := newTestCloudflareAPI([]cloudflareDNSRecord{
 		{ID: "rec-owned-a", Name: "app.example.com", Type: "A", Content: "203.0.113.8", TTL: 120},

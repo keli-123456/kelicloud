@@ -34,8 +34,14 @@ type memberProvisionOutcome struct {
 	IPv4             string
 	IPv6             string
 	AutoConnectGroup string
+	TargetClientUUID string
 	NewInstanceRef   map[string]interface{}
 	NewAddresses     map[string]interface{}
+	SkipScripts      bool
+	SkipPostCleanup  bool
+	CleanupStatus    string
+	CleanupResult    map[string]interface{}
+	CleanupMessage   string
 	RollbackLabel    string
 	Rollback         func(context.Context) error
 }

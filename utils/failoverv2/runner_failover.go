@@ -182,6 +182,11 @@ func (r *memberExecutionRunner) runProvisioningFailover() {
 	}, map[string]map[string]string{}); err != nil {
 		log.Printf("failoverv2: failed to clear member %d dns refs after detach: %v", r.member.ID, err)
 	}
+	preCleanupStatus, preCleanupResult, preCleanupMessage, err := r.cleanupOldInstanceBeforeProvisionIfRequired()
+	if err != nil {
+		r.failExecution(executionFailureMessage("failed to delete old instance before provisioning replacement", err))
+		return
+	}
 
 	outcome, err := r.provisionReplacementInstance()
 	if err != nil {
@@ -212,7 +217,7 @@ func (r *memberExecutionRunner) runProvisioningFailover() {
 		return
 	}
 
-	scriptDetail, err := r.runReplacementScripts(targetClientUUID)
+	scriptDetail, err := r.runReplacementScripts(targetClientUUID, outcome)
 	if err != nil {
 		r.failWithRollback(outcome, executionFailureMessage("", err), err)
 		return
@@ -230,7 +235,7 @@ func (r *memberExecutionRunner) runProvisioningFailover() {
 
 	finishedAt := models.FromTime(time.Now())
 	currentAddress := outcome.primaryAddress()
-	cleanupStatus, cleanupResult, cleanupMessage := r.cleanupOldInstanceOnSuccess(outcome)
+	cleanupStatus, cleanupResult, cleanupMessage := r.resolveFinalCleanupStatus(outcome, preCleanupStatus, preCleanupResult, preCleanupMessage)
 	if !r.updateActiveExecutionFields("persist execution success", map[string]interface{}{
 		"status":            models.FailoverV2ExecutionStatusSuccess,
 		"detach_dns_status": models.FailoverDNSStatusSuccess,
@@ -280,6 +285,80 @@ func (r *memberExecutionRunner) runProvisioningFailover() {
 
 func (r *memberExecutionRunner) runFailover() {
 	r.runProvisioningFailover()
+}
+
+func (r *memberExecutionRunner) cleanupOldInstanceBeforeProvisionIfRequired() (string, map[string]interface{}, string, error) {
+	provider := strings.ToLower(strings.TrimSpace(r.member.Provider))
+	if provider != "digitalocean" && provider != "linode" {
+		return "", nil, "", nil
+	}
+
+	cleanup, err := failoverV2ResolveOldInstanceCleanupFunc(r.userUUID, r.member)
+	if err != nil {
+		return "", nil, "", normalizeExecutionStopError(err)
+	}
+	if cleanup == nil {
+		return "", nil, "", errors.New("old instance cleanup requires a resolvable current instance reference")
+	}
+
+	step := r.startStep("cleanup_old_before_provision", "Cleanup Old Instance Before Provision", map[string]interface{}{
+		"provider": provider,
+		"label":    cleanup.Label,
+		"ref":      cleanup.Ref,
+	})
+	r.updateActiveExecutionFields("mark execution cleaning_old_before_provision", map[string]interface{}{
+		"status": models.FailoverV2ExecutionStatusCleaningOld,
+	})
+
+	if err := normalizeExecutionStopError(cleanup.Cleanup(r.ctx)); err != nil {
+		detail := map[string]interface{}{
+			"classification": "cleanup_delete_failed_before_provision",
+			"summary":        "old instance cleanup failed before replacement provisioning",
+			"provider":       provider,
+			"ref":            cleanup.Ref,
+			"cleanup_label":  cleanup.Label,
+			"error":          err.Error(),
+		}
+		r.finishStep(step, models.FailoverStepStatusFailed, err.Error(), detail)
+		return "", nil, "", err
+	}
+
+	result := map[string]interface{}{
+		"classification": "instance_deleted_before_provision",
+		"summary":        "old instance was deleted before provisioning replacement",
+		"provider":       provider,
+		"ref":            cleanup.Ref,
+		"cleanup_label":  cleanup.Label,
+	}
+	r.finishStep(step, models.FailoverStepStatusSuccess, "old instance deleted before provisioning replacement", result)
+	return models.FailoverCleanupStatusSuccess, result, "old instance deleted before provisioning replacement", nil
+}
+
+func (r *memberExecutionRunner) resolveFinalCleanupStatus(outcome *memberProvisionOutcome, preStatus string, preResult map[string]interface{}, preMessage string) (string, map[string]interface{}, string) {
+	if strings.TrimSpace(preStatus) != "" {
+		if len(preResult) == 0 {
+			preResult = map[string]interface{}{
+				"classification": "instance_deleted_before_provision",
+				"summary":        "old instance was deleted before provisioning replacement",
+			}
+		}
+		return preStatus, preResult, strings.TrimSpace(preMessage)
+	}
+	if outcome != nil && outcome.SkipPostCleanup {
+		status := strings.TrimSpace(outcome.CleanupStatus)
+		if status == "" {
+			status = models.FailoverCleanupStatusSkipped
+		}
+		result := cloneJSONMap(outcome.CleanupResult)
+		if len(result) == 0 {
+			result = map[string]interface{}{
+				"classification": "cleanup_not_required",
+				"summary":        "old instance cleanup was skipped for this execution",
+			}
+		}
+		return status, result, strings.TrimSpace(outcome.CleanupMessage)
+	}
+	return r.cleanupOldInstanceOnSuccess(outcome)
 }
 
 func (r *memberExecutionRunner) detachMemberDNSFlow(baseDetail map[string]interface{}) (interface{}, interface{}, error) {
@@ -384,10 +463,29 @@ func (r *memberExecutionRunner) provisionReplacementInstance() (*memberProvision
 
 func (r *memberExecutionRunner) waitForReplacementAgent(outcome *memberProvisionOutcome) (string, error) {
 	group := ""
+	targetClientUUID := ""
 	if outcome != nil {
 		group = strings.TrimSpace(outcome.AutoConnectGroup)
+		targetClientUUID = strings.TrimSpace(outcome.TargetClientUUID)
 	}
 	if group == "" {
+		if targetClientUUID != "" {
+			step := r.startStep("wait_agent", "Wait For Replacement Agent", map[string]interface{}{
+				"client_uuid": targetClientUUID,
+				"mode":        "reuse_existing",
+			})
+			r.updateActiveExecutionFields("mark execution waiting_agent", map[string]interface{}{
+				"status": models.FailoverV2ExecutionStatusWaitingAgent,
+			})
+			r.updateActiveExecutionFields("persist new client uuid", map[string]interface{}{
+				"new_client_uuid": targetClientUUID,
+			})
+			r.finishStep(step, models.FailoverStepStatusSkipped, "reused existing connected agent", map[string]interface{}{
+				"client_uuid": targetClientUUID,
+				"mode":        "reuse_existing",
+			})
+			return targetClientUUID, nil
+		}
 		return "", errors.New("replacement instance did not provide an auto-connect group")
 	}
 
@@ -460,7 +558,19 @@ func (r *memberExecutionRunner) validateReplacementOutlet(clientUUID string) err
 	return nil
 }
 
-func (r *memberExecutionRunner) runReplacementScripts(clientUUID string) (interface{}, error) {
+func (r *memberExecutionRunner) runReplacementScripts(clientUUID string, outcome *memberProvisionOutcome) (interface{}, error) {
+	if outcome != nil && outcome.SkipScripts {
+		step := r.startStep("run_scripts", "Run Scripts", map[string]interface{}{
+			"client_uuid": clientUUID,
+		})
+		result := map[string]interface{}{
+			"skipped": true,
+			"reason":  "replacement reused existing instance",
+		}
+		r.finishStep(step, models.FailoverStepStatusSkipped, "scripts skipped for reused existing instance", result)
+		return result, nil
+	}
+
 	scriptIDs := models.NormalizeFailoverScriptClipboardIDs(nil, r.service.ScriptClipboardIDs)
 	step := r.startStep("run_scripts", "Run Scripts", map[string]interface{}{
 		"client_uuid":    clientUUID,

@@ -67,6 +67,11 @@ func provisionAWSMember(ctx context.Context, userUUID string, service *models.Fa
 	}
 	region := resolveAWSFailoverRegion(payload.Region, addition, credential)
 	serviceType := normalizeAWSFailoverService(payload.Service)
+	if rebindOutcome, handled, rebindErr := tryRebindAWSMemberPublicIP(ctx, member, credential, region, serviceType); rebindErr != nil {
+		return nil, normalizeExecutionStopError(rebindErr)
+	} else if handled {
+		return rebindOutcome, nil
+	}
 
 	switch serviceType {
 	case "ec2":
@@ -361,6 +366,124 @@ func provisionAWSMember(ctx context.Context, userUUID string, service *models.Fa
 		}, nil
 	default:
 		return nil, fmt.Errorf("unsupported aws provision service: %s", payload.Service)
+	}
+}
+
+func tryRebindAWSMemberPublicIP(ctx context.Context, member *models.FailoverV2Member, credential *awscloud.CredentialRecord, defaultRegion, defaultService string) (*memberProvisionOutcome, bool, error) {
+	if member == nil || credential == nil {
+		return nil, false, nil
+	}
+
+	currentRef := resolvedMemberCurrentInstanceRef(member)
+	if len(currentRef) == 0 || !strings.EqualFold(stringMapValue(currentRef, "provider"), "aws") {
+		return nil, false, nil
+	}
+
+	refEntryID := strings.TrimSpace(providerEntryIDFromRef(currentRef))
+	if refEntryID != "" && refEntryID != strings.TrimSpace(credential.ID) {
+		return nil, false, nil
+	}
+
+	targetService := normalizeAWSFailoverService(firstNonEmpty(stringMapValue(currentRef, "service"), defaultService))
+	targetRegion := resolveAWSFailoverRegion(firstNonEmpty(stringMapValue(currentRef, "region"), defaultRegion), nil, credential)
+	switch targetService {
+	case "lightsail":
+		instanceName := strings.TrimSpace(stringMapValue(currentRef, "instance_name"))
+		if instanceName == "" {
+			return nil, false, nil
+		}
+		detail, err := awscloud.GetLightsailInstanceDetail(contextOrBackground(ctx), credential, targetRegion, instanceName)
+		if err != nil {
+			if isAWSResourceNotFoundError("lightsail", err) {
+				return nil, false, nil
+			}
+			return nil, true, err
+		}
+		staticIPName := fmt.Sprintf("%s-ip-%d", instanceName, time.Now().Unix())
+		if err := awscloud.AllocateLightsailStaticIP(contextOrBackground(ctx), credential, targetRegion, staticIPName); err != nil {
+			return nil, true, err
+		}
+		if err := awscloud.AttachLightsailStaticIP(contextOrBackground(ctx), credential, targetRegion, staticIPName, instanceName); err != nil {
+			return nil, true, err
+		}
+		detail, err = waitForLightsailInstance(ctx, targetRegion, credential, instanceName)
+		if err != nil {
+			return nil, true, normalizeExecutionStopError(err)
+		}
+		return &memberProvisionOutcome{
+			IPv4:             strings.TrimSpace(detail.Instance.PublicIP),
+			IPv6:             firstUsablePublicIPv6(detail.Instance.IPv6Addresses),
+			TargetClientUUID: strings.TrimSpace(member.WatchClientUUID),
+			NewInstanceRef: map[string]interface{}{
+				"provider":            "aws",
+				"service":             "lightsail",
+				"provider_entry_id":   credential.ID,
+				"provider_entry_name": credential.Name,
+				"region":              targetRegion,
+				"instance_name":       instanceName,
+				"rebind_public_ip":    true,
+			},
+			NewAddresses: map[string]interface{}{
+				"static_ip_name": staticIPName,
+				"public_ip":      detail.Instance.PublicIP,
+				"ipv6_addresses": detail.Instance.IPv6Addresses,
+			},
+			SkipScripts:     true,
+			SkipPostCleanup: true,
+			CleanupStatus:   models.FailoverCleanupStatusSkipped,
+			CleanupResult: map[string]interface{}{
+				"classification": "cleanup_skipped_rebind_existing_instance",
+				"summary":        "old instance cleanup skipped because AWS failover reused the existing instance and only replaced its public IP",
+			},
+			CleanupMessage: "",
+		}, true, nil
+	default:
+		instanceID := strings.TrimSpace(stringMapValue(currentRef, "instance_id"))
+		if instanceID == "" {
+			return nil, false, nil
+		}
+		detail, err := awscloud.GetInstanceDetail(contextOrBackground(ctx), credential, targetRegion, instanceID)
+		if err != nil {
+			if isAWSResourceNotFoundError("ec2", err) {
+				return nil, false, nil
+			}
+			return nil, true, err
+		}
+		privateIP := strings.TrimSpace(detail.Instance.PrivateIP)
+		address, err := awscloud.AllocateAndAssociateAddress(contextOrBackground(ctx), credential, targetRegion, instanceID, privateIP)
+		if err != nil {
+			return nil, true, err
+		}
+		return &memberProvisionOutcome{
+			IPv4:             strings.TrimSpace(address.PublicIP),
+			IPv6:             firstUsablePublicIPv6(detail.Instance.IPv6Addresses),
+			TargetClientUUID: strings.TrimSpace(member.WatchClientUUID),
+			NewInstanceRef: map[string]interface{}{
+				"provider":            "aws",
+				"service":             "ec2",
+				"provider_entry_id":   credential.ID,
+				"provider_entry_name": credential.Name,
+				"region":              targetRegion,
+				"instance_id":         instanceID,
+				"rebind_public_ip":    true,
+			},
+			NewAddresses: map[string]interface{}{
+				"allocation_id":  address.AllocationID,
+				"association_id": address.AssociationID,
+				"public_ip":      address.PublicIP,
+				"private_ip":     address.PrivateIP,
+				"ipv6_addresses": detail.Instance.IPv6Addresses,
+				"old_addresses":  detail.Addresses,
+			},
+			SkipScripts:     true,
+			SkipPostCleanup: true,
+			CleanupStatus:   models.FailoverCleanupStatusSkipped,
+			CleanupResult: map[string]interface{}{
+				"classification": "cleanup_skipped_rebind_existing_instance",
+				"summary":        "old instance cleanup skipped because AWS failover reused the existing instance and only replaced its public IP",
+			},
+			CleanupMessage: "",
+		}, true, nil
 	}
 }
 
