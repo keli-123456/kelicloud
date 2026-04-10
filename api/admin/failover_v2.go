@@ -19,16 +19,17 @@ import (
 )
 
 type failoverV2ServiceRequest struct {
-	Name                string          `json:"name" binding:"required"`
-	Enabled             *bool           `json:"enabled"`
-	DNSProvider         string          `json:"dns_provider" binding:"required"`
-	DNSEntryID          string          `json:"dns_entry_id" binding:"required"`
-	DNSPayload          json.RawMessage `json:"dns_payload"`
-	ScriptClipboardIDs  []int           `json:"script_clipboard_ids"`
-	ScriptTimeoutSec    int             `json:"script_timeout_sec"`
-	WaitAgentTimeoutSec int             `json:"wait_agent_timeout_sec"`
-	DeleteStrategy      string          `json:"delete_strategy"`
-	DeleteDelaySeconds  int             `json:"delete_delay_seconds"`
+	Name                 string          `json:"name" binding:"required"`
+	Enabled              *bool           `json:"enabled"`
+	DNSProvider          string          `json:"dns_provider" binding:"required"`
+	DNSEntryID           string          `json:"dns_entry_id" binding:"required"`
+	DNSPayload           json.RawMessage `json:"dns_payload"`
+	ScriptClipboardIDs   []int           `json:"script_clipboard_ids"`
+	ScriptTimeoutSec     int             `json:"script_timeout_sec"`
+	WaitAgentTimeoutSec  int             `json:"wait_agent_timeout_sec"`
+	CheckIntervalSeconds int             `json:"check_interval_seconds"`
+	DeleteStrategy       string          `json:"delete_strategy"`
+	DeleteDelaySeconds   int             `json:"delete_delay_seconds"`
 }
 
 type failoverV2MemberRequest struct {
@@ -232,26 +233,28 @@ type failoverV2PendingCleanupView struct {
 }
 
 type failoverV2ServiceView struct {
-	ID                  uint                             `json:"id"`
-	Name                string                           `json:"name"`
-	Enabled             bool                             `json:"enabled"`
-	DNSProvider         string                           `json:"dns_provider"`
-	DNSEntryID          string                           `json:"dns_entry_id"`
-	DNSPayload          json.RawMessage                  `json:"dns_payload"`
-	ScriptClipboardIDs  json.RawMessage                  `json:"script_clipboard_ids"`
-	ScriptTimeoutSec    int                              `json:"script_timeout_sec"`
-	WaitAgentTimeoutSec int                              `json:"wait_agent_timeout_sec"`
-	DeleteStrategy      string                           `json:"delete_strategy"`
-	DeleteDelaySeconds  int                              `json:"delete_delay_seconds"`
-	LastExecutionID     *uint                            `json:"last_execution_id,omitempty"`
-	LastStatus          string                           `json:"last_status"`
-	LastMessage         string                           `json:"last_message"`
-	MemberCount         int                              `json:"member_count"`
-	EnabledMemberCount  int                              `json:"enabled_member_count"`
-	Members             []failoverV2MemberView           `json:"members,omitempty"`
-	RecentExecutions    []failoverV2ExecutionSummaryView `json:"recent_executions,omitempty"`
-	CreatedAt           models.LocalTime                 `json:"created_at"`
-	UpdatedAt           models.LocalTime                 `json:"updated_at"`
+	ID                   uint                             `json:"id"`
+	Name                 string                           `json:"name"`
+	Enabled              bool                             `json:"enabled"`
+	DNSProvider          string                           `json:"dns_provider"`
+	DNSEntryID           string                           `json:"dns_entry_id"`
+	DNSPayload           json.RawMessage                  `json:"dns_payload"`
+	ScriptClipboardIDs   json.RawMessage                  `json:"script_clipboard_ids"`
+	ScriptTimeoutSec     int                              `json:"script_timeout_sec"`
+	WaitAgentTimeoutSec  int                              `json:"wait_agent_timeout_sec"`
+	CheckIntervalSeconds int                              `json:"check_interval_seconds"`
+	DeleteStrategy       string                           `json:"delete_strategy"`
+	DeleteDelaySeconds   int                              `json:"delete_delay_seconds"`
+	LastExecutionID      *uint                            `json:"last_execution_id,omitempty"`
+	LastStatus           string                           `json:"last_status"`
+	LastMessage          string                           `json:"last_message"`
+	LastCheckedAt        *models.LocalTime                `json:"last_checked_at"`
+	MemberCount          int                              `json:"member_count"`
+	EnabledMemberCount   int                              `json:"enabled_member_count"`
+	Members              []failoverV2MemberView           `json:"members,omitempty"`
+	RecentExecutions     []failoverV2ExecutionSummaryView `json:"recent_executions,omitempty"`
+	CreatedAt            models.LocalTime                 `json:"created_at"`
+	UpdatedAt            models.LocalTime                 `json:"updated_at"`
 }
 
 func parseFailoverV2ServiceID(c *gin.Context) (uint, bool) {
@@ -764,26 +767,28 @@ func buildFailoverV2ServiceView(service *models.FailoverV2Service, recentExecuti
 	}
 
 	return failoverV2ServiceView{
-		ID:                  service.ID,
-		Name:                service.Name,
-		Enabled:             service.Enabled,
-		DNSProvider:         service.DNSProvider,
-		DNSEntryID:          service.DNSEntryID,
-		DNSPayload:          rawJSONOrNull(service.DNSPayload),
-		ScriptClipboardIDs:  rawJSONOrNull(service.ScriptClipboardIDs),
-		ScriptTimeoutSec:    service.ScriptTimeoutSec,
-		WaitAgentTimeoutSec: service.WaitAgentTimeoutSec,
-		DeleteStrategy:      service.DeleteStrategy,
-		DeleteDelaySeconds:  service.DeleteDelaySeconds,
-		LastExecutionID:     service.LastExecutionID,
-		LastStatus:          service.LastStatus,
-		LastMessage:         service.LastMessage,
-		MemberCount:         len(service.Members),
-		EnabledMemberCount:  enabledMemberCount,
-		Members:             members,
-		RecentExecutions:    executions,
-		CreatedAt:           service.CreatedAt,
-		UpdatedAt:           service.UpdatedAt,
+		ID:                   service.ID,
+		Name:                 service.Name,
+		Enabled:              service.Enabled,
+		DNSProvider:          service.DNSProvider,
+		DNSEntryID:           service.DNSEntryID,
+		DNSPayload:           rawJSONOrNull(service.DNSPayload),
+		ScriptClipboardIDs:   rawJSONOrNull(service.ScriptClipboardIDs),
+		ScriptTimeoutSec:     service.ScriptTimeoutSec,
+		WaitAgentTimeoutSec:  service.WaitAgentTimeoutSec,
+		CheckIntervalSeconds: service.CheckIntervalSeconds,
+		DeleteStrategy:       service.DeleteStrategy,
+		DeleteDelaySeconds:   service.DeleteDelaySeconds,
+		LastExecutionID:      service.LastExecutionID,
+		LastStatus:           service.LastStatus,
+		LastMessage:          service.LastMessage,
+		LastCheckedAt:        service.LastCheckedAt,
+		MemberCount:          len(service.Members),
+		EnabledMemberCount:   enabledMemberCount,
+		Members:              members,
+		RecentExecutions:     executions,
+		CreatedAt:            service.CreatedAt,
+		UpdatedAt:            service.UpdatedAt,
 	}
 }
 
@@ -824,16 +829,17 @@ func buildFailoverV2ServiceRequestFromModel(service *models.FailoverV2Service) f
 		return failoverV2ServiceRequest{Enabled: &enabled}
 	}
 	return failoverV2ServiceRequest{
-		Name:                service.Name,
-		Enabled:             &enabled,
-		DNSProvider:         service.DNSProvider,
-		DNSEntryID:          service.DNSEntryID,
-		DNSPayload:          rawFailoverV2JSONOrDefault(service.DNSPayload, "{}"),
-		ScriptClipboardIDs:  models.NormalizeFailoverScriptClipboardIDs(nil, service.ScriptClipboardIDs),
-		ScriptTimeoutSec:    service.ScriptTimeoutSec,
-		WaitAgentTimeoutSec: service.WaitAgentTimeoutSec,
-		DeleteStrategy:      service.DeleteStrategy,
-		DeleteDelaySeconds:  service.DeleteDelaySeconds,
+		Name:                 service.Name,
+		Enabled:              &enabled,
+		DNSProvider:          service.DNSProvider,
+		DNSEntryID:           service.DNSEntryID,
+		DNSPayload:           rawFailoverV2JSONOrDefault(service.DNSPayload, "{}"),
+		ScriptClipboardIDs:   models.NormalizeFailoverScriptClipboardIDs(nil, service.ScriptClipboardIDs),
+		ScriptTimeoutSec:     service.ScriptTimeoutSec,
+		WaitAgentTimeoutSec:  service.WaitAgentTimeoutSec,
+		CheckIntervalSeconds: service.CheckIntervalSeconds,
+		DeleteStrategy:       service.DeleteStrategy,
+		DeleteDelaySeconds:   service.DeleteDelaySeconds,
 	}
 }
 
@@ -947,17 +953,26 @@ func validateFailoverV2ServiceRequest(scope ownerScope, req *failoverV2ServiceRe
 		waitAgentTimeout = 600
 	}
 
+	checkIntervalSeconds := req.CheckIntervalSeconds
+	if checkIntervalSeconds <= 0 {
+		checkIntervalSeconds = models.FailoverV2DefaultCheckIntervalSeconds
+	}
+	if checkIntervalSeconds < models.FailoverV2MinCheckIntervalSeconds {
+		return nil, fmt.Errorf("check_interval_seconds must be greater than or equal to %d", models.FailoverV2MinCheckIntervalSeconds)
+	}
+
 	return &models.FailoverV2Service{
-		Name:                name,
-		Enabled:             enabled,
-		DNSProvider:         dnsProvider,
-		DNSEntryID:          dnsEntryID,
-		DNSPayload:          dnsPayload,
-		ScriptClipboardIDs:  models.EncodeFailoverScriptClipboardIDs(scriptClipboardIDs),
-		ScriptTimeoutSec:    scriptTimeout,
-		WaitAgentTimeoutSec: waitAgentTimeout,
-		DeleteStrategy:      deleteStrategy,
-		DeleteDelaySeconds:  deleteDelaySeconds,
+		Name:                 name,
+		Enabled:              enabled,
+		DNSProvider:          dnsProvider,
+		DNSEntryID:           dnsEntryID,
+		DNSPayload:           dnsPayload,
+		ScriptClipboardIDs:   models.EncodeFailoverScriptClipboardIDs(scriptClipboardIDs),
+		ScriptTimeoutSec:     scriptTimeout,
+		WaitAgentTimeoutSec:  waitAgentTimeout,
+		CheckIntervalSeconds: checkIntervalSeconds,
+		DeleteStrategy:       deleteStrategy,
+		DeleteDelaySeconds:   deleteDelaySeconds,
 	}, nil
 }
 
@@ -1376,9 +1391,15 @@ func GetFailoverV2Services(c *gin.Context) {
 		return
 	}
 
+	const listRecentExecutionLimit = 50
 	response := make([]failoverV2ServiceView, 0, len(services))
 	for i := range services {
-		response = append(response, buildFailoverV2ServiceView(&services[i], nil))
+		recentExecutions, execErr := failoverv2db.ListExecutionsByServiceForUser(scope.UserUUID, services[i].ID, listRecentExecutionLimit)
+		if execErr != nil && !errors.Is(execErr, gorm.ErrRecordNotFound) {
+			api.RespondError(c, http.StatusInternalServerError, "Failed to list failover v2 service executions: "+execErr.Error())
+			return
+		}
+		response = append(response, buildFailoverV2ServiceView(&services[i], recentExecutions))
 	}
 	api.RespondSuccess(c, response)
 }

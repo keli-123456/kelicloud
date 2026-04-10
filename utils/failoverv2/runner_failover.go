@@ -434,13 +434,24 @@ func (r *memberExecutionRunner) detachMemberDNSFlow(baseDetail map[string]interf
 
 func (r *memberExecutionRunner) provisionReplacementInstance() (*memberProvisionOutcome, error) {
 	detail := map[string]interface{}{
-		"provider":          strings.TrimSpace(r.member.Provider),
-		"provider_entry_id": strings.TrimSpace(r.member.ProviderEntryID),
+		"provider":             strings.TrimSpace(r.member.Provider),
+		"provider_entry_id":    strings.TrimSpace(r.member.ProviderEntryID),
+		"provider_entry_group": normalizeProviderEntryGroup(r.member.ProviderEntryGroup),
 	}
 	step := r.startStep("provision_instance", "Provision Replacement Instance", detail)
 	r.updateActiveExecutionFields("mark execution provisioning", map[string]interface{}{
 		"status": models.FailoverV2ExecutionStatusProvisioning,
 	})
+
+	provisionLock, lockErr := claimMemberProvisionRunLock(r.userUUID, r.service, r.member)
+	if lockErr != nil {
+		lockErr = normalizeExecutionStopError(lockErr)
+		r.finishStep(step, models.FailoverStepStatusFailed, lockErr.Error(), map[string]interface{}{"error": lockErr.Error()})
+		return nil, lockErr
+	}
+	if provisionLock != nil {
+		defer provisionLock.release()
+	}
 
 	outcome, err := failoverV2ProvisionFunc(r.ctx, r.userUUID, r.service, r.member)
 	if err != nil {

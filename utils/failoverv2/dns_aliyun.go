@@ -203,9 +203,13 @@ func ApplyAliyunMemberDNSDetach(ctx context.Context, userUUID string, service *m
 	removed := make([]AliyunMemberDNSRecord, 0)
 	removedRecordIDs := make(map[string]struct{}, len(operation.recordRefs))
 
-	for recordType, recordID := range operation.recordRefs {
-		recordType = strings.ToUpper(strings.TrimSpace(recordType))
-		if _, ok := managedTypeSet[recordType]; !ok {
+	for _, managedType := range managedTypes {
+		recordType := strings.ToUpper(strings.TrimSpace(managedType))
+		if recordType == "" {
+			continue
+		}
+		recordID := strings.TrimSpace(operation.recordRefs[recordType])
+		if recordID == "" {
 			continue
 		}
 		record := findAliyunDNSRecordByID(existingRecords, recordID)
@@ -218,14 +222,14 @@ func ApplyAliyunMemberDNSDetach(ctx context.Context, userUUID string, service *m
 		if currentAddress != "" && !sameAddress(record.Value, currentAddress) {
 			continue
 		}
-		recordID := strings.TrimSpace(record.RecordID)
-		if _, ok := removedRecordIDs[recordID]; ok {
+		existingRecordID := strings.TrimSpace(record.RecordID)
+		if _, ok := removedRecordIDs[existingRecordID]; ok {
 			continue
 		}
-		if err := operation.client.deleteRecord(contextOrBackground(ctx), recordID); err != nil {
+		if err := operation.client.deleteRecord(contextOrBackground(ctx), existingRecordID); err != nil {
 			return nil, err
 		}
-		removedRecordIDs[recordID] = struct{}{}
+		removedRecordIDs[existingRecordID] = struct{}{}
 		removed = append(removed, buildAliyunMemberDNSRecordFromExisting(operation.domainName, record))
 	}
 

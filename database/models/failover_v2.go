@@ -8,6 +8,11 @@ const (
 )
 
 const (
+	FailoverV2DefaultCheckIntervalSeconds = 60
+	FailoverV2MinCheckIntervalSeconds     = 60
+)
+
+const (
 	FailoverV2ExecutionStatusQueued             = "queued"
 	FailoverV2ExecutionStatusDetachingDNS       = "detaching_dns"
 	FailoverV2ExecutionStatusVerifyingDetachDNS = "verifying_detach_dns"
@@ -45,25 +50,27 @@ const (
 )
 
 type FailoverV2Service struct {
-	ID                  uint                  `json:"id,omitempty" gorm:"primaryKey;autoIncrement"`
-	UserID              string                `json:"user_id,omitempty" gorm:"type:varchar(36);index"`
-	Name                string                `json:"name" gorm:"type:varchar(255);not null;index"`
-	Enabled             bool                  `json:"enabled" gorm:"default:true"`
-	DNSProvider         string                `json:"dns_provider" gorm:"type:varchar(32);not null"`
-	DNSEntryID          string                `json:"dns_entry_id" gorm:"type:varchar(64);not null"`
-	DNSPayload          string                `json:"dns_payload" gorm:"type:longtext"`
-	ScriptClipboardIDs  string                `json:"script_clipboard_ids,omitempty" gorm:"type:longtext"`
-	ScriptTimeoutSec    int                   `json:"script_timeout_sec" gorm:"type:int;not null;default:600"`
-	WaitAgentTimeoutSec int                   `json:"wait_agent_timeout_sec" gorm:"type:int;not null;default:600"`
-	DeleteStrategy      string                `json:"delete_strategy" gorm:"type:varchar(64);not null;default:'keep'"`
-	DeleteDelaySeconds  int                   `json:"delete_delay_seconds" gorm:"type:int;not null;default:0"`
-	LastExecutionID     *uint                 `json:"last_execution_id,omitempty" gorm:"index"`
-	LastStatus          string                `json:"last_status" gorm:"type:varchar(64);not null;default:'unknown'"`
-	LastMessage         string                `json:"last_message" gorm:"type:text"`
-	Members             []FailoverV2Member    `json:"members,omitempty" gorm:"foreignKey:ServiceID;references:ID;constraint:OnDelete:CASCADE,OnUpdate:CASCADE"`
-	Executions          []FailoverV2Execution `json:"executions,omitempty" gorm:"foreignKey:ServiceID;references:ID;constraint:OnDelete:CASCADE,OnUpdate:CASCADE"`
-	CreatedAt           LocalTime             `json:"created_at"`
-	UpdatedAt           LocalTime             `json:"updated_at"`
+	ID                   uint                  `json:"id,omitempty" gorm:"primaryKey;autoIncrement"`
+	UserID               string                `json:"user_id,omitempty" gorm:"type:varchar(36);index"`
+	Name                 string                `json:"name" gorm:"type:varchar(255);not null;index"`
+	Enabled              bool                  `json:"enabled" gorm:"default:true"`
+	DNSProvider          string                `json:"dns_provider" gorm:"type:varchar(32);not null"`
+	DNSEntryID           string                `json:"dns_entry_id" gorm:"type:varchar(64);not null"`
+	DNSPayload           string                `json:"dns_payload" gorm:"type:longtext"`
+	ScriptClipboardIDs   string                `json:"script_clipboard_ids,omitempty" gorm:"type:longtext"`
+	ScriptTimeoutSec     int                   `json:"script_timeout_sec" gorm:"type:int;not null;default:600"`
+	WaitAgentTimeoutSec  int                   `json:"wait_agent_timeout_sec" gorm:"type:int;not null;default:600"`
+	CheckIntervalSeconds int                   `json:"check_interval_seconds" gorm:"type:int;not null;default:60"`
+	DeleteStrategy       string                `json:"delete_strategy" gorm:"type:varchar(64);not null;default:'keep'"`
+	DeleteDelaySeconds   int                   `json:"delete_delay_seconds" gorm:"type:int;not null;default:0"`
+	LastExecutionID      *uint                 `json:"last_execution_id,omitempty" gorm:"index"`
+	LastCheckedAt        *LocalTime            `json:"last_checked_at" gorm:"type:timestamp"`
+	LastStatus           string                `json:"last_status" gorm:"type:varchar(64);not null;default:'unknown'"`
+	LastMessage          string                `json:"last_message" gorm:"type:text"`
+	Members              []FailoverV2Member    `json:"members,omitempty" gorm:"foreignKey:ServiceID;references:ID;constraint:OnDelete:CASCADE,OnUpdate:CASCADE"`
+	Executions           []FailoverV2Execution `json:"executions,omitempty" gorm:"foreignKey:ServiceID;references:ID;constraint:OnDelete:CASCADE,OnUpdate:CASCADE"`
+	CreatedAt            LocalTime             `json:"created_at"`
+	UpdatedAt            LocalTime             `json:"updated_at"`
 }
 
 type FailoverV2Member struct {
