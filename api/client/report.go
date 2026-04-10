@@ -95,6 +95,7 @@ func postPresenceExpired(uuid string, connID int64, gen uint64) {
 	postPresenceMu.Unlock()
 
 	ws.SetPresence(uuid, connID, false)
+	ws.DeleteLatestReportIfOffline(uuid)
 	notifier.OfflineNotification(uuid, connID)
 }
 
@@ -202,6 +203,7 @@ func WebSocketReport(c *gin.Context) {
 	go notifier.OnlineNotification(uuid, conn.ID)
 	defer func() {
 		ws.DeleteClientConditionally(uuid, conn)
+		ws.DeleteLatestReportIfOffline(uuid)
 		notifier.OfflineNotification(uuid, conn.ID)
 	}()
 
