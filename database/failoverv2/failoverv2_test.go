@@ -400,19 +400,22 @@ func TestCreateMemberForUserAllowsMultipleUninitializedMembers(t *testing.T) {
 		t.Fatalf("failed to create first uninitialized member: %v", err)
 	}
 	second, err := createMemberForUserWithDB(db, "user-a", service.ID, &models.FailoverV2Member{
-		Name:            "unicom",
+		Name:            "telecom-backup",
 		Enabled:         true,
-		DNSLine:         "unicom",
+		DNSLine:         "telecom",
 		WatchClientUUID: "",
 		Provider:        "digitalocean",
 		ProviderEntryID: "token-1",
 	})
 	if err != nil {
-		t.Fatalf("failed to create second uninitialized member: %v", err)
+		t.Fatalf("failed to create second member sharing dns line: %v", err)
 	}
 
 	if strings.TrimSpace(first.WatchClientUUID) != "" || strings.TrimSpace(second.WatchClientUUID) != "" {
 		t.Fatalf("expected both members to remain uninitialized, got %q and %q", first.WatchClientUUID, second.WatchClientUUID)
+	}
+	if first.DNSLine != "telecom" || second.DNSLine != "telecom" {
+		t.Fatalf("expected both members to keep shared telecom line, got %q and %q", first.DNSLine, second.DNSLine)
 	}
 }
 

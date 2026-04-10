@@ -68,13 +68,13 @@ type FailoverV2Service struct {
 
 type FailoverV2Member struct {
 	ID                  uint                   `json:"id,omitempty" gorm:"primaryKey;autoIncrement"`
-	ServiceID           uint                   `json:"service_id" gorm:"not null;index;uniqueIndex:idx_failover_v2_service_line;index:idx_failover_v2_service_client"`
+	ServiceID           uint                   `json:"service_id" gorm:"not null;index;index:idx_failover_v2_service_line,priority:1;index:idx_failover_v2_service_client"`
 	Name                string                 `json:"name" gorm:"type:varchar(255);not null"`
 	Enabled             bool                   `json:"enabled" gorm:"default:true"`
 	Priority            int                    `json:"priority" gorm:"type:int;not null;default:1"`
 	Mode                string                 `json:"mode" gorm:"type:varchar(32);not null;default:'provider_template'"`
 	WatchClientUUID     string                 `json:"watch_client_uuid" gorm:"type:varchar(36);index;index:idx_failover_v2_service_client"`
-	DNSLine             string                 `json:"dns_line" gorm:"type:varchar(64);not null;uniqueIndex:idx_failover_v2_service_line"`
+	DNSLine             string                 `json:"dns_line" gorm:"type:varchar(64);not null;index:idx_failover_v2_service_line,priority:2"`
 	DNSRecordRefs       string                 `json:"dns_record_refs" gorm:"type:longtext"`
 	CurrentAddress      string                 `json:"current_address" gorm:"type:varchar(255)"`
 	CurrentInstanceRef  string                 `json:"current_instance_ref" gorm:"type:longtext"`
@@ -99,9 +99,9 @@ type FailoverV2Member struct {
 
 type FailoverV2MemberLine struct {
 	ID            uint      `json:"id,omitempty" gorm:"primaryKey;autoIncrement"`
-	ServiceID     uint      `json:"service_id" gorm:"not null;index;uniqueIndex:idx_failover_v2_service_line_code"`
-	MemberID      uint      `json:"member_id" gorm:"not null;index;uniqueIndex:idx_failover_v2_member_line_code"`
-	LineCode      string    `json:"line_code" gorm:"type:varchar(64);not null;uniqueIndex:idx_failover_v2_service_line_code;uniqueIndex:idx_failover_v2_member_line_code"`
+	ServiceID     uint      `json:"service_id" gorm:"not null;index;index:idx_failover_v2_service_line_code,priority:1"`
+	MemberID      uint      `json:"member_id" gorm:"not null;index;uniqueIndex:idx_failover_v2_member_line_code,priority:1"`
+	LineCode      string    `json:"line_code" gorm:"type:varchar(64);not null;index:idx_failover_v2_service_line_code,priority:2;uniqueIndex:idx_failover_v2_member_line_code,priority:2"`
 	DNSRecordRefs string    `json:"dns_record_refs" gorm:"type:longtext"`
 	CreatedAt     LocalTime `json:"created_at"`
 	UpdatedAt     LocalTime `json:"updated_at"`

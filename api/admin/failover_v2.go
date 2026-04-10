@@ -1106,29 +1106,12 @@ func ensureFailoverV2MemberUnique(service *models.FailoverV2Service, memberID ui
 	}
 
 	watchClientUUID := strings.TrimSpace(candidate.WatchClientUUID)
-	candidateLines := buildFailoverV2MemberDNSLines(candidate)
-	candidateLineSet := make(map[string]struct{}, len(candidateLines))
-	for _, line := range candidateLines {
-		if lineCode := strings.ToLower(strings.TrimSpace(line)); lineCode != "" {
-			candidateLineSet[lineCode] = struct{}{}
-		}
-	}
-
 	for _, member := range service.Members {
 		if member.ID == memberID {
 			continue
 		}
 		if strings.TrimSpace(member.WatchClientUUID) != "" && strings.TrimSpace(member.WatchClientUUID) == strings.TrimSpace(watchClientUUID) {
 			return fmt.Errorf("watch_client_uuid is already used by another member")
-		}
-		for _, existingLine := range buildFailoverV2MemberDNSLines(&member) {
-			lineCode := strings.ToLower(strings.TrimSpace(existingLine))
-			if lineCode == "" {
-				continue
-			}
-			if _, exists := candidateLineSet[lineCode]; exists {
-				return fmt.Errorf("dns line %q is already used by another member", existingLine)
-			}
 		}
 	}
 	return nil

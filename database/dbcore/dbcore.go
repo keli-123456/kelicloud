@@ -394,29 +394,36 @@ func prepareFailoverV2MemberSchemaCompatibility(db *gorm.DB) {
 		return
 	}
 
-	legacyUniqueIndex := false
-	for _, index := range indexes {
-		if index.Name() != "idx_failover_v2_service_client" {
-			continue
+	rebuildLegacyUniqueIndex := func(model interface{}, modelIndexes []gorm.Index, indexName, subject string) {
+		for _, index := range modelIndexes {
+			if index.Name() != indexName {
+				continue
+			}
+			if unique, ok := index.Unique(); !ok || !unique {
+				return
+			}
+			if err := migrator.DropIndex(model, indexName); err != nil {
+				log.Printf("Failed to drop legacy failover v2 %s unique index: %v", subject, err)
+				return
+			}
+			if err := migrator.CreateIndex(model, indexName); err != nil {
+				log.Printf("Failed to recreate failover v2 %s index: %v", subject, err)
+			}
+			return
 		}
-		if unique, ok := index.Unique(); ok && unique {
-			legacyUniqueIndex = true
-		}
-		break
-	}
-	if !legacyUniqueIndex {
-		return
 	}
 
-	if err := migrator.DropIndex(&models.FailoverV2Member{}, "idx_failover_v2_service_client"); err != nil {
-		log.Printf("Failed to drop legacy failover v2 member unique index: %v", err)
-		return
-	}
-	if err := migrator.CreateIndex(&models.FailoverV2Member{}, "idx_failover_v2_service_client"); err != nil {
-		log.Printf("Failed to recreate failover v2 member watch client index: %v", err)
-	}
+	rebuildLegacyUniqueIndex(&models.FailoverV2Member{}, indexes, "idx_failover_v2_service_client", "member watch client")
+	rebuildLegacyUniqueIndex(&models.FailoverV2Member{}, indexes, "idx_failover_v2_service_line", "member dns line")
 
 	if migrator.HasTable(&models.FailoverV2MemberLine{}) {
+		lineIndexes, err := migrator.GetIndexes(&models.FailoverV2MemberLine{})
+		if err != nil {
+			log.Printf("Failed to inspect failover v2 member line indexes: %v", err)
+		} else {
+			rebuildLegacyUniqueIndex(&models.FailoverV2MemberLine{}, lineIndexes, "idx_failover_v2_service_line_code", "member line code")
+		}
+
 		if err := db.Model(&models.FailoverV2Member{}).
 			Where("mode = '' OR mode IS NULL").
 			Update("mode", models.FailoverV2MemberModeProviderTemplate).Error; err != nil {

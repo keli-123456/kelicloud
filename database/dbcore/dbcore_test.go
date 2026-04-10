@@ -13,20 +13,35 @@ func TestPrepareFailoverV2MemberSchemaCompatibilityRebuildsLegacyUniqueIndex(t *
 	if err != nil {
 		t.Fatalf("failed to open sqlite database: %v", err)
 	}
-	if err := db.AutoMigrate(&models.FailoverV2Service{}, &models.FailoverV2Member{}); err != nil {
+	if err := db.AutoMigrate(&models.FailoverV2Service{}, &models.FailoverV2Member{}, &models.FailoverV2MemberLine{}); err != nil {
 		t.Fatalf("failed to migrate failover v2 schema: %v", err)
 	}
 
 	migrator := db.Migrator()
-	if migrator.HasIndex(&models.FailoverV2Member{}, "idx_failover_v2_service_client") {
-		if err := migrator.DropIndex(&models.FailoverV2Member{}, "idx_failover_v2_service_client"); err != nil {
-			t.Fatalf("failed to drop current failover v2 member index: %v", err)
+	for _, indexName := range []string{
+		"idx_failover_v2_service_client",
+		"idx_failover_v2_service_line",
+	} {
+		if migrator.HasIndex(&models.FailoverV2Member{}, indexName) {
+			if err := migrator.DropIndex(&models.FailoverV2Member{}, indexName); err != nil {
+				t.Fatalf("failed to drop current failover v2 member index %s: %v", indexName, err)
+			}
 		}
 	}
-	if err := db.Exec(
+	if migrator.HasIndex(&models.FailoverV2MemberLine{}, "idx_failover_v2_service_line_code") {
+		if err := migrator.DropIndex(&models.FailoverV2MemberLine{}, "idx_failover_v2_service_line_code"); err != nil {
+			t.Fatalf("failed to drop current failover v2 member line index: %v", err)
+		}
+	}
+
+	for _, statement := range []string{
 		"CREATE UNIQUE INDEX idx_failover_v2_service_client ON failover_v2_members(service_id, watch_client_uuid)",
-	).Error; err != nil {
-		t.Fatalf("failed to create legacy unique failover v2 member index: %v", err)
+		"CREATE UNIQUE INDEX idx_failover_v2_service_line ON failover_v2_members(service_id, dns_line)",
+		"CREATE UNIQUE INDEX idx_failover_v2_service_line_code ON failover_v2_member_lines(service_id, line_code)",
+	} {
+		if err := db.Exec(statement).Error; err != nil {
+			t.Fatalf("failed to create legacy unique failover v2 index with %q: %v", statement, err)
+		}
 	}
 
 	prepareFailoverV2MemberSchemaCompatibility(db)
@@ -35,26 +50,40 @@ func TestPrepareFailoverV2MemberSchemaCompatibilityRebuildsLegacyUniqueIndex(t *
 	if err != nil {
 		t.Fatalf("failed to inspect failover v2 member indexes: %v", err)
 	}
-	unique := true
-	found := false
-	for _, index := range indexes {
-		if index.Name() != "idx_failover_v2_service_client" {
-			continue
+
+	assertIndexNonUnique := func(indexes []gorm.Index, indexName string) {
+		t.Helper()
+
+		found := false
+		unique := true
+		for _, index := range indexes {
+			if index.Name() != indexName {
+				continue
+			}
+			found = true
+			if value, ok := index.Unique(); ok {
+				unique = value
+			} else {
+				t.Fatalf("expected rebuilt failover v2 index %s uniqueness to be inspectable", indexName)
+			}
+			break
 		}
-		found = true
-		if value, ok := index.Unique(); ok {
-			unique = value
-		} else {
-			t.Fatal("expected rebuilt failover v2 member index uniqueness to be inspectable")
+		if !found {
+			t.Fatalf("expected rebuilt failover v2 index %s to exist", indexName)
 		}
-		break
+		if unique {
+			t.Fatalf("expected rebuilt failover v2 index %s to be non-unique", indexName)
+		}
 	}
-	if !found {
-		t.Fatal("expected rebuilt failover v2 member index to exist")
+
+	assertIndexNonUnique(indexes, "idx_failover_v2_service_client")
+	assertIndexNonUnique(indexes, "idx_failover_v2_service_line")
+
+	lineIndexes, err := migrator.GetIndexes(&models.FailoverV2MemberLine{})
+	if err != nil {
+		t.Fatalf("failed to inspect failover v2 member line indexes: %v", err)
 	}
-	if unique {
-		t.Fatal("expected rebuilt failover v2 member index to be non-unique")
-	}
+	assertIndexNonUnique(lineIndexes, "idx_failover_v2_service_line_code")
 
 	service := models.FailoverV2Service{
 		UserID:      "user-a",
@@ -71,7 +100,7 @@ func TestPrepareFailoverV2MemberSchemaCompatibilityRebuildsLegacyUniqueIndex(t *
 	members := []models.FailoverV2Member{
 		{
 			ServiceID:       service.ID,
-			Name:            "telecom",
+			Name:            "telecom-a",
 			Enabled:         true,
 			DNSLine:         "telecom",
 			Provider:        "digitalocean",
@@ -79,14 +108,32 @@ func TestPrepareFailoverV2MemberSchemaCompatibilityRebuildsLegacyUniqueIndex(t *
 		},
 		{
 			ServiceID:       service.ID,
-			Name:            "unicom",
+			Name:            "telecom-b",
 			Enabled:         true,
-			DNSLine:         "unicom",
+			DNSLine:         "telecom",
 			Provider:        "digitalocean",
 			ProviderEntryID: "token-1",
 		},
 	}
 	if err := db.Create(&members).Error; err != nil {
-		t.Fatalf("expected multiple uninitialized members after index rebuild, got %v", err)
+		t.Fatalf("expected shared dns line members after index rebuild, got %v", err)
+	}
+
+	memberLines := []models.FailoverV2MemberLine{
+		{
+			ServiceID:     service.ID,
+			MemberID:      members[0].ID,
+			LineCode:      "telecom",
+			DNSRecordRefs: `{}`,
+		},
+		{
+			ServiceID:     service.ID,
+			MemberID:      members[1].ID,
+			LineCode:      "telecom",
+			DNSRecordRefs: `{}`,
+		},
+	}
+	if err := db.Create(&memberLines).Error; err != nil {
+		t.Fatalf("expected shared member line codes after index rebuild, got %v", err)
 	}
 }

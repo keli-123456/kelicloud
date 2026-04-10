@@ -44,6 +44,7 @@ func setupFailoverV2APITestDB(t *testing.T) *gorm.DB {
 		&models.FailoverExecution{},
 		&models.FailoverV2Service{},
 		&models.FailoverV2Member{},
+		&models.FailoverV2MemberLine{},
 		&models.FailoverV2Execution{},
 		&models.FailoverV2ExecutionStep{},
 		&models.FailoverV2PendingCleanup{},
@@ -58,6 +59,7 @@ func setupFailoverV2APITestDB(t *testing.T) *gorm.DB {
 		&models.FailoverV2PendingCleanup{},
 		&models.FailoverV2ExecutionStep{},
 		&models.FailoverV2Execution{},
+		&models.FailoverV2MemberLine{},
 		&models.FailoverV2Member{},
 		&models.FailoverV2Service{},
 		&models.FailoverExecution{},
@@ -430,5 +432,64 @@ func TestValidateFailoverV2MemberAllowsUninitializedMember(t *testing.T) {
 	}
 	if check := requireFailoverV2ValidationCheck(t, resp.Data.Checks, "member_unique"); check.Status != "pass" {
 		t.Fatalf("expected member_unique to pass, got %+v", check)
+	}
+}
+
+func TestValidateFailoverV2MemberAllowsSharedDNSLineAcrossMembers(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := setupFailoverV2APITestDB(t)
+	seedFailoverV2ValidationProviders(t, db)
+
+	service := models.FailoverV2Service{
+		UserID:              "user-a",
+		Name:                "v2-prod",
+		Enabled:             true,
+		DNSProvider:         models.FailoverDNSProviderCloudflare,
+		DNSEntryID:          "cf-entry",
+		DNSPayload:          `{"zone_name":"example.com","record_name":"api-v2","record_type":"A","ttl":60}`,
+		ScriptTimeoutSec:    600,
+		WaitAgentTimeoutSec: 600,
+		DeleteStrategy:      models.FailoverDeleteStrategyKeep,
+		LastStatus:          models.FailoverV2ServiceStatusHealthy,
+	}
+	if err := db.Create(&service).Error; err != nil {
+		t.Fatalf("failed to seed v2 service: %v", err)
+	}
+	if err := db.Create(&models.FailoverV2Member{
+		ServiceID:       service.ID,
+		Name:            "member-a",
+		Enabled:         true,
+		DNSLine:         "telecom",
+		DNSRecordRefs:   `{}`,
+		Provider:        digitalOceanProviderName,
+		ProviderEntryID: "do-entry",
+		PlanPayload:     `{}`,
+	}).Error; err != nil {
+		t.Fatalf("failed to seed existing member: %v", err)
+	}
+
+	req := testFailoverV2MemberValidationRequest()
+	req.WatchClientUUID = ""
+	req.CurrentAddress = ""
+	req.DNSLine = "telecom"
+
+	c, recorder := newFailoverV2ValidationTestContext(
+		t,
+		http.MethodPost,
+		"/api/admin/failover-v2/services/"+strconv.FormatUint(uint64(service.ID), 10)+"/members/validate",
+		req,
+		gin.Param{Key: "id", Value: strconv.FormatUint(uint64(service.ID), 10)},
+	)
+	ValidateFailoverV2Member(c)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+	resp := decodeFailoverV2ValidationTestEnvelope(t, recorder)
+	if !resp.Data.OK {
+		t.Fatalf("expected shared dns line validation to pass, got %+v", resp)
+	}
+	if check := requireFailoverV2ValidationCheck(t, resp.Data.Checks, "member_unique"); check.Status != "pass" {
+		t.Fatalf("expected member_unique to pass for shared dns line, got %+v", check)
 	}
 }
