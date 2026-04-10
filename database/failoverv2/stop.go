@@ -10,19 +10,6 @@ import (
 	"gorm.io/gorm"
 )
 
-var activeFailoverV2ExecutionStatuses = []string{
-	models.FailoverV2ExecutionStatusQueued,
-	models.FailoverV2ExecutionStatusDetachingDNS,
-	models.FailoverV2ExecutionStatusVerifyingDetachDNS,
-	models.FailoverV2ExecutionStatusProvisioning,
-	models.FailoverV2ExecutionStatusWaitingAgent,
-	models.FailoverV2ExecutionStatusValidatingOutlet,
-	models.FailoverV2ExecutionStatusRunningScripts,
-	models.FailoverV2ExecutionStatusAttachingDNS,
-	models.FailoverV2ExecutionStatusVerifyingAttachDNS,
-	models.FailoverV2ExecutionStatusCleaningOld,
-}
-
 func StopExecutionForUser(userUUID string, serviceID, executionID uint, reason string) (*models.FailoverV2Execution, error) {
 	return stopExecutionForUserWithDB(dbcore.GetDBInstance(), userUUID, serviceID, executionID, reason)
 }
@@ -55,7 +42,7 @@ func stopExecutionForUserWithDB(db *gorm.DB, userUUID string, serviceID, executi
 		if err != nil {
 			return err
 		}
-		if !containsString(activeFailoverV2ExecutionStatuses, execution.Status) {
+		if !IsFailoverV2ExecutionActive(execution.Status, execution.FinishedAt) {
 			return fmt.Errorf("failover v2 execution %d is not active", executionID)
 		}
 
@@ -127,14 +114,4 @@ func failRunningExecutionStepsWithDB(db *gorm.DB, executionIDs []uint, message s
 			"message":     message,
 			"finished_at": models.FromTime(now),
 		}).Error
-}
-
-func containsString(values []string, target string) bool {
-	target = strings.TrimSpace(target)
-	for _, value := range values {
-		if strings.TrimSpace(value) == target {
-			return true
-		}
-	}
-	return false
 }

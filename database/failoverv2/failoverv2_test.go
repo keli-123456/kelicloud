@@ -916,6 +916,102 @@ func TestRecoverInterruptedExecutionsWithDBRecoversAllServices(t *testing.T) {
 	}
 }
 
+func TestRecoverInterruptedExecutionsForServiceWithDBRecoversLegacyRunningStatus(t *testing.T) {
+	db := openFailoverV2TestDB(t)
+	if err := db.AutoMigrate(&models.FailoverV2Service{}, &models.FailoverV2Member{}, &models.FailoverV2Execution{}, &models.FailoverV2ExecutionStep{}); err != nil {
+		t.Fatalf("failed to migrate failover v2 schema: %v", err)
+	}
+
+	service, err := createServiceForUserWithDB(db, "user-a", &models.FailoverV2Service{
+		Name:        "legacy-running-service",
+		Enabled:     true,
+		DNSProvider: models.FailoverDNSProviderAliyun,
+		DNSEntryID:  "dns-entry-legacy",
+		DNSPayload:  `{"domain_name":"example.com","rr":"@"}`,
+	})
+	if err != nil {
+		t.Fatalf("failed to create service: %v", err)
+	}
+	member, err := createMemberForUserWithDB(db, "user-a", service.ID, &models.FailoverV2Member{
+		Name:            "telecom",
+		Enabled:         true,
+		DNSLine:         "telecom",
+		WatchClientUUID: "client-legacy",
+		Provider:        "digitalocean",
+		ProviderEntryID: "token-legacy",
+	})
+	if err != nil {
+		t.Fatalf("failed to create member: %v", err)
+	}
+	execution, err := createExecutionForUserWithDB(db, "user-a", service.ID, member.ID, &models.FailoverV2Execution{
+		Status:    "running",
+		StartedAt: models.FromTime(time.Now()),
+	})
+	if err != nil {
+		t.Fatalf("failed to create legacy running execution: %v", err)
+	}
+	if err := db.Model(&models.FailoverV2Service{}).
+		Where("id = ?", service.ID).
+		Updates(map[string]interface{}{
+			"last_execution_id": execution.ID,
+			"last_status":       models.FailoverV2ServiceStatusRunning,
+			"last_message":      "running",
+		}).Error; err != nil {
+		t.Fatalf("failed to seed legacy service running state: %v", err)
+	}
+	if err := db.Model(&models.FailoverV2Member{}).
+		Where("id = ?", member.ID).
+		Updates(map[string]interface{}{
+			"last_execution_id": execution.ID,
+			"last_status":       models.FailoverV2MemberStatusRunning,
+			"last_message":      "running",
+		}).Error; err != nil {
+		t.Fatalf("failed to seed legacy member running state: %v", err)
+	}
+
+	active, err := hasActiveExecutionForServiceWithDB(db, "user-a", service.ID)
+	if err != nil {
+		t.Fatalf("failed to query active execution: %v", err)
+	}
+	if !active {
+		t.Fatal("expected legacy running execution to be treated as active")
+	}
+
+	recovered, err := recoverInterruptedExecutionsForServiceWithDB(db, "user-a", service.ID, "legacy recovered")
+	if err != nil {
+		t.Fatalf("failed to recover legacy running execution: %v", err)
+	}
+	if recovered != 1 {
+		t.Fatalf("expected one recovered legacy execution, got %d", recovered)
+	}
+
+	reloadedExecution, err := getExecutionByIDForServiceForUserWithDB(db, "user-a", service.ID, execution.ID)
+	if err != nil {
+		t.Fatalf("failed to reload recovered execution: %v", err)
+	}
+	if reloadedExecution.Status != models.FailoverV2ExecutionStatusFailed {
+		t.Fatalf("expected recovered execution failed, got %q", reloadedExecution.Status)
+	}
+	if reloadedExecution.FinishedAt == nil {
+		t.Fatal("expected recovered execution finished_at to be set")
+	}
+
+	reloadedService, err := getServiceByIDForUserWithDB(db, "user-a", service.ID)
+	if err != nil {
+		t.Fatalf("failed to reload service: %v", err)
+	}
+	if reloadedService.LastStatus != models.FailoverV2ServiceStatusFailed {
+		t.Fatalf("expected service status failed after recovery, got %q", reloadedService.LastStatus)
+	}
+	reloadedMember, err := getMemberByIDForServiceForUserWithDB(db, "user-a", service.ID, member.ID)
+	if err != nil {
+		t.Fatalf("failed to reload member: %v", err)
+	}
+	if reloadedMember.LastStatus != models.FailoverV2MemberStatusFailed {
+		t.Fatalf("expected member status failed after recovery, got %q", reloadedMember.LastStatus)
+	}
+}
+
 func TestCreateOrUpdatePendingCleanupAndListDue(t *testing.T) {
 	db := openFailoverV2TestDB(t)
 	if err := db.AutoMigrate(&models.FailoverV2PendingCleanup{}); err != nil {

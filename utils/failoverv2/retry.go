@@ -303,7 +303,7 @@ func loadRetryExecutionContext(userUUID string, serviceID, executionID uint) (*r
 	if err != nil {
 		return nil, err
 	}
-	if retryExecutionIsActive(execution.Status) {
+	if retryExecutionIsActive(execution) {
 		return nil, fmt.Errorf("failover v2 execution %d is still active", executionID)
 	}
 	member, err := findMemberOnService(service, execution.MemberID)
@@ -338,22 +338,11 @@ func loadRetryExecutionContext(userUUID string, serviceID, executionID uint) (*r
 	}, nil
 }
 
-func retryExecutionIsActive(status string) bool {
-	switch strings.TrimSpace(status) {
-	case models.FailoverV2ExecutionStatusQueued,
-		models.FailoverV2ExecutionStatusDetachingDNS,
-		models.FailoverV2ExecutionStatusVerifyingDetachDNS,
-		models.FailoverV2ExecutionStatusProvisioning,
-		models.FailoverV2ExecutionStatusWaitingAgent,
-		models.FailoverV2ExecutionStatusValidatingOutlet,
-		models.FailoverV2ExecutionStatusRunningScripts,
-		models.FailoverV2ExecutionStatusAttachingDNS,
-		models.FailoverV2ExecutionStatusVerifyingAttachDNS,
-		models.FailoverV2ExecutionStatusCleaningOld:
-		return true
-	default:
+func retryExecutionIsActive(execution *models.FailoverV2Execution) bool {
+	if execution == nil {
 		return false
 	}
+	return failoverv2db.IsFailoverV2ExecutionActive(execution.Status, execution.FinishedAt)
 }
 
 func normalizeRetryExecutionStatus(status string) string {
@@ -368,7 +357,7 @@ func describeStopExecutionAvailability(execution *models.FailoverV2Execution) Ex
 	if execution == nil {
 		return ExecutionActionAvailability{Reason: "execution is unavailable"}
 	}
-	if !retryExecutionIsActive(execution.Status) {
+	if !retryExecutionIsActive(execution) {
 		return ExecutionActionAvailability{Reason: "execution is not running"}
 	}
 	return ExecutionActionAvailability{Available: true}
@@ -378,7 +367,7 @@ func describeRetryAttachDNSAvailability(service *models.FailoverV2Service, membe
 	if execution == nil {
 		return ExecutionActionAvailability{Reason: "execution is unavailable"}
 	}
-	if retryExecutionIsActive(execution.Status) {
+	if retryExecutionIsActive(execution) {
 		return ExecutionActionAvailability{Reason: "execution is still running"}
 	}
 	if service == nil || member == nil {
@@ -418,7 +407,7 @@ func describeRetryCleanupAvailability(service *models.FailoverV2Service, member 
 	if execution == nil {
 		return ExecutionActionAvailability{Reason: "execution is unavailable"}
 	}
-	if retryExecutionIsActive(execution.Status) {
+	if retryExecutionIsActive(execution) {
 		return ExecutionActionAvailability{Reason: "execution is still running"}
 	}
 	if service == nil || member == nil {

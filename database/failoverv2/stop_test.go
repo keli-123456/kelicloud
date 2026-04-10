@@ -126,3 +126,50 @@ func TestStopExecutionForUserWithDBMarksExecutionAndRunningStepsFailed(t *testin
 		t.Fatal("expected member last_failed_at to be set")
 	}
 }
+
+func TestStopExecutionForUserWithDBAllowsLegacyRunningStatus(t *testing.T) {
+	db := openFailoverV2TestDB(t)
+	if err := db.AutoMigrate(
+		&models.FailoverV2Service{},
+		&models.FailoverV2Member{},
+		&models.FailoverV2Execution{},
+		&models.FailoverV2ExecutionStep{},
+	); err != nil {
+		t.Fatalf("failed to migrate failover v2 schema: %v", err)
+	}
+
+	service, err := createServiceForUserWithDB(db, "user-a", &models.FailoverV2Service{
+		Name:        "legacy-running-service",
+		Enabled:     true,
+		DNSProvider: models.FailoverDNSProviderAliyun,
+		DNSEntryID:  "dns-entry-legacy",
+		DNSPayload:  `{"domain_name":"example.com","rr":"@"}`,
+	})
+	if err != nil {
+		t.Fatalf("failed to create service: %v", err)
+	}
+	member, err := createMemberForUserWithDB(db, "user-a", service.ID, &models.FailoverV2Member{
+		Name:            "telecom",
+		Enabled:         true,
+		DNSLine:         "telecom",
+		WatchClientUUID: "client-legacy",
+		Provider:        "digitalocean",
+		ProviderEntryID: "token-legacy",
+	})
+	if err != nil {
+		t.Fatalf("failed to create member: %v", err)
+	}
+
+	execution, err := createExecutionForUserWithDB(db, "user-a", service.ID, member.ID, &models.FailoverV2Execution{
+		Status:        "running",
+		TriggerReason: "legacy status",
+		StartedAt:     models.FromTime(time.Now()),
+	})
+	if err != nil {
+		t.Fatalf("failed to create execution: %v", err)
+	}
+
+	if _, err := stopExecutionForUserWithDB(db, "user-a", service.ID, execution.ID, "stopped legacy execution"); err != nil {
+		t.Fatalf("expected stop to allow legacy running status, got error: %v", err)
+	}
+}
