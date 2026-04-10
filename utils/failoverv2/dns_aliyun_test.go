@@ -243,6 +243,37 @@ func TestApplyAliyunMemberDNSDetachRemovesOnlyManagedTargetLine(t *testing.T) {
 	}
 }
 
+func TestApplyAliyunMemberDNSDetachRemovesStoredAAAAWhenCurrentAddressIsIPv4(t *testing.T) {
+	service := testAliyunService()
+	service.DNSPayload = `{"domain_name":"example.com","rr":"@","record_type":"A","sync_ipv6":true,"ttl":60}`
+
+	client := &mockAliyunDNSClient{
+		records: []aliyunDNSRecord{
+			{RecordID: "record-telecom-a", RR: "@", Type: "A", Value: "198.51.100.11", TTL: 60, Line: "telecom"},
+			{RecordID: "record-telecom-aaaa", RR: "@", Type: "AAAA", Value: "2001:db8::11", TTL: 60, Line: "telecom"},
+		},
+	}
+	useMockAliyunDNSDependencies(t, client)
+
+	member := testAliyunMember()
+	member.DNSRecordRefs = `{"A":"record-telecom-a","AAAA":"record-telecom-aaaa"}`
+	member.CurrentAddress = "198.51.100.11"
+
+	result, err := ApplyAliyunMemberDNSDetach(context.Background(), "user-a", service, member)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if len(client.deleteCalls) != 2 {
+		t.Fatalf("expected both managed records to be deleted, got %#v", client.deleteCalls)
+	}
+	if client.deleteCalls[0] != "record-telecom-a" || client.deleteCalls[1] != "record-telecom-aaaa" {
+		t.Fatalf("unexpected delete calls: %#v", client.deleteCalls)
+	}
+	if len(result.Removed) != 2 {
+		t.Fatalf("expected two removed records, got %#v", result.Removed)
+	}
+}
+
 func TestApplyAliyunMemberDNSDetachFallsBackToCurrentAddress(t *testing.T) {
 	client := &mockAliyunDNSClient{
 		records: []aliyunDNSRecord{
@@ -383,6 +414,33 @@ func TestVerifyAliyunMemberDNSDetachedIgnoresOtherLines(t *testing.T) {
 	}
 	if !verification.Success {
 		t.Fatalf("expected verification to pass, got %#v", verification)
+	}
+}
+
+func TestVerifyAliyunMemberDNSDetachedFlagsStoredAAAAWithIPv4CurrentAddress(t *testing.T) {
+	service := testAliyunService()
+	service.DNSPayload = `{"domain_name":"example.com","rr":"@","record_type":"A","sync_ipv6":true,"ttl":60}`
+
+	client := &mockAliyunDNSClient{
+		records: []aliyunDNSRecord{
+			{RecordID: "record-telecom-aaaa", RR: "@", Type: "AAAA", Value: "2001:db8::11", TTL: 60, Line: "telecom"},
+		},
+	}
+	useMockAliyunDNSDependencies(t, client)
+
+	member := testAliyunMember()
+	member.DNSRecordRefs = `{"AAAA":"record-telecom-aaaa"}`
+	member.CurrentAddress = "198.51.100.11"
+
+	verification, err := VerifyAliyunMemberDNSDetached(context.Background(), "user-a", service, member)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if verification.Success {
+		t.Fatalf("expected verification to fail when stored AAAA still exists, got %#v", verification)
+	}
+	if len(verification.Observed) != 1 || verification.Observed[0].ID != "record-telecom-aaaa" {
+		t.Fatalf("expected stored AAAA to be observed, got %#v", verification.Observed)
 	}
 }
 

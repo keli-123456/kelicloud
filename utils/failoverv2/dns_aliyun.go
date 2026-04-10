@@ -258,8 +258,11 @@ func ApplyAliyunMemberDNSDetach(ctx context.Context, userUUID string, service *m
 		if !sameAliyunRecordIdentity(record, operation.rr, recordType) || !sameAliyunRecordLine(record.Line, operation.line) {
 			continue
 		}
-		if currentAddress != "" && !sameAddress(record.Value, currentAddress) {
-			continue
+		if currentAddress != "" {
+			typedCurrentAddress, hasTypedCurrentAddress := normalizeMemberAddressForRecordType(recordType, currentAddress)
+			if hasTypedCurrentAddress && !sameAddress(record.Value, typedCurrentAddress) {
+				continue
+			}
 		}
 		existingRecordID := strings.TrimSpace(record.RecordID)
 		if _, ok := removedRecordIDs[existingRecordID]; ok {
@@ -391,8 +394,13 @@ func VerifyAliyunMemberDNSDetached(ctx context.Context, userUUID string, service
 		if recordID != "" {
 			if storedID := strings.TrimSpace(operation.recordRefs[recordType]); storedID != "" && storedID == recordID {
 				if sameAliyunRecordIdentity(record, operation.rr, recordType) && sameAliyunRecordLine(record.Line, operation.line) {
-					if currentAddress == "" || sameAddress(record.Value, currentAddress) {
+					if currentAddress == "" {
 						observed = append(observed, buildAliyunMemberDNSRecordFromExisting(operation.domainName, record))
+					} else {
+						typedCurrentAddress, hasTypedCurrentAddress := normalizeMemberAddressForRecordType(recordType, currentAddress)
+						if !hasTypedCurrentAddress || sameAddress(record.Value, typedCurrentAddress) {
+							observed = append(observed, buildAliyunMemberDNSRecordFromExisting(operation.domainName, record))
+						}
 					}
 				}
 				continue
