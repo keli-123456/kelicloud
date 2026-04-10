@@ -62,22 +62,39 @@ func RunScheduledWork() error {
 			continue
 		}
 
+		startAction := "automatic failover"
+		if memberUsesExistingClient(triggerMember) {
+			startAction = "automatic protection"
+		}
 		startMessage := fmt.Sprintf(
-			"automatic failover started for member %s: %s",
+			"%s started for member %s: %s",
+			startAction,
 			memberDisplayLabel(triggerMember),
 			strings.TrimSpace(triggerReason),
 		)
-		execution, err := queueMemberFailoverExecution(
-			service.UserID,
-			service,
-			triggerMember,
-			triggerReason,
-			buildTriggerSnapshot(triggerReport),
-			startMessage,
-		)
+		var execution *models.FailoverV2Execution
+		if memberUsesExistingClient(triggerMember) {
+			execution, err = queueMemberDetachExecution(
+				service.UserID,
+				service,
+				triggerMember,
+				"automatic existing_client protection",
+				buildTriggerSnapshot(triggerReport),
+				startMessage,
+			)
+		} else {
+			execution, err = queueMemberProvisioningFailoverExecution(
+				service.UserID,
+				service,
+				triggerMember,
+				triggerReason,
+				buildTriggerSnapshot(triggerReport),
+				startMessage,
+			)
+		}
 		if err != nil {
 			message := fmt.Sprintf(
-				"failed to queue automatic failover for member %s: %v",
+				"failed to queue automatic action for member %s: %v",
 				memberDisplayLabel(triggerMember),
 				err,
 			)
@@ -145,9 +162,20 @@ func evaluateMemberHealth(member *models.FailoverV2Member, report *common.Report
 		}
 	}
 
+	if memberUsesExistingClient(member) && memberHasAllLinesDetached(member) {
+		fields["last_status"] = models.FailoverV2MemberStatusFailed
+		fields["last_message"] = "all dns lines are already detached"
+		fields["trigger_failure_count"] = 0
+		return false, fields, ""
+	}
+
 	if strings.TrimSpace(member.WatchClientUUID) == "" {
 		fields["last_status"] = models.FailoverV2MemberStatusUnknown
-		fields["last_message"] = "member is not initialized"
+		if memberUsesExistingClient(member) {
+			fields["last_message"] = "existing_client member requires watch_client_uuid"
+		} else {
+			fields["last_message"] = "member is not initialized"
+		}
 		fields["trigger_failure_count"] = 0
 		return false, fields, ""
 	}

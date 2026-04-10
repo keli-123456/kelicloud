@@ -21,6 +21,21 @@ type cloudflareDNSConfig struct {
 
 var loadCloudflareDNSConfigFunc = loadCloudflareDNSConfig
 
+const maxProviderEntryGroupLength = 100
+
+func NormalizeProviderEntryGroup(group string) string {
+	group = strings.TrimSpace(group)
+	runes := []rune(group)
+	if len(runes) > maxProviderEntryGroupLength {
+		group = string(runes[:maxProviderEntryGroupLength])
+	}
+	return group
+}
+
+func normalizeProviderEntryGroup(group string) string {
+	return NormalizeProviderEntryGroup(group)
+}
+
 func loadCloudflareDNSConfig(userUUID, entryID string) (*cloudflareDNSConfig, error) {
 	entry, err := loadGenericProviderEntry(userUUID, "cloudflare", entryID)
 	if err != nil {
@@ -55,12 +70,38 @@ func loadLinodeAddition(userUUID string) (*linode.Addition, error) {
 }
 
 func loadLinodeToken(userUUID, entryID string) (*linode.Addition, *linode.TokenRecord, error) {
+	return loadLinodeTokenSelection(userUUID, entryID, "")
+}
+
+func loadLinodeTokenSelection(userUUID, entryID, entryGroup string) (*linode.Addition, *linode.TokenRecord, error) {
 	addition, err := loadLinodeAddition(userUUID)
 	if err != nil {
 		return nil, nil, err
 	}
 
 	entryID = strings.TrimSpace(entryID)
+	entryGroup = normalizeProviderEntryGroup(entryGroup)
+	if entryGroup != "" {
+		if entryID != "" && entryID != activeProviderEntryID {
+			token := addition.FindToken(entryID)
+			if token == nil {
+				return nil, nil, fmt.Errorf("Linode token not found: %s", entryID)
+			}
+			if normalizeProviderEntryGroup(token.Group) != entryGroup {
+				return nil, nil, fmt.Errorf("Linode token %s is not in group %s", entryID, entryGroup)
+			}
+			return addition, token, nil
+		}
+		if token := addition.ActiveToken(); token != nil && normalizeProviderEntryGroup(token.Group) == entryGroup {
+			return addition, token, nil
+		}
+		for index := range addition.Tokens {
+			if normalizeProviderEntryGroup(addition.Tokens[index].Group) == entryGroup {
+				return addition, &addition.Tokens[index], nil
+			}
+		}
+		return nil, nil, fmt.Errorf("Linode token group not found: %s", entryGroup)
+	}
 	if entryID == "" || entryID == activeProviderEntryID {
 		token := addition.ActiveToken()
 		if token == nil {
@@ -179,12 +220,38 @@ func loadAWSAddition(userUUID string) (*awscloud.Addition, error) {
 }
 
 func loadAWSCredential(userUUID, entryID string) (*awscloud.Addition, *awscloud.CredentialRecord, error) {
+	return loadAWSCredentialSelection(userUUID, entryID, "")
+}
+
+func loadAWSCredentialSelection(userUUID, entryID, entryGroup string) (*awscloud.Addition, *awscloud.CredentialRecord, error) {
 	addition, err := loadAWSAddition(userUUID)
 	if err != nil {
 		return nil, nil, err
 	}
 
 	entryID = strings.TrimSpace(entryID)
+	entryGroup = normalizeProviderEntryGroup(entryGroup)
+	if entryGroup != "" {
+		if entryID != "" && entryID != activeProviderEntryID {
+			credential := addition.FindCredential(entryID)
+			if credential == nil {
+				return nil, nil, fmt.Errorf("AWS credential not found: %s", entryID)
+			}
+			if normalizeProviderEntryGroup(credential.Group) != entryGroup {
+				return nil, nil, fmt.Errorf("AWS credential %s is not in group %s", entryID, entryGroup)
+			}
+			return addition, credential, nil
+		}
+		if credential := addition.ActiveCredential(); credential != nil && normalizeProviderEntryGroup(credential.Group) == entryGroup {
+			return addition, credential, nil
+		}
+		for index := range addition.Credentials {
+			if normalizeProviderEntryGroup(addition.Credentials[index].Group) == entryGroup {
+				return addition, &addition.Credentials[index], nil
+			}
+		}
+		return nil, nil, fmt.Errorf("AWS credential group not found: %s", entryGroup)
+	}
 	if entryID == "" || entryID == activeProviderEntryID {
 		credential := addition.ActiveCredential()
 		if credential == nil {

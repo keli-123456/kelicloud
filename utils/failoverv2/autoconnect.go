@@ -54,12 +54,38 @@ func loadDigitalOceanAddition(userUUID string) (*digitalocean.Addition, error) {
 }
 
 func loadDigitalOceanToken(userUUID, entryID string) (*digitalocean.Addition, *digitalocean.TokenRecord, error) {
+	return loadDigitalOceanTokenSelection(userUUID, entryID, "")
+}
+
+func loadDigitalOceanTokenSelection(userUUID, entryID, entryGroup string) (*digitalocean.Addition, *digitalocean.TokenRecord, error) {
 	addition, err := loadDigitalOceanAddition(userUUID)
 	if err != nil {
 		return nil, nil, err
 	}
 
 	entryID = strings.TrimSpace(entryID)
+	entryGroup = normalizeProviderEntryGroup(entryGroup)
+	if entryGroup != "" {
+		if entryID != "" && entryID != activeProviderEntryID {
+			token := addition.FindToken(entryID)
+			if token == nil {
+				return nil, nil, fmt.Errorf("DigitalOcean token not found: %s", entryID)
+			}
+			if normalizeProviderEntryGroup(token.Group) != entryGroup {
+				return nil, nil, fmt.Errorf("DigitalOcean token %s is not in group %s", entryID, entryGroup)
+			}
+			return addition, token, nil
+		}
+		if token := addition.ActiveToken(); token != nil && normalizeProviderEntryGroup(token.Group) == entryGroup {
+			return addition, token, nil
+		}
+		for index := range addition.Tokens {
+			if normalizeProviderEntryGroup(addition.Tokens[index].Group) == entryGroup {
+				return addition, &addition.Tokens[index], nil
+			}
+		}
+		return nil, nil, fmt.Errorf("DigitalOcean token group not found: %s", entryGroup)
+	}
 	if entryID == "" || entryID == activeProviderEntryID {
 		token := addition.ActiveToken()
 		if token == nil {

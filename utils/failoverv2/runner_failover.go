@@ -83,52 +83,41 @@ func RunMemberFailoverNowForUser(userUUID string, serviceID, memberID uint) (*mo
 		return nil, err
 	}
 
-	startMessage := fmt.Sprintf("manual failover started for member %s", memberDisplayLabel(member))
-	return queueMemberFailoverExecution(
+	if memberUsesExistingClient(member) {
+		return queueMemberDetachExecution(
+			userUUID,
+			service,
+			member,
+			"manual existing_client protection",
+			"",
+			fmt.Sprintf("manual protection started for member %s", memberDisplayLabel(member)),
+		)
+	}
+
+	return queueMemberProvisioningFailoverExecution(
 		userUUID,
 		service,
 		member,
 		"manual failover",
 		"",
-		startMessage,
+		fmt.Sprintf("manual failover started for member %s", memberDisplayLabel(member)),
 	)
 }
 
 func queueMemberFailoverExecution(userUUID string, service *models.FailoverV2Service, member *models.FailoverV2Member, triggerReason, triggerSnapshot, startMessage string) (*models.FailoverV2Execution, error) {
+	if memberUsesExistingClient(member) {
+		return queueMemberDetachExecution(userUUID, service, member, triggerReason, triggerSnapshot, startMessage)
+	}
+	return queueMemberProvisioningFailoverExecution(userUUID, service, member, triggerReason, triggerSnapshot, startMessage)
+}
+
+func queueMemberProvisioningFailoverExecution(userUUID string, service *models.FailoverV2Service, member *models.FailoverV2Member, triggerReason, triggerSnapshot, startMessage string) (*models.FailoverV2Execution, error) {
 	if service == nil {
 		return nil, errors.New("service is required")
 	}
 	if member == nil {
 		return nil, errors.New("member is required")
 	}
-	if err := ensureMemberTargetAvailableFromLegacyFailover(userUUID, member); err != nil {
-		return nil, err
-	}
-	ownership, err := claimServiceExecutionLocks(userUUID, service)
-	if err != nil {
-		return nil, err
-	}
-
-	recovered, err := failoverv2db.RecoverInterruptedExecutionsForService(userUUID, service.ID, interruptedExecutionMessage)
-	if err != nil {
-		releaseServiceExecutionLocks(service.ID, ownership)
-		return nil, err
-	}
-	if recovered > 0 {
-		log.Printf("failoverv2: recovered %d interrupted execution(s) for service %d", recovered, service.ID)
-	}
-
-	active, err := failoverv2db.HasActiveExecutionForService(userUUID, service.ID)
-	if err != nil {
-		releaseServiceExecutionLocks(service.ID, ownership)
-		return nil, err
-	}
-	if active {
-		releaseServiceExecutionLocks(service.ID, ownership)
-		return nil, fmt.Errorf("failover v2 service %d already has an active execution", service.ID)
-	}
-
-	now := time.Now()
 	triggerReason = strings.TrimSpace(triggerReason)
 	if triggerReason == "" {
 		triggerReason = "failover"
@@ -137,60 +126,29 @@ func queueMemberFailoverExecution(userUUID string, service *models.FailoverV2Ser
 	if startMessage == "" {
 		startMessage = fmt.Sprintf("failover started for member %s", memberDisplayLabel(member))
 	}
-	execution, err := failoverv2db.CreateExecutionForUser(userUUID, service.ID, member.ID, &models.FailoverV2Execution{
-		Status:          models.FailoverV2ExecutionStatusQueued,
-		TriggerReason:   triggerReason,
-		TriggerSnapshot: strings.TrimSpace(triggerSnapshot),
-		OldClientUUID:   strings.TrimSpace(member.WatchClientUUID),
-		OldInstanceRef:  strings.TrimSpace(member.CurrentInstanceRef),
-		OldAddresses:    string(marshalJSON(map[string]interface{}{"current_address": strings.TrimSpace(member.CurrentAddress)})),
-		DetachDNSStatus: models.FailoverDNSStatusPending,
-		AttachDNSStatus: models.FailoverDNSStatusPending,
-		CleanupStatus:   models.FailoverCleanupStatusSkipped,
-		StartedAt:       models.FromTime(now),
-	})
-	if err != nil {
-		releaseServiceExecutionLocks(service.ID, ownership)
-		return nil, err
-	}
-
-	if err := failoverv2db.UpdateServiceFieldsForUser(userUUID, service.ID, map[string]interface{}{
-		"last_execution_id": execution.ID,
-		"last_status":       models.FailoverV2ServiceStatusRunning,
-		"last_message":      startMessage,
-	}); err != nil {
-		releaseServiceExecutionLocks(service.ID, ownership)
-		return nil, err
-	}
-	if err := failoverv2db.UpdateMemberFieldsForUser(userUUID, service.ID, member.ID, map[string]interface{}{
-		"last_execution_id": execution.ID,
-		"last_status":       models.FailoverV2MemberStatusRunning,
-		"last_message":      startMessage,
-		"last_triggered_at": models.FromTime(now),
-	}); err != nil {
-		releaseServiceExecutionLocks(service.ID, ownership)
-		return nil, err
-	}
-
-	go func(serviceCopy models.FailoverV2Service, memberCopy models.FailoverV2Member, executionCopy models.FailoverV2Execution, ownershipCopy ServiceDNSOwnership) {
-		defer releaseServiceExecutionLocks(serviceCopy.ID, &ownershipCopy)
-		ctx, cancel := context.WithCancel(context.Background())
-		registerExecutionCancel(executionCopy.ID, cancel)
-		defer unregisterExecutionCancel(executionCopy.ID)
-		runner := &memberExecutionRunner{
-			userUUID:  userUUID,
-			service:   &serviceCopy,
-			member:    &memberCopy,
-			execution: &executionCopy,
-			ctx:       ctx,
-		}
-		runner.runFailover()
-	}(*service, *member, *execution, *ownership)
-
-	return execution, nil
+	return queueMemberExecution(
+		userUUID,
+		service,
+		member,
+		&models.FailoverV2Execution{
+			Status:          models.FailoverV2ExecutionStatusQueued,
+			TriggerReason:   triggerReason,
+			TriggerSnapshot: strings.TrimSpace(triggerSnapshot),
+			OldClientUUID:   strings.TrimSpace(member.WatchClientUUID),
+			OldInstanceRef:  strings.TrimSpace(member.CurrentInstanceRef),
+			OldAddresses:    buildMemberOldAddressesSnapshot(member),
+			DetachDNSStatus: models.FailoverDNSStatusPending,
+			AttachDNSStatus: models.FailoverDNSStatusPending,
+			CleanupStatus:   models.FailoverCleanupStatusSkipped,
+		},
+		startMessage,
+		func(runner *memberExecutionRunner) {
+			runner.runProvisioningFailover()
+		},
+	)
 }
 
-func (r *memberExecutionRunner) runFailover() {
+func (r *memberExecutionRunner) runProvisioningFailover() {
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			message := fmt.Sprintf("failover v2 execution panicked: %v", recovered)
@@ -207,7 +165,7 @@ func (r *memberExecutionRunner) runFailover() {
 	baseDetail := map[string]interface{}{
 		"service_id": r.service.ID,
 		"member_id":  r.member.ID,
-		"dns_line":   strings.TrimSpace(r.member.DNSLine),
+		"dns_lines":  memberLineCodes(r.member),
 	}
 
 	detachResult, detachVerification, err := r.detachMemberDNSFlow(baseDetail)
@@ -218,11 +176,10 @@ func (r *memberExecutionRunner) runFailover() {
 		r.failExecution(err.Error())
 		return
 	}
-	if err := failoverv2db.UpdateMemberFieldsForUser(r.userUUID, r.service.ID, r.member.ID, map[string]interface{}{
-		"dns_record_refs": "{}",
-		"last_status":     models.FailoverV2MemberStatusRunning,
-		"last_message":    "member dns detached and failover is continuing",
-	}); err != nil {
+	if err := failoverv2db.UpdateMemberFieldsAndLineRecordRefsForUser(r.userUUID, r.service.ID, r.member.ID, map[string]interface{}{
+		"last_status":  models.FailoverV2MemberStatusRunning,
+		"last_message": "member dns detached and failover is continuing",
+	}, map[string]map[string]string{}); err != nil {
 		log.Printf("failoverv2: failed to clear member %d dns refs after detach: %v", r.member.ID, err)
 	}
 
@@ -301,16 +258,15 @@ func (r *memberExecutionRunner) runFailover() {
 	if cleanupMessage != "" {
 		memberMessage = memberMessage + "; " + cleanupMessage
 	}
-	if err := failoverv2db.UpdateMemberFieldsForUser(r.userUUID, r.service.ID, r.member.ID, map[string]interface{}{
+	if err := failoverv2db.UpdateMemberFieldsAndLineRecordRefsForUser(r.userUUID, r.service.ID, r.member.ID, map[string]interface{}{
 		"watch_client_uuid":    targetClientUUID,
 		"current_address":      currentAddress,
 		"current_instance_ref": string(marshalJSON(outcome.NewInstanceRef)),
-		"dns_record_refs":      encodeMemberDNSRecordRefs(extractMemberDNSRecordRefs(attachResult)),
 		"last_execution_id":    r.execution.ID,
 		"last_status":          models.FailoverV2MemberStatusHealthy,
 		"last_message":         memberMessage,
 		"last_succeeded_at":    finishedAt,
-	}); err != nil {
+	}, extractMemberLineRecordRefs(attachResult)); err != nil {
 		log.Printf("failoverv2: failed to update member %d after success: %v", r.member.ID, err)
 	}
 	if err := failoverv2db.UpdateServiceFieldsForUser(r.userUUID, r.service.ID, map[string]interface{}{
@@ -320,6 +276,10 @@ func (r *memberExecutionRunner) runFailover() {
 	}); err != nil {
 		log.Printf("failoverv2: failed to update service %d after success: %v", r.service.ID, err)
 	}
+}
+
+func (r *memberExecutionRunner) runFailover() {
+	r.runProvisioningFailover()
 }
 
 func (r *memberExecutionRunner) detachMemberDNSFlow(baseDetail map[string]interface{}) (interface{}, interface{}, error) {

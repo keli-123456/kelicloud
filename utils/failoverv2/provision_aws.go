@@ -61,7 +61,7 @@ func provisionAWSMember(ctx context.Context, userUUID string, service *models.Fa
 		return nil, err
 	}
 
-	addition, credential, err := loadAWSCredential(userUUID, member.ProviderEntryID)
+	addition, credential, err := loadAWSCredentialSelection(userUUID, member.ProviderEntryID, member.ProviderEntryGroup)
 	if err != nil {
 		return nil, err
 	}
@@ -370,9 +370,16 @@ func parseAWSMemberPlanPayload(raw string) (*awsMemberPlanPayload, error) {
 		raw = "{}"
 	}
 
+	rawPayload := []byte(raw)
 	var payload awsMemberPlanPayload
-	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+	if err := json.Unmarshal(rawPayload, &payload); err != nil {
 		return nil, fmt.Errorf("invalid aws member plan_payload: %w", err)
+	}
+	var payloadFields map[string]json.RawMessage
+	if err := json.Unmarshal(rawPayload, &payloadFields); err == nil {
+		if _, ok := payloadFields["allow_all_traffic"]; !ok {
+			payload.AllowAllTraffic = true
+		}
 	}
 	if err := validateAWSMemberPlanPayload(payload); err != nil {
 		return nil, err

@@ -378,6 +378,101 @@ func prepareMySQLSchemaCompatibility(db *gorm.DB) {
 	prepareMySQLClientRegionSchemaCompatibility(db)
 }
 
+func prepareFailoverV2MemberSchemaCompatibility(db *gorm.DB) {
+	if db == nil {
+		return
+	}
+
+	migrator := db.Migrator()
+	if !migrator.HasTable(&models.FailoverV2Member{}) {
+		return
+	}
+
+	indexes, err := migrator.GetIndexes(&models.FailoverV2Member{})
+	if err != nil {
+		log.Printf("Failed to inspect failover v2 member indexes: %v", err)
+		return
+	}
+
+	legacyUniqueIndex := false
+	for _, index := range indexes {
+		if index.Name() != "idx_failover_v2_service_client" {
+			continue
+		}
+		if unique, ok := index.Unique(); ok && unique {
+			legacyUniqueIndex = true
+		}
+		break
+	}
+	if !legacyUniqueIndex {
+		return
+	}
+
+	if err := migrator.DropIndex(&models.FailoverV2Member{}, "idx_failover_v2_service_client"); err != nil {
+		log.Printf("Failed to drop legacy failover v2 member unique index: %v", err)
+		return
+	}
+	if err := migrator.CreateIndex(&models.FailoverV2Member{}, "idx_failover_v2_service_client"); err != nil {
+		log.Printf("Failed to recreate failover v2 member watch client index: %v", err)
+	}
+
+	if migrator.HasTable(&models.FailoverV2MemberLine{}) {
+		if err := db.Model(&models.FailoverV2Member{}).
+			Where("mode = '' OR mode IS NULL").
+			Update("mode", models.FailoverV2MemberModeProviderTemplate).Error; err != nil {
+			log.Printf("Failed to backfill failover v2 member modes: %v", err)
+		}
+
+		type legacyMemberLineRow struct {
+			ID            uint
+			ServiceID     uint
+			DNSLine       string
+			DNSRecordRefs string
+		}
+
+		var legacyRows []legacyMemberLineRow
+		if err := db.Model(&models.FailoverV2Member{}).
+			Select("id, service_id, dns_line, dns_record_refs").
+			Order("id ASC").
+			Find(&legacyRows).Error; err != nil {
+			log.Printf("Failed to load failover v2 member legacy lines for backfill: %v", err)
+			return
+		}
+
+		for _, row := range legacyRows {
+			lineCode := strings.TrimSpace(row.DNSLine)
+			if lineCode == "" {
+				continue
+			}
+
+			var count int64
+			if err := db.Model(&models.FailoverV2MemberLine{}).
+				Where("member_id = ?", row.ID).
+				Count(&count).Error; err != nil {
+				log.Printf("Failed to inspect failover v2 member lines for member %d: %v", row.ID, err)
+				continue
+			}
+			if count > 0 {
+				continue
+			}
+
+			dnsRecordRefs := strings.TrimSpace(row.DNSRecordRefs)
+			if dnsRecordRefs == "" {
+				dnsRecordRefs = "{}"
+			}
+
+			if err := db.Create(&models.FailoverV2MemberLine{
+				ServiceID:     row.ServiceID,
+				MemberID:      row.ID,
+				LineCode:      lineCode,
+				DNSRecordRefs: dnsRecordRefs,
+			}).Error; err != nil {
+				log.Printf("Failed to backfill failover v2 member line for member %d line %q: %v", row.ID, lineCode, err)
+			}
+		}
+	}
+}
+
 func prepareMySQLOfflineNotificationCompatibility(db *gorm.DB) {
 	migrator := db.Migrator()
 	if !migrator.HasTable(&models.OfflineNotification{}) {
@@ -692,6 +787,7 @@ func GetDBInstance() *gorm.DB {
 			&models.FailoverPendingCleanup{},
 			&models.FailoverV2Service{},
 			&models.FailoverV2Member{},
+			&models.FailoverV2MemberLine{},
 			&models.FailoverV2Execution{},
 			&models.FailoverV2ExecutionStep{},
 			&models.FailoverV2PendingCleanup{},
@@ -700,6 +796,7 @@ func GetDBInstance() *gorm.DB {
 		if err != nil {
 			log.Printf("Failed to create failover tables, it may already exist: %v", err)
 		}
+		prepareFailoverV2MemberSchemaCompatibility(instance)
 
 	})
 

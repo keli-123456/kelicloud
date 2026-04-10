@@ -33,6 +33,7 @@ func configureFailoverV2RunnerTestDB(t *testing.T) {
 		&models.FailoverPendingCleanup{},
 		&models.FailoverV2Service{},
 		&models.FailoverV2Member{},
+		&models.FailoverV2MemberLine{},
 		&models.FailoverV2Execution{},
 		&models.FailoverV2ExecutionStep{},
 		&models.FailoverV2PendingCleanup{},
@@ -45,6 +46,7 @@ func configureFailoverV2RunnerTestDB(t *testing.T) {
 		"failover_v2_pending_cleanups",
 		"failover_v2_execution_steps",
 		"failover_v2_executions",
+		"failover_v2_member_lines",
 		"failover_v2_members",
 		"failover_v2_services",
 		"failover_pending_cleanups",
@@ -399,10 +401,10 @@ func TestMemberExecutionRunnerRunFailoverSuccessUpdatesMemberAndExecution(t *tes
 		return map[string]interface{}{"count": 0}, nil
 	}
 	failoverV2AttachDNSFunc = func(ctx context.Context, userUUID string, service *models.FailoverV2Service, member *models.FailoverV2Member, ipv4, ipv6 string) (interface{}, error) {
-		return &AliyunMemberDNSResult{RecordRefs: map[string]string{"A": "record-new"}}, nil
+		return &AliyunMemberDNSResult{Line: member.DNSLine, RecordRefs: map[string]string{"A": "record-new"}}, nil
 	}
 	failoverV2VerifyAttachDNSFunc = func(ctx context.Context, userUUID string, service *models.FailoverV2Service, member *models.FailoverV2Member, ipv4, ipv6 string) (interface{}, error) {
-		return &AliyunMemberDNSVerification{Success: true}, nil
+		return &AliyunMemberDNSVerification{Line: member.DNSLine, Success: true}, nil
 	}
 
 	runner := &memberExecutionRunner{
@@ -442,8 +444,17 @@ func TestMemberExecutionRunnerRunFailoverSuccessUpdatesMemberAndExecution(t *tes
 	if reloadedMember.CurrentAddress != "203.0.113.8" {
 		t.Fatalf("expected current address to update, got %q", reloadedMember.CurrentAddress)
 	}
+	if len(reloadedMember.Lines) != 1 {
+		t.Fatalf("expected one member line, got %d", len(reloadedMember.Lines))
+	}
+	if reloadedMember.Lines[0].LineCode != "telecom" {
+		t.Fatalf("expected member line telecom, got %q", reloadedMember.Lines[0].LineCode)
+	}
+	if !strings.Contains(reloadedMember.Lines[0].DNSRecordRefs, "record-new") {
+		t.Fatalf("expected member line dns record refs to include new record, got %q", reloadedMember.Lines[0].DNSRecordRefs)
+	}
 	if !strings.Contains(reloadedMember.DNSRecordRefs, "record-new") {
-		t.Fatalf("expected dns record refs to include new record, got %q", reloadedMember.DNSRecordRefs)
+		t.Fatalf("expected legacy dns record refs to mirror first line, got %q", reloadedMember.DNSRecordRefs)
 	}
 	if reloadedMember.LastStatus != models.FailoverV2MemberStatusHealthy {
 		t.Fatalf("expected member healthy, got %q", reloadedMember.LastStatus)
@@ -574,10 +585,10 @@ func TestMemberExecutionRunnerRunFailoverDeletesOldInstanceWhenConfigured(t *tes
 		return map[string]interface{}{"count": 0}, nil
 	}
 	failoverV2AttachDNSFunc = func(ctx context.Context, userUUID string, service *models.FailoverV2Service, member *models.FailoverV2Member, ipv4, ipv6 string) (interface{}, error) {
-		return &AliyunMemberDNSResult{RecordRefs: map[string]string{"A": "record-new"}}, nil
+		return &AliyunMemberDNSResult{Line: member.DNSLine, RecordRefs: map[string]string{"A": "record-new"}}, nil
 	}
 	failoverV2VerifyAttachDNSFunc = func(ctx context.Context, userUUID string, service *models.FailoverV2Service, member *models.FailoverV2Member, ipv4, ipv6 string) (interface{}, error) {
-		return &AliyunMemberDNSVerification{Success: true}, nil
+		return &AliyunMemberDNSVerification{Line: member.DNSLine, Success: true}, nil
 	}
 	failoverV2ResolveOldInstanceCleanupFunc = func(userUUID string, member *models.FailoverV2Member) (*oldInstanceCleanup, error) {
 		return &oldInstanceCleanup{
@@ -645,10 +656,10 @@ func TestMemberExecutionRunnerRunFailoverQueuesPendingCleanupWhenOldCleanupFails
 		return map[string]interface{}{"count": 0}, nil
 	}
 	failoverV2AttachDNSFunc = func(ctx context.Context, userUUID string, service *models.FailoverV2Service, member *models.FailoverV2Member, ipv4, ipv6 string) (interface{}, error) {
-		return &AliyunMemberDNSResult{RecordRefs: map[string]string{"A": "record-new"}}, nil
+		return &AliyunMemberDNSResult{Line: member.DNSLine, RecordRefs: map[string]string{"A": "record-new"}}, nil
 	}
 	failoverV2VerifyAttachDNSFunc = func(ctx context.Context, userUUID string, service *models.FailoverV2Service, member *models.FailoverV2Member, ipv4, ipv6 string) (interface{}, error) {
-		return &AliyunMemberDNSVerification{Success: true}, nil
+		return &AliyunMemberDNSVerification{Line: member.DNSLine, Success: true}, nil
 	}
 	failoverV2ResolveOldInstanceCleanupFunc = func(userUUID string, member *models.FailoverV2Member) (*oldInstanceCleanup, error) {
 		return &oldInstanceCleanup{

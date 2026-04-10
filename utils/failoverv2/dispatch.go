@@ -8,10 +8,152 @@ import (
 	"github.com/komari-monitor/komari/database/models"
 )
 
+type memberDNSResultLine struct {
+	Line       string            `json:"line"`
+	Result     interface{}       `json:"result,omitempty"`
+	RecordRefs map[string]string `json:"record_refs,omitempty"`
+}
+
+type memberDNSVerificationLine struct {
+	Line         string      `json:"line"`
+	Success      bool        `json:"success"`
+	Verification interface{} `json:"verification,omitempty"`
+}
+
+type multiLineMemberDNSResult struct {
+	Provider string                `json:"provider"`
+	Lines    []memberDNSResultLine `json:"lines,omitempty"`
+}
+
+type multiLineMemberDNSVerification struct {
+	Provider string                      `json:"provider"`
+	Success  bool                        `json:"success"`
+	Lines    []memberDNSVerificationLine `json:"lines,omitempty"`
+}
+
 func applyMemberDNSDetach(ctx context.Context, userUUID string, service *models.FailoverV2Service, member *models.FailoverV2Member) (interface{}, error) {
 	if service == nil {
 		return nil, fmt.Errorf("service is required")
 	}
+	lines := effectiveMemberLines(member)
+	if len(lines) == 0 {
+		return nil, fmt.Errorf("member has no dns lines configured")
+	}
+
+	result := &multiLineMemberDNSResult{
+		Provider: strings.ToLower(strings.TrimSpace(service.DNSProvider)),
+		Lines:    make([]memberDNSResultLine, 0, len(lines)),
+	}
+	for _, line := range lines {
+		lineMember := cloneMemberForLine(member, line)
+		lineResult, err := applyMemberDNSDetachSingleLine(ctx, userUUID, service, &lineMember)
+		if err != nil {
+			return nil, err
+		}
+		result.Lines = append(result.Lines, memberDNSResultLine{
+			Line:       strings.TrimSpace(line.LineCode),
+			Result:     lineResult,
+			RecordRefs: extractMemberDNSRecordRefs(lineResult),
+		})
+	}
+	return result, nil
+}
+
+func verifyMemberDNSDetached(ctx context.Context, userUUID string, service *models.FailoverV2Service, member *models.FailoverV2Member) (interface{}, error) {
+	if service == nil {
+		return nil, fmt.Errorf("service is required")
+	}
+	lines := effectiveMemberLines(member)
+	if len(lines) == 0 {
+		return nil, fmt.Errorf("member has no dns lines configured")
+	}
+
+	verification := &multiLineMemberDNSVerification{
+		Provider: strings.ToLower(strings.TrimSpace(service.DNSProvider)),
+		Success:  true,
+		Lines:    make([]memberDNSVerificationLine, 0, len(lines)),
+	}
+	for _, line := range lines {
+		lineMember := cloneMemberForLine(member, line)
+		lineVerification, err := verifyMemberDNSDetachedSingleLine(ctx, userUUID, service, &lineMember)
+		if err != nil {
+			return nil, err
+		}
+		lineSuccess := dnsVerificationSucceeded(lineVerification)
+		if !lineSuccess {
+			verification.Success = false
+		}
+		verification.Lines = append(verification.Lines, memberDNSVerificationLine{
+			Line:         strings.TrimSpace(line.LineCode),
+			Success:      lineSuccess,
+			Verification: lineVerification,
+		})
+	}
+	return verification, nil
+}
+
+func applyMemberDNSAttach(ctx context.Context, userUUID string, service *models.FailoverV2Service, member *models.FailoverV2Member, ipv4, ipv6 string) (interface{}, error) {
+	if service == nil {
+		return nil, fmt.Errorf("service is required")
+	}
+	lines := effectiveMemberLines(member)
+	if len(lines) == 0 {
+		return nil, fmt.Errorf("member has no dns lines configured")
+	}
+
+	result := &multiLineMemberDNSResult{
+		Provider: strings.ToLower(strings.TrimSpace(service.DNSProvider)),
+		Lines:    make([]memberDNSResultLine, 0, len(lines)),
+	}
+	for _, line := range lines {
+		lineMember := cloneMemberForLine(member, line)
+		lineResult, err := applyMemberDNSAttachSingleLine(ctx, userUUID, service, &lineMember, ipv4, ipv6)
+		if err != nil {
+			return nil, err
+		}
+		result.Lines = append(result.Lines, memberDNSResultLine{
+			Line:       strings.TrimSpace(line.LineCode),
+			Result:     lineResult,
+			RecordRefs: extractMemberDNSRecordRefs(lineResult),
+		})
+	}
+	return result, nil
+}
+
+func verifyMemberDNSAttached(ctx context.Context, userUUID string, service *models.FailoverV2Service, member *models.FailoverV2Member, ipv4, ipv6 string) (interface{}, error) {
+	if service == nil {
+		return nil, fmt.Errorf("service is required")
+	}
+	lines := effectiveMemberLines(member)
+	if len(lines) == 0 {
+		return nil, fmt.Errorf("member has no dns lines configured")
+	}
+
+	verification := &multiLineMemberDNSVerification{
+		Provider: strings.ToLower(strings.TrimSpace(service.DNSProvider)),
+		Success:  true,
+		Lines:    make([]memberDNSVerificationLine, 0, len(lines)),
+	}
+	for _, line := range lines {
+		lineMember := cloneMemberForLine(member, line)
+		lineVerification, err := verifyMemberDNSAttachedSingleLine(ctx, userUUID, service, &lineMember, ipv4, ipv6)
+		if err != nil {
+			return nil, err
+		}
+		lineSuccess := dnsVerificationSucceeded(lineVerification)
+		if !lineSuccess {
+			verification.Success = false
+		}
+		verification.Lines = append(verification.Lines, memberDNSVerificationLine{
+			Line:         strings.TrimSpace(line.LineCode),
+			Success:      lineSuccess,
+			Verification: lineVerification,
+		})
+	}
+	return verification, nil
+}
+
+func applyMemberDNSDetachSingleLine(ctx context.Context, userUUID string, service *models.FailoverV2Service, member *models.FailoverV2Member) (interface{}, error) {
 	switch strings.ToLower(strings.TrimSpace(service.DNSProvider)) {
 	case models.FailoverDNSProviderAliyun:
 		return ApplyAliyunMemberDNSDetach(ctx, userUUID, service, member)
@@ -22,10 +164,7 @@ func applyMemberDNSDetach(ctx context.Context, userUUID string, service *models.
 	}
 }
 
-func verifyMemberDNSDetached(ctx context.Context, userUUID string, service *models.FailoverV2Service, member *models.FailoverV2Member) (interface{}, error) {
-	if service == nil {
-		return nil, fmt.Errorf("service is required")
-	}
+func verifyMemberDNSDetachedSingleLine(ctx context.Context, userUUID string, service *models.FailoverV2Service, member *models.FailoverV2Member) (interface{}, error) {
 	switch strings.ToLower(strings.TrimSpace(service.DNSProvider)) {
 	case models.FailoverDNSProviderAliyun:
 		return VerifyAliyunMemberDNSDetached(ctx, userUUID, service, member)
@@ -36,10 +175,7 @@ func verifyMemberDNSDetached(ctx context.Context, userUUID string, service *mode
 	}
 }
 
-func applyMemberDNSAttach(ctx context.Context, userUUID string, service *models.FailoverV2Service, member *models.FailoverV2Member, ipv4, ipv6 string) (interface{}, error) {
-	if service == nil {
-		return nil, fmt.Errorf("service is required")
-	}
+func applyMemberDNSAttachSingleLine(ctx context.Context, userUUID string, service *models.FailoverV2Service, member *models.FailoverV2Member, ipv4, ipv6 string) (interface{}, error) {
 	switch strings.ToLower(strings.TrimSpace(service.DNSProvider)) {
 	case models.FailoverDNSProviderAliyun:
 		return ApplyAliyunMemberDNSAttach(ctx, userUUID, service, member, ipv4, ipv6)
@@ -50,10 +186,7 @@ func applyMemberDNSAttach(ctx context.Context, userUUID string, service *models.
 	}
 }
 
-func verifyMemberDNSAttached(ctx context.Context, userUUID string, service *models.FailoverV2Service, member *models.FailoverV2Member, ipv4, ipv6 string) (interface{}, error) {
-	if service == nil {
-		return nil, fmt.Errorf("service is required")
-	}
+func verifyMemberDNSAttachedSingleLine(ctx context.Context, userUUID string, service *models.FailoverV2Service, member *models.FailoverV2Member, ipv4, ipv6 string) (interface{}, error) {
 	switch strings.ToLower(strings.TrimSpace(service.DNSProvider)) {
 	case models.FailoverDNSProviderAliyun:
 		return VerifyAliyunMemberDNSAttached(ctx, userUUID, service, member, ipv4, ipv6)
@@ -86,6 +219,8 @@ func dnsVerificationSucceeded(verification interface{}) bool {
 		return typed != nil && typed.Success
 	case *CloudflareMemberDNSVerification:
 		return typed != nil && typed.Success
+	case *multiLineMemberDNSVerification:
+		return typed != nil && typed.Success
 	default:
 		return false
 	}
@@ -93,6 +228,11 @@ func dnsVerificationSucceeded(verification interface{}) bool {
 
 func extractMemberDNSRecordRefs(result interface{}) map[string]string {
 	switch typed := result.(type) {
+	case *multiLineMemberDNSResult:
+		if typed == nil || len(typed.Lines) == 0 {
+			return map[string]string{}
+		}
+		return cloneRecordRefs(typed.Lines[0].RecordRefs)
 	case *AliyunMemberDNSResult:
 		if typed == nil {
 			return map[string]string{}
@@ -105,6 +245,40 @@ func extractMemberDNSRecordRefs(result interface{}) map[string]string {
 		return cloneRecordRefs(typed.RecordRefs)
 	default:
 		return map[string]string{}
+	}
+}
+
+func extractMemberLineRecordRefs(result interface{}) map[string]map[string]string {
+	switch typed := result.(type) {
+	case *multiLineMemberDNSResult:
+		if typed == nil {
+			return map[string]map[string]string{}
+		}
+		refsByLine := make(map[string]map[string]string, len(typed.Lines))
+		for _, line := range typed.Lines {
+			lineCode := strings.TrimSpace(line.Line)
+			if lineCode == "" {
+				continue
+			}
+			refsByLine[lineCode] = cloneRecordRefs(line.RecordRefs)
+		}
+		return refsByLine
+	case *AliyunMemberDNSResult:
+		if typed == nil {
+			return map[string]map[string]string{}
+		}
+		return map[string]map[string]string{
+			strings.TrimSpace(typed.Line): cloneRecordRefs(typed.RecordRefs),
+		}
+	case *CloudflareMemberDNSResult:
+		if typed == nil {
+			return map[string]map[string]string{}
+		}
+		return map[string]map[string]string{
+			strings.TrimSpace(typed.Line): cloneRecordRefs(typed.RecordRefs),
+		}
+	default:
+		return map[string]map[string]string{}
 	}
 }
 

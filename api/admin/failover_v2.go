@@ -35,13 +35,16 @@ type failoverV2MemberRequest struct {
 	Name               string          `json:"name"`
 	Enabled            *bool           `json:"enabled"`
 	Priority           int             `json:"priority"`
-	WatchClientUUID    string          `json:"watch_client_uuid" binding:"required"`
-	DNSLine            string          `json:"dns_line" binding:"required"`
+	Mode               string          `json:"mode"`
+	WatchClientUUID    string          `json:"watch_client_uuid"`
+	DNSLines           []string        `json:"dns_lines"`
+	DNSLine            string          `json:"dns_line"`
 	DNSRecordRefs      json.RawMessage `json:"dns_record_refs"`
 	CurrentAddress     string          `json:"current_address"`
 	CurrentInstanceRef json.RawMessage `json:"current_instance_ref"`
-	Provider           string          `json:"provider" binding:"required"`
+	Provider           string          `json:"provider"`
 	ProviderEntryID    string          `json:"provider_entry_id"`
+	ProviderEntryGroup string          `json:"provider_entry_group"`
 	PlanPayload        json.RawMessage `json:"plan_payload"`
 	FailureThreshold   int             `json:"failure_threshold"`
 	StaleAfterSeconds  int             `json:"stale_after_seconds"`
@@ -80,32 +83,41 @@ type failoverV2BulkValidationView struct {
 	Services []failoverV2ServiceValidationView `json:"services"`
 }
 
+type failoverV2MemberLineView struct {
+	LineCode      string          `json:"line_code"`
+	DNSRecordRefs json.RawMessage `json:"dns_record_refs"`
+}
+
 type failoverV2MemberView struct {
-	ID                  uint              `json:"id"`
-	ServiceID           uint              `json:"service_id"`
-	Name                string            `json:"name"`
-	Enabled             bool              `json:"enabled"`
-	Priority            int               `json:"priority"`
-	WatchClientUUID     string            `json:"watch_client_uuid"`
-	DNSLine             string            `json:"dns_line"`
-	DNSRecordRefs       json.RawMessage   `json:"dns_record_refs"`
-	CurrentAddress      string            `json:"current_address"`
-	CurrentInstanceRef  json.RawMessage   `json:"current_instance_ref"`
-	Provider            string            `json:"provider"`
-	ProviderEntryID     string            `json:"provider_entry_id"`
-	PlanPayload         json.RawMessage   `json:"plan_payload"`
-	FailureThreshold    int               `json:"failure_threshold"`
-	StaleAfterSeconds   int               `json:"stale_after_seconds"`
-	CooldownSeconds     int               `json:"cooldown_seconds"`
-	TriggerFailureCount int               `json:"trigger_failure_count"`
-	LastExecutionID     *uint             `json:"last_execution_id,omitempty"`
-	LastStatus          string            `json:"last_status"`
-	LastMessage         string            `json:"last_message"`
-	LastTriggeredAt     *models.LocalTime `json:"last_triggered_at"`
-	LastSucceededAt     *models.LocalTime `json:"last_succeeded_at"`
-	LastFailedAt        *models.LocalTime `json:"last_failed_at"`
-	CreatedAt           models.LocalTime  `json:"created_at"`
-	UpdatedAt           models.LocalTime  `json:"updated_at"`
+	ID                  uint                       `json:"id"`
+	ServiceID           uint                       `json:"service_id"`
+	Name                string                     `json:"name"`
+	Enabled             bool                       `json:"enabled"`
+	Priority            int                        `json:"priority"`
+	Mode                string                     `json:"mode"`
+	WatchClientUUID     string                     `json:"watch_client_uuid"`
+	DNSLines            []string                   `json:"dns_lines"`
+	Lines               []failoverV2MemberLineView `json:"lines,omitempty"`
+	DNSLine             string                     `json:"dns_line"`
+	DNSRecordRefs       json.RawMessage            `json:"dns_record_refs"`
+	CurrentAddress      string                     `json:"current_address"`
+	CurrentInstanceRef  json.RawMessage            `json:"current_instance_ref"`
+	Provider            string                     `json:"provider"`
+	ProviderEntryID     string                     `json:"provider_entry_id"`
+	ProviderEntryGroup  string                     `json:"provider_entry_group"`
+	PlanPayload         json.RawMessage            `json:"plan_payload"`
+	FailureThreshold    int                        `json:"failure_threshold"`
+	StaleAfterSeconds   int                        `json:"stale_after_seconds"`
+	CooldownSeconds     int                        `json:"cooldown_seconds"`
+	TriggerFailureCount int                        `json:"trigger_failure_count"`
+	LastExecutionID     *uint                      `json:"last_execution_id,omitempty"`
+	LastStatus          string                     `json:"last_status"`
+	LastMessage         string                     `json:"last_message"`
+	LastTriggeredAt     *models.LocalTime          `json:"last_triggered_at"`
+	LastSucceededAt     *models.LocalTime          `json:"last_succeeded_at"`
+	LastFailedAt        *models.LocalTime          `json:"last_failed_at"`
+	CreatedAt           models.LocalTime           `json:"created_at"`
+	UpdatedAt           models.LocalTime           `json:"updated_at"`
 }
 
 type failoverV2ExecutionSummaryView struct {
@@ -410,6 +422,97 @@ func validateFailoverV2ActiveExecutionCheck(userUUID string, serviceID uint) err
 	return nil
 }
 
+func normalizeFailoverV2MemberModeRequest(mode string) string {
+	switch strings.TrimSpace(strings.ToLower(mode)) {
+	case models.FailoverV2MemberModeExistingClient:
+		return models.FailoverV2MemberModeExistingClient
+	case models.FailoverV2MemberModeProviderTemplate:
+		return models.FailoverV2MemberModeProviderTemplate
+	default:
+		return models.FailoverV2MemberModeProviderTemplate
+	}
+}
+
+func effectiveFailoverV2MemberLinesForView(member *models.FailoverV2Member) []models.FailoverV2MemberLine {
+	if member == nil {
+		return nil
+	}
+	if len(member.Lines) > 0 {
+		return member.Lines
+	}
+	lineCode := strings.TrimSpace(member.DNSLine)
+	if lineCode == "" {
+		return nil
+	}
+	return []models.FailoverV2MemberLine{
+		{
+			ServiceID:     member.ServiceID,
+			MemberID:      member.ID,
+			LineCode:      lineCode,
+			DNSRecordRefs: firstNonEmpty(strings.TrimSpace(member.DNSRecordRefs), "{}"),
+		},
+	}
+}
+
+func buildFailoverV2MemberLineViews(member *models.FailoverV2Member) []failoverV2MemberLineView {
+	lines := effectiveFailoverV2MemberLinesForView(member)
+	if len(lines) == 0 {
+		return nil
+	}
+
+	views := make([]failoverV2MemberLineView, 0, len(lines))
+	for _, line := range lines {
+		views = append(views, failoverV2MemberLineView{
+			LineCode:      strings.TrimSpace(line.LineCode),
+			DNSRecordRefs: rawJSONOrNull(firstNonEmpty(strings.TrimSpace(line.DNSRecordRefs), "{}")),
+		})
+	}
+	return views
+}
+
+func buildFailoverV2MemberDNSLines(member *models.FailoverV2Member) []string {
+	lines := effectiveFailoverV2MemberLinesForView(member)
+	if len(lines) == 0 {
+		return nil
+	}
+
+	result := make([]string, 0, len(lines))
+	for _, line := range lines {
+		lineCode := strings.TrimSpace(line.LineCode)
+		if lineCode != "" {
+			result = append(result, lineCode)
+		}
+	}
+	return result
+}
+
+func normalizeFailoverV2MemberDNSLines(req *failoverV2MemberRequest) []string {
+	if req == nil {
+		return nil
+	}
+
+	rawLines := req.DNSLines
+	if len(rawLines) == 0 && strings.TrimSpace(req.DNSLine) != "" {
+		rawLines = []string{req.DNSLine}
+	}
+
+	lines := make([]string, 0, len(rawLines))
+	seen := make(map[string]struct{}, len(rawLines))
+	for _, rawLine := range rawLines {
+		lineCode := strings.TrimSpace(rawLine)
+		if lineCode == "" {
+			continue
+		}
+		key := strings.ToLower(lineCode)
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		lines = append(lines, lineCode)
+	}
+	return lines
+}
+
 func buildFailoverV2MemberView(member models.FailoverV2Member) failoverV2MemberView {
 	return failoverV2MemberView{
 		ID:                  member.ID,
@@ -417,13 +520,17 @@ func buildFailoverV2MemberView(member models.FailoverV2Member) failoverV2MemberV
 		Name:                member.Name,
 		Enabled:             member.Enabled,
 		Priority:            member.Priority,
+		Mode:                normalizeFailoverV2MemberModeRequest(member.Mode),
 		WatchClientUUID:     member.WatchClientUUID,
+		DNSLines:            buildFailoverV2MemberDNSLines(&member),
+		Lines:               buildFailoverV2MemberLineViews(&member),
 		DNSLine:             member.DNSLine,
 		DNSRecordRefs:       rawJSONOrNull(member.DNSRecordRefs),
 		CurrentAddress:      member.CurrentAddress,
 		CurrentInstanceRef:  rawJSONOrNull(member.CurrentInstanceRef),
 		Provider:            member.Provider,
 		ProviderEntryID:     member.ProviderEntryID,
+		ProviderEntryGroup:  member.ProviderEntryGroup,
 		PlanPayload:         rawJSONOrNull(member.PlanPayload),
 		FailureThreshold:    member.FailureThreshold,
 		StaleAfterSeconds:   member.StaleAfterSeconds,
@@ -742,13 +849,16 @@ func buildFailoverV2MemberRequestFromModel(member *models.FailoverV2Member) fail
 		Name:               member.Name,
 		Enabled:            &enabled,
 		Priority:           member.Priority,
+		Mode:               normalizeFailoverV2MemberModeRequest(member.Mode),
 		WatchClientUUID:    member.WatchClientUUID,
+		DNSLines:           buildFailoverV2MemberDNSLines(member),
 		DNSLine:            member.DNSLine,
 		DNSRecordRefs:      rawFailoverV2JSONOrDefault(member.DNSRecordRefs, "{}"),
 		CurrentAddress:     member.CurrentAddress,
 		CurrentInstanceRef: rawFailoverV2JSONOrDefault(member.CurrentInstanceRef, "null"),
 		Provider:           member.Provider,
 		ProviderEntryID:    member.ProviderEntryID,
+		ProviderEntryGroup: member.ProviderEntryGroup,
 		PlanPayload:        rawFailoverV2JSONOrDefault(member.PlanPayload, "{}"),
 		FailureThreshold:   member.FailureThreshold,
 		StaleAfterSeconds:  member.StaleAfterSeconds,
@@ -859,42 +969,28 @@ func validateFailoverV2MemberRequest(scope ownerScope, service *models.FailoverV
 		return nil, fmt.Errorf("service is required")
 	}
 
+	mode := normalizeFailoverV2MemberModeRequest(req.Mode)
+	dnsLines := normalizeFailoverV2MemberDNSLines(req)
+	if len(dnsLines) == 0 {
+		return nil, fmt.Errorf("dns_lines is required")
+	}
+
 	watchClientUUID := strings.TrimSpace(req.WatchClientUUID)
-	if watchClientUUID == "" {
-		return nil, fmt.Errorf("watch_client_uuid is required")
-	}
-
-	client, err := clientdb.GetClientByUUIDForUser(watchClientUUID, scope.UserUUID)
-	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, fmt.Errorf("watch client not found")
+	var client *models.Client
+	if watchClientUUID != "" {
+		loadedClient, err := clientdb.GetClientByUUIDForUser(watchClientUUID, scope.UserUUID)
+		if err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil, fmt.Errorf("watch client not found")
+			}
+			return nil, err
 		}
-		return nil, err
-	}
-
-	dnsLine := strings.TrimSpace(req.DNSLine)
-	if dnsLine == "" {
-		return nil, fmt.Errorf("dns_line is required")
+		client = &loadedClient
 	}
 
 	name := strings.TrimSpace(req.Name)
 	if name == "" {
-		name = dnsLine
-	}
-
-	provider := strings.ToLower(strings.TrimSpace(req.Provider))
-	switch provider {
-	case digitalOceanProviderName, linodeProviderName, awsProviderName:
-	default:
-		return nil, fmt.Errorf("unsupported failover v2 member provider: %s", req.Provider)
-	}
-
-	providerEntryID := strings.TrimSpace(req.ProviderEntryID)
-	if providerEntryID == "" {
-		providerEntryID = "active"
-	}
-	if err := validateFailoverProviderSelectionForScope(scope, provider, providerEntryID, ""); err != nil {
-		return nil, err
+		name = dnsLines[0]
 	}
 
 	dnsRecordRefs, err := normalizeJSONPayload(req.DNSRecordRefs, "{}")
@@ -905,24 +1001,6 @@ func validateFailoverV2MemberRequest(scope ownerScope, service *models.FailoverV
 	if err != nil {
 		return nil, fmt.Errorf("invalid current_instance_ref: %w", err)
 	}
-	planPayload, err := normalizeJSONPayload(req.PlanPayload, "{}")
-	if err != nil {
-		return nil, fmt.Errorf("invalid plan_payload: %w", err)
-	}
-	switch provider {
-	case digitalOceanProviderName:
-		if _, err := failoverv2svc.ParseDigitalOceanMemberPlanPayload(planPayload); err != nil {
-			return nil, err
-		}
-	case linodeProviderName:
-		if _, err := failoverv2svc.ParseLinodeMemberPlanPayload(planPayload); err != nil {
-			return nil, err
-		}
-	case awsProviderName:
-		if _, err := failoverv2svc.ParseAWSMemberPlanPayload(planPayload); err != nil {
-			return nil, err
-		}
-	}
 
 	enabled := true
 	if req.Enabled != nil {
@@ -930,7 +1008,7 @@ func validateFailoverV2MemberRequest(scope ownerScope, service *models.FailoverV
 	}
 
 	currentAddress := strings.TrimSpace(req.CurrentAddress)
-	if currentAddress == "" {
+	if currentAddress == "" && client != nil {
 		currentAddress = strings.TrimSpace(firstNonEmpty(client.IPv4, client.IPv6))
 	}
 
@@ -938,38 +1016,119 @@ func validateFailoverV2MemberRequest(scope ownerScope, service *models.FailoverV
 		return nil, fmt.Errorf("cooldown_seconds must be greater than or equal to 0")
 	}
 
+	provider := ""
+	providerEntryID := ""
+	providerEntryGroup := ""
+	planPayload := "{}"
+
+	switch mode {
+	case models.FailoverV2MemberModeExistingClient:
+		if watchClientUUID == "" {
+			return nil, fmt.Errorf("watch_client_uuid is required for existing_client mode")
+		}
+	case models.FailoverV2MemberModeProviderTemplate:
+		provider = strings.ToLower(strings.TrimSpace(req.Provider))
+		switch provider {
+		case digitalOceanProviderName, linodeProviderName, awsProviderName:
+		default:
+			return nil, fmt.Errorf("unsupported failover v2 member provider: %s", req.Provider)
+		}
+
+		providerEntryID = strings.TrimSpace(req.ProviderEntryID)
+		if providerEntryID == "" {
+			providerEntryID = "active"
+		}
+		providerEntryGroup = failoverv2svc.NormalizeProviderEntryGroup(req.ProviderEntryGroup)
+		if err := validateFailoverProviderSelectionForScope(scope, provider, providerEntryID, providerEntryGroup); err != nil {
+			return nil, err
+		}
+
+		planPayload, err = normalizeJSONPayload(req.PlanPayload, "{}")
+		if err != nil {
+			return nil, fmt.Errorf("invalid plan_payload: %w", err)
+		}
+		switch provider {
+		case digitalOceanProviderName:
+			if _, err := failoverv2svc.ParseDigitalOceanMemberPlanPayload(planPayload); err != nil {
+				return nil, err
+			}
+		case linodeProviderName:
+			if _, err := failoverv2svc.ParseLinodeMemberPlanPayload(planPayload); err != nil {
+				return nil, err
+			}
+		case awsProviderName:
+			if _, err := failoverv2svc.ParseAWSMemberPlanPayload(planPayload); err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	lines := make([]models.FailoverV2MemberLine, 0, len(dnsLines))
+	for index, dnsLine := range dnsLines {
+		lineRecordRefs := "{}"
+		if index == 0 {
+			lineRecordRefs = dnsRecordRefs
+		}
+		lines = append(lines, models.FailoverV2MemberLine{
+			ServiceID:     service.ID,
+			LineCode:      dnsLine,
+			DNSRecordRefs: lineRecordRefs,
+		})
+	}
+
 	return &models.FailoverV2Member{
 		Name:               name,
 		Enabled:            enabled,
 		Priority:           req.Priority,
+		Mode:               mode,
 		WatchClientUUID:    watchClientUUID,
-		DNSLine:            dnsLine,
+		DNSLine:            dnsLines[0],
 		DNSRecordRefs:      dnsRecordRefs,
 		CurrentAddress:     currentAddress,
 		CurrentInstanceRef: currentInstanceRef,
 		Provider:           provider,
 		ProviderEntryID:    providerEntryID,
+		ProviderEntryGroup: providerEntryGroup,
 		PlanPayload:        planPayload,
+		Lines:              lines,
 		FailureThreshold:   req.FailureThreshold,
 		StaleAfterSeconds:  req.StaleAfterSeconds,
 		CooldownSeconds:    req.CooldownSeconds,
 	}, nil
 }
 
-func ensureFailoverV2MemberUnique(service *models.FailoverV2Service, memberID uint, watchClientUUID, dnsLine string) error {
+func ensureFailoverV2MemberUnique(service *models.FailoverV2Service, memberID uint, candidate *models.FailoverV2Member) error {
 	if service == nil {
 		return fmt.Errorf("service is required")
+	}
+	if candidate == nil {
+		return fmt.Errorf("member is required")
+	}
+
+	watchClientUUID := strings.TrimSpace(candidate.WatchClientUUID)
+	candidateLines := buildFailoverV2MemberDNSLines(candidate)
+	candidateLineSet := make(map[string]struct{}, len(candidateLines))
+	for _, line := range candidateLines {
+		if lineCode := strings.ToLower(strings.TrimSpace(line)); lineCode != "" {
+			candidateLineSet[lineCode] = struct{}{}
+		}
 	}
 
 	for _, member := range service.Members {
 		if member.ID == memberID {
 			continue
 		}
-		if strings.EqualFold(strings.TrimSpace(member.DNSLine), strings.TrimSpace(dnsLine)) {
-			return fmt.Errorf("dns_line %q is already used by another member", dnsLine)
-		}
 		if strings.TrimSpace(member.WatchClientUUID) != "" && strings.TrimSpace(member.WatchClientUUID) == strings.TrimSpace(watchClientUUID) {
 			return fmt.Errorf("watch_client_uuid is already used by another member")
+		}
+		for _, existingLine := range buildFailoverV2MemberDNSLines(&member) {
+			lineCode := strings.ToLower(strings.TrimSpace(existingLine))
+			if lineCode == "" {
+				continue
+			}
+			if _, exists := candidateLineSet[lineCode]; exists {
+				return fmt.Errorf("dns line %q is already used by another member", existingLine)
+			}
 		}
 	}
 	return nil
@@ -988,7 +1147,7 @@ func validateFailoverV2ExistingMembers(scope ownerScope, service *models.Failove
 		}
 		label := strings.TrimSpace(member.Name)
 		if label == "" {
-			label = strings.TrimSpace(member.DNSLine)
+			label = firstNonEmpty(strings.TrimSpace(member.DNSLine), strings.Join(buildFailoverV2MemberDNSLines(&member), ","))
 		}
 		if label == "" {
 			label = fmt.Sprintf("#%d", member.ID)
@@ -999,7 +1158,7 @@ func validateFailoverV2ExistingMembers(scope ownerScope, service *models.Failove
 		if err != nil {
 			return fmt.Errorf("member %s: %w", label, err)
 		}
-		if err := ensureFailoverV2MemberUnique(service, member.ID, normalized.WatchClientUUID, normalized.DNSLine); err != nil {
+		if err := ensureFailoverV2MemberUnique(service, member.ID, normalized); err != nil {
 			return fmt.Errorf("member %s: %w", label, err)
 		}
 		if err := failoverv2svc.EnsureMemberTargetAvailable(scope.UserUUID, normalized); err != nil {
@@ -1209,7 +1368,7 @@ func ValidateFailoverV2Member(c *gin.Context) {
 	member, err := validateFailoverV2MemberRequest(scope, service, &req)
 	checks = append(checks, buildFailoverV2ValidationCheck("member_config", "Member configuration", err))
 	if err == nil {
-		uniqueErr := ensureFailoverV2MemberUnique(service, memberID, member.WatchClientUUID, member.DNSLine)
+		uniqueErr := ensureFailoverV2MemberUnique(service, memberID, member)
 		checks = append(checks, buildFailoverV2ValidationCheck("member_unique", "Member uniqueness", uniqueErr))
 
 		targetErr := failoverv2svc.EnsureMemberTargetAvailable(scope.UserUUID, member)
@@ -1754,7 +1913,7 @@ func CreateFailoverV2Member(c *gin.Context) {
 		api.RespondError(c, http.StatusBadRequest, err.Error())
 		return
 	}
-	if err := ensureFailoverV2MemberUnique(service, 0, member.WatchClientUUID, member.DNSLine); err != nil {
+	if err := ensureFailoverV2MemberUnique(service, 0, member); err != nil {
 		api.RespondError(c, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -1813,7 +1972,7 @@ func UpdateFailoverV2Member(c *gin.Context) {
 		api.RespondError(c, http.StatusBadRequest, err.Error())
 		return
 	}
-	if err := ensureFailoverV2MemberUnique(service, memberID, member.WatchClientUUID, member.DNSLine); err != nil {
+	if err := ensureFailoverV2MemberUnique(service, memberID, member); err != nil {
 		api.RespondError(c, http.StatusBadRequest, err.Error())
 		return
 	}

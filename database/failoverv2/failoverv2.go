@@ -17,7 +17,17 @@ const (
 	defaultCooldownSeconds     = 1800
 	defaultScriptTimeoutSec    = 600
 	defaultWaitAgentTimeoutSec = 600
+	maxProviderEntryGroupLen   = 100
 )
+
+func normalizeProviderEntryGroupForStorage(group string) string {
+	group = strings.TrimSpace(group)
+	runes := []rune(group)
+	if len(runes) > maxProviderEntryGroupLen {
+		group = string(runes[:maxProviderEntryGroupLen])
+	}
+	return group
+}
 
 func normalizeFailoverV2UserID(userUUID string) (string, error) {
 	userUUID = strings.TrimSpace(userUUID)
@@ -37,7 +47,11 @@ func serviceScopeWithDB(db *gorm.DB, userUUID string) *gorm.DB {
 
 func preloadFailoverV2Service(db *gorm.DB) *gorm.DB {
 	return db.Preload("Members", func(tx *gorm.DB) *gorm.DB {
-		return tx.Order("priority ASC").Order("id ASC")
+		return tx.Order("priority ASC").
+			Order("id ASC").
+			Preload("Lines", func(lineTx *gorm.DB) *gorm.DB {
+				return lineTx.Order("line_code ASC").Order("id ASC")
+			})
 	})
 }
 
@@ -99,21 +113,21 @@ func applyServiceDefaults(service *models.FailoverV2Service) {
 
 func applyMemberDefaults(member *models.FailoverV2Member) {
 	member.Name = strings.TrimSpace(member.Name)
+	member.Mode = normalizeFailoverV2MemberModeValue(member.Mode)
 	member.WatchClientUUID = strings.TrimSpace(member.WatchClientUUID)
-	member.DNSLine = strings.TrimSpace(member.DNSLine)
 	member.CurrentAddress = strings.TrimSpace(member.CurrentAddress)
 	member.CurrentInstanceRef = strings.TrimSpace(member.CurrentInstanceRef)
 	member.Provider = strings.ToLower(strings.TrimSpace(member.Provider))
 	member.ProviderEntryID = strings.TrimSpace(member.ProviderEntryID)
-	member.DNSRecordRefs = strings.TrimSpace(member.DNSRecordRefs)
+	member.ProviderEntryGroup = normalizeProviderEntryGroupForStorage(member.ProviderEntryGroup)
 	member.PlanPayload = strings.TrimSpace(member.PlanPayload)
+	member.Lines = normalizeFailoverV2MemberLines(member.ServiceID, member.ID, member.DNSLine, member.DNSRecordRefs, member.Lines)
+	syncFailoverV2MemberLegacyLineFields(member)
 
 	if member.Priority <= 0 {
 		member.Priority = 1
 	}
-	if strings.TrimSpace(member.DNSRecordRefs) == "" {
-		member.DNSRecordRefs = "{}"
-	}
+	member.DNSRecordRefs = normalizeFailoverV2MemberLineRecordRefs(member.DNSRecordRefs)
 	if strings.TrimSpace(member.PlanPayload) == "" {
 		member.PlanPayload = "{}"
 	}
@@ -329,7 +343,9 @@ func getMemberByIDForServiceForUserWithDB(db *gorm.DB, userUUID string, serviceI
 	}
 
 	var member models.FailoverV2Member
-	if err := db.Where("service_id = ? AND id = ?", service.ID, memberID).
+	if err := db.Preload("Lines", func(tx *gorm.DB) *gorm.DB {
+		return tx.Order("line_code ASC").Order("id ASC")
+	}).Where("service_id = ? AND id = ?", service.ID, memberID).
 		First(&member).Error; err != nil {
 		return nil, err
 	}
@@ -505,7 +521,12 @@ func createMemberForUserWithDB(db *gorm.DB, userUUID string, serviceID uint, mem
 
 		member.ServiceID = service.ID
 		applyMemberDefaults(member)
+		lines := cloneFailoverV2MemberLines(member.Lines)
+		member.Lines = nil
 		if err := tx.Create(member).Error; err != nil {
+			return err
+		}
+		if err := replaceFailoverV2MemberLinesWithDB(tx, service.ID, member.ID, lines, nil); err != nil {
 			return err
 		}
 
@@ -555,10 +576,12 @@ func updateMemberForUserWithDB(db *gorm.DB, userUUID string, serviceID, memberID
 
 		member.ServiceID = service.ID
 		applyMemberDefaults(member)
+		lines := cloneFailoverV2MemberLines(member.Lines)
 		updates := map[string]interface{}{
 			"name":                 member.Name,
 			"enabled":              member.Enabled,
 			"priority":             member.Priority,
+			"mode":                 member.Mode,
 			"watch_client_uuid":    member.WatchClientUUID,
 			"dns_line":             member.DNSLine,
 			"dns_record_refs":      member.DNSRecordRefs,
@@ -566,6 +589,7 @@ func updateMemberForUserWithDB(db *gorm.DB, userUUID string, serviceID, memberID
 			"current_instance_ref": member.CurrentInstanceRef,
 			"provider":             member.Provider,
 			"provider_entry_id":    member.ProviderEntryID,
+			"provider_entry_group": member.ProviderEntryGroup,
 			"plan_payload":         member.PlanPayload,
 			"failure_threshold":    member.FailureThreshold,
 			"stale_after_seconds":  member.StaleAfterSeconds,
@@ -575,6 +599,9 @@ func updateMemberForUserWithDB(db *gorm.DB, userUUID string, serviceID, memberID
 		if err := tx.Model(&models.FailoverV2Member{}).
 			Where("service_id = ? AND id = ?", service.ID, memberID).
 			Updates(updates).Error; err != nil {
+			return err
+		}
+		if err := replaceFailoverV2MemberLinesWithDB(tx, service.ID, memberID, lines, existing.Lines); err != nil {
 			return err
 		}
 
@@ -946,6 +973,87 @@ func UpdateMemberFieldsForUser(userUUID string, serviceID, memberID uint, fields
 			return gorm.ErrRecordNotFound
 		}
 		return nil
+	})
+}
+
+func UpdateMemberFieldsAndLineRecordRefsForUser(
+	userUUID string,
+	serviceID uint,
+	memberID uint,
+	fields map[string]interface{},
+	lineRecordRefs map[string]map[string]string,
+) error {
+	userUUID, err := normalizeFailoverV2UserID(userUUID)
+	if err != nil {
+		return err
+	}
+	if len(fields) == 0 && lineRecordRefs == nil {
+		return nil
+	}
+
+	return dbcore.GetDBInstance().Transaction(func(tx *gorm.DB) error {
+		service, err := getServiceByIDForUserWithDB(tx, userUUID, serviceID)
+		if err != nil {
+			return err
+		}
+		member, err := getMemberByIDForServiceForUserWithDB(tx, userUUID, service.ID, memberID)
+		if err != nil {
+			return err
+		}
+
+		if len(fields) > 0 {
+			result := tx.Model(&models.FailoverV2Member{}).
+				Where("service_id = ? AND id = ?", service.ID, memberID).
+				Updates(fields)
+			if result.Error != nil {
+				return result.Error
+			}
+			if result.RowsAffected == 0 {
+				return gorm.ErrRecordNotFound
+			}
+		}
+
+		if lineRecordRefs == nil {
+			return nil
+		}
+
+		lines := effectiveFailoverV2MemberLines(member)
+		if len(lines) == 0 {
+			return nil
+		}
+
+		if err := tx.Where("service_id = ? AND member_id = ?", service.ID, memberID).
+			Delete(&models.FailoverV2MemberLine{}).Error; err != nil {
+			return err
+		}
+
+		normalizedLines := make([]models.FailoverV2MemberLine, 0, len(lines))
+		for _, line := range lines {
+			lineCode := normalizeFailoverV2MemberLineCode(line.LineCode)
+			if lineCode == "" {
+				continue
+			}
+			refs := lineRecordRefs[lineCode]
+			normalizedLines = append(normalizedLines, models.FailoverV2MemberLine{
+				ServiceID:     service.ID,
+				MemberID:      memberID,
+				LineCode:      lineCode,
+				DNSRecordRefs: normalizeFailoverV2MemberLineRecordRefs(encodeMemberLineRecordRefsJSON(refs)),
+			})
+		}
+		if len(normalizedLines) > 0 {
+			if err := tx.Create(&normalizedLines).Error; err != nil {
+				return err
+			}
+		}
+
+		legacyRecordRefs := "{}"
+		if len(normalizedLines) > 0 {
+			legacyRecordRefs = normalizedLines[0].DNSRecordRefs
+		}
+		return tx.Model(&models.FailoverV2Member{}).
+			Where("service_id = ? AND id = ?", service.ID, memberID).
+			Update("dns_record_refs", legacyRecordRefs).Error
 	})
 }
 

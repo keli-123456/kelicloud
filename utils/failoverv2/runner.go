@@ -165,20 +165,33 @@ func claimServiceRunLock(serviceID uint, ttl time.Duration) (*failoverV2RunLockH
 	)
 }
 
-func RunMemberDetachDNSNowForUser(userUUID string, serviceID, memberID uint) (*models.FailoverV2Execution, error) {
-	if err := runPendingFailoverV2CleanupRetries(); err != nil {
-		log.Printf("failoverv2: pending cleanup retry failed before dns detach: %v", err)
-	}
+func buildMemberOldAddressesSnapshot(member *models.FailoverV2Member) string {
+	return string(marshalJSON(map[string]interface{}{
+		"current_address": strings.TrimSpace(member.CurrentAddress),
+		"dns_lines":       memberLineCodes(member),
+	}))
+}
 
-	service, err := failoverv2db.GetServiceByIDForUser(userUUID, serviceID)
-	if err != nil {
-		return nil, err
+func queueMemberExecution(
+	userUUID string,
+	service *models.FailoverV2Service,
+	member *models.FailoverV2Member,
+	executionTemplate *models.FailoverV2Execution,
+	startMessage string,
+	run func(*memberExecutionRunner),
+) (*models.FailoverV2Execution, error) {
+	if service == nil {
+		return nil, errors.New("service is required")
 	}
-	member, err := findMemberOnService(service, memberID)
-	if err != nil {
-		return nil, err
+	if member == nil {
+		return nil, errors.New("member is required")
 	}
-
+	if executionTemplate == nil {
+		return nil, errors.New("execution template is required")
+	}
+	if run == nil {
+		return nil, errors.New("member execution runner is required")
+	}
 	if err := ensureMemberTargetAvailableFromLegacyFailover(userUUID, member); err != nil {
 		return nil, err
 	}
@@ -208,24 +221,17 @@ func RunMemberDetachDNSNowForUser(userUUID string, serviceID, memberID uint) (*m
 	}
 
 	now := time.Now()
-	execution, err := failoverv2db.CreateExecutionForUser(userUUID, service.ID, member.ID, &models.FailoverV2Execution{
-		Status:          models.FailoverV2ExecutionStatusQueued,
-		TriggerReason:   "manual detach dns",
-		OldClientUUID:   strings.TrimSpace(member.WatchClientUUID),
-		OldInstanceRef:  strings.TrimSpace(member.CurrentInstanceRef),
-		OldAddresses:    string(marshalJSON(map[string]interface{}{"current_address": strings.TrimSpace(member.CurrentAddress)})),
-		DetachDNSStatus: models.FailoverDNSStatusPending,
-		AttachDNSStatus: models.FailoverDNSStatusSkipped,
-		CleanupStatus:   models.FailoverCleanupStatusSkipped,
-		StartedAt:       models.FromTime(now),
-	})
+	executionTemplate.StartedAt = models.FromTime(now)
+	startMessage = strings.TrimSpace(startMessage)
+	if startMessage == "" {
+		startMessage = fmt.Sprintf("execution started for member %s", memberDisplayLabel(member))
+	}
+	execution, err := failoverv2db.CreateExecutionForUser(userUUID, service.ID, member.ID, executionTemplate)
 	if err != nil {
 		releaseServiceExecutionLocks(service.ID, ownership)
 		return nil, err
 	}
 
-	memberLabel := memberDisplayLabel(member)
-	startMessage := fmt.Sprintf("manual dns detach started for member %s", memberLabel)
 	if err := failoverv2db.UpdateServiceFieldsForUser(userUUID, service.ID, map[string]interface{}{
 		"last_execution_id": execution.ID,
 		"last_status":       models.FailoverV2ServiceStatusRunning,
@@ -256,13 +262,59 @@ func RunMemberDetachDNSNowForUser(userUUID string, serviceID, memberID uint) (*m
 			execution: &executionCopy,
 			ctx:       ctx,
 		}
-		runner.runDetachDNS()
+		run(runner)
 	}(*service, *member, *execution, *ownership)
 
 	return execution, nil
 }
 
-func (r *memberExecutionRunner) runDetachDNS() {
+func queueMemberDetachExecution(userUUID string, service *models.FailoverV2Service, member *models.FailoverV2Member, triggerReason, triggerSnapshot, startMessage string) (*models.FailoverV2Execution, error) {
+	triggerReason = strings.TrimSpace(triggerReason)
+	if triggerReason == "" {
+		triggerReason = "manual detach dns"
+	}
+	return queueMemberExecution(
+		userUUID,
+		service,
+		member,
+		&models.FailoverV2Execution{
+			Status:          models.FailoverV2ExecutionStatusQueued,
+			TriggerReason:   triggerReason,
+			TriggerSnapshot: strings.TrimSpace(triggerSnapshot),
+			OldClientUUID:   strings.TrimSpace(member.WatchClientUUID),
+			OldInstanceRef:  strings.TrimSpace(member.CurrentInstanceRef),
+			OldAddresses:    buildMemberOldAddressesSnapshot(member),
+			DetachDNSStatus: models.FailoverDNSStatusPending,
+			AttachDNSStatus: models.FailoverDNSStatusSkipped,
+			CleanupStatus:   models.FailoverCleanupStatusSkipped,
+		},
+		startMessage,
+		func(runner *memberExecutionRunner) {
+			runner.runDetachOnly()
+		},
+	)
+}
+
+func RunMemberDetachDNSNowForUser(userUUID string, serviceID, memberID uint) (*models.FailoverV2Execution, error) {
+	if err := runPendingFailoverV2CleanupRetries(); err != nil {
+		log.Printf("failoverv2: pending cleanup retry failed before dns detach: %v", err)
+	}
+
+	service, err := failoverv2db.GetServiceByIDForUser(userUUID, serviceID)
+	if err != nil {
+		return nil, err
+	}
+	member, err := findMemberOnService(service, memberID)
+	if err != nil {
+		return nil, err
+	}
+
+	memberLabel := memberDisplayLabel(member)
+	startMessage := fmt.Sprintf("manual dns detach started for member %s", memberLabel)
+	return queueMemberDetachExecution(userUUID, service, member, "manual detach dns", "", startMessage)
+}
+
+func (r *memberExecutionRunner) runDetachOnly() {
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			message := fmt.Sprintf("failover v2 execution panicked: %v", recovered)
@@ -279,7 +331,7 @@ func (r *memberExecutionRunner) runDetachDNS() {
 	detail := map[string]interface{}{
 		"service_id": r.service.ID,
 		"member_id":  r.member.ID,
-		"dns_line":   strings.TrimSpace(r.member.DNSLine),
+		"dns_lines":  memberLineCodes(r.member),
 	}
 
 	detachStep := r.startStep("detach_dns", "Detach Member DNS", detail)
@@ -362,14 +414,13 @@ func (r *memberExecutionRunner) runDetachDNS() {
 	}
 	r.finishStep(verifyStep, models.FailoverStepStatusSuccess, "member dns detach verified", verification)
 
-	memberMessage := fmt.Sprintf("dns detached for line %s", firstNonEmpty(r.member.Name, r.member.DNSLine))
-	if err := failoverv2db.UpdateMemberFieldsForUser(r.userUUID, r.service.ID, r.member.ID, map[string]interface{}{
-		"dns_record_refs":   "{}",
+	memberMessage := fmt.Sprintf("dns detached for lines %s", strings.Join(memberLineCodes(r.member), ", "))
+	if err := failoverv2db.UpdateMemberFieldsAndLineRecordRefsForUser(r.userUUID, r.service.ID, r.member.ID, map[string]interface{}{
 		"last_execution_id": r.execution.ID,
 		"last_status":       models.FailoverV2MemberStatusFailed,
 		"last_message":      memberMessage,
 		"last_failed_at":    models.FromTime(time.Now()),
-	}); err != nil {
+	}, map[string]map[string]string{}); err != nil {
 		log.Printf("failoverv2: failed to update member %d after dns detach: %v", r.member.ID, err)
 	}
 	if err := failoverv2db.UpdateServiceFieldsForUser(r.userUUID, r.service.ID, map[string]interface{}{
@@ -379,6 +430,10 @@ func (r *memberExecutionRunner) runDetachDNS() {
 	}); err != nil {
 		log.Printf("failoverv2: failed to update service %d after dns detach: %v", r.service.ID, err)
 	}
+}
+
+func (r *memberExecutionRunner) runDetachDNS() {
+	r.runDetachOnly()
 }
 
 func (r *memberExecutionRunner) failExecution(message string) {
@@ -473,7 +528,7 @@ func memberDisplayLabel(member *models.FailoverV2Member) string {
 	if member == nil {
 		return "unknown"
 	}
-	return firstNonEmpty(strings.TrimSpace(member.Name), strings.TrimSpace(member.DNSLine), fmt.Sprintf("#%d", member.ID))
+	return firstNonEmpty(strings.TrimSpace(member.Name), firstMemberLineCode(member), fmt.Sprintf("#%d", member.ID))
 }
 
 func claimServiceRun(serviceID uint) bool {

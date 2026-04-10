@@ -17,6 +17,9 @@ func openFailoverV2TestDB(t *testing.T) *gorm.DB {
 	if err != nil {
 		t.Fatalf("failed to open sqlite database: %v", err)
 	}
+	if err := db.AutoMigrate(&models.FailoverV2MemberLine{}); err != nil {
+		t.Fatalf("failed to migrate failover v2 member line schema: %v", err)
+	}
 	return db
 }
 
@@ -365,6 +368,51 @@ func TestCreateMemberForUserAppliesDefaults(t *testing.T) {
 	}
 	if member.DNSRecordRefs != "{}" {
 		t.Fatalf("expected default dns record refs, got %q", member.DNSRecordRefs)
+	}
+}
+
+func TestCreateMemberForUserAllowsMultipleUninitializedMembers(t *testing.T) {
+	db := openFailoverV2TestDB(t)
+	if err := db.AutoMigrate(&models.FailoverV2Service{}, &models.FailoverV2Member{}, &models.FailoverV2Execution{}); err != nil {
+		t.Fatalf("failed to migrate failover v2 schema: %v", err)
+	}
+
+	service, err := createServiceForUserWithDB(db, "user-a", &models.FailoverV2Service{
+		Name:        "edge-service",
+		Enabled:     true,
+		DNSProvider: models.FailoverDNSProviderAliyun,
+		DNSEntryID:  "dns-entry-1",
+		DNSPayload:  `{"domain_name":"example.com","rr":"@"}`,
+	})
+	if err != nil {
+		t.Fatalf("failed to create service: %v", err)
+	}
+
+	first, err := createMemberForUserWithDB(db, "user-a", service.ID, &models.FailoverV2Member{
+		Name:            "telecom",
+		Enabled:         true,
+		DNSLine:         "telecom",
+		WatchClientUUID: "",
+		Provider:        "digitalocean",
+		ProviderEntryID: "token-1",
+	})
+	if err != nil {
+		t.Fatalf("failed to create first uninitialized member: %v", err)
+	}
+	second, err := createMemberForUserWithDB(db, "user-a", service.ID, &models.FailoverV2Member{
+		Name:            "unicom",
+		Enabled:         true,
+		DNSLine:         "unicom",
+		WatchClientUUID: "",
+		Provider:        "digitalocean",
+		ProviderEntryID: "token-1",
+	})
+	if err != nil {
+		t.Fatalf("failed to create second uninitialized member: %v", err)
+	}
+
+	if strings.TrimSpace(first.WatchClientUUID) != "" || strings.TrimSpace(second.WatchClientUUID) != "" {
+		t.Fatalf("expected both members to remain uninitialized, got %q and %q", first.WatchClientUUID, second.WatchClientUUID)
 	}
 }
 

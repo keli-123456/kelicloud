@@ -33,7 +33,11 @@ func notifyAutomaticFailoverTriggered(service *models.FailoverV2Service, member 
 	lines := []string{
 		formatNotificationServiceLine(service),
 		formatNotificationMemberLine(member),
-		fmt.Sprintf("Action: automatic failover queued for member %s", memberDisplayLabel(member)),
+	}
+	if memberUsesExistingClient(member) {
+		lines = append(lines, fmt.Sprintf("Action: automatic dns detach queued for member %s", memberDisplayLabel(member)))
+	} else {
+		lines = append(lines, fmt.Sprintf("Action: automatic failover queued for member %s", memberDisplayLabel(member)))
 	}
 	if execution != nil && execution.ID > 0 {
 		lines = append(lines, fmt.Sprintf("Execution: #%d", execution.ID))

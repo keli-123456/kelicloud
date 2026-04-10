@@ -14,19 +14,19 @@ import (
 )
 
 type linodeMemberPlanPayload struct {
-	Label             string   `json:"label,omitempty"`
-	LabelPrefix       string   `json:"label_prefix,omitempty"`
-	Region            string   `json:"region,omitempty"`
-	Type              string   `json:"type,omitempty"`
-	Image             string   `json:"image,omitempty"`
-	AuthorizedKeys    []string `json:"authorized_keys,omitempty"`
-	BackupsEnabled    bool     `json:"backups_enabled"`
-	Booted            bool     `json:"booted"`
-	Tags              []string `json:"tags,omitempty"`
-	UserData          string   `json:"user_data,omitempty"`
-	RootPasswordMode  string   `json:"root_password_mode,omitempty"`
-	RootPassword      string   `json:"root_password,omitempty"`
-	AutoConnectGroup  string   `json:"auto_connect_group,omitempty"`
+	Label            string   `json:"label,omitempty"`
+	LabelPrefix      string   `json:"label_prefix,omitempty"`
+	Region           string   `json:"region,omitempty"`
+	Type             string   `json:"type,omitempty"`
+	Image            string   `json:"image,omitempty"`
+	AuthorizedKeys   []string `json:"authorized_keys,omitempty"`
+	BackupsEnabled   bool     `json:"backups_enabled"`
+	Booted           bool     `json:"booted"`
+	Tags             []string `json:"tags,omitempty"`
+	UserData         string   `json:"user_data,omitempty"`
+	RootPasswordMode string   `json:"root_password_mode,omitempty"`
+	RootPassword     string   `json:"root_password,omitempty"`
+	AutoConnectGroup string   `json:"auto_connect_group,omitempty"`
 }
 
 func provisionLinodeMember(ctx context.Context, userUUID string, service *models.FailoverV2Service, member *models.FailoverV2Member) (*memberProvisionOutcome, error) {
@@ -45,7 +45,7 @@ func provisionLinodeMember(ctx context.Context, userUUID string, service *models
 		return nil, err
 	}
 
-	addition, token, err := loadLinodeToken(userUUID, member.ProviderEntryID)
+	addition, token, err := loadLinodeTokenSelection(userUUID, member.ProviderEntryID, member.ProviderEntryGroup)
 	if err != nil {
 		return nil, err
 	}

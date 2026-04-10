@@ -67,7 +67,7 @@ func provisionDigitalOceanMember(ctx context.Context, userUUID string, service *
 		return nil, err
 	}
 
-	addition, token, err := loadDigitalOceanToken(userUUID, member.ProviderEntryID)
+	addition, token, err := loadDigitalOceanTokenSelection(userUUID, member.ProviderEntryID, member.ProviderEntryGroup)
 	if err != nil {
 		return nil, err
 	}
@@ -200,6 +200,9 @@ func parseDigitalOceanMemberPlanPayload(raw string) (*digitalOceanMemberPlanPayl
 	var payload digitalOceanMemberPlanPayload
 	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
 		return nil, fmt.Errorf("invalid digitalocean member plan_payload: %w", err)
+	}
+	if strings.TrimSpace(payload.RootPasswordMode) == "" {
+		payload.RootPasswordMode = "random"
 	}
 	if strings.TrimSpace(payload.Region) == "" {
 		return nil, errors.New("digitalocean member plan_payload.region is required")

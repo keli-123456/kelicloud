@@ -33,6 +33,11 @@ const (
 )
 
 const (
+	FailoverV2MemberModeExistingClient   = "existing_client"
+	FailoverV2MemberModeProviderTemplate = "provider_template"
+)
+
+const (
 	FailoverV2PendingCleanupStatusPending      = "pending"
 	FailoverV2PendingCleanupStatusRunning      = "running"
 	FailoverV2PendingCleanupStatusSucceeded    = "succeeded"
@@ -62,31 +67,44 @@ type FailoverV2Service struct {
 }
 
 type FailoverV2Member struct {
-	ID                  uint       `json:"id,omitempty" gorm:"primaryKey;autoIncrement"`
-	ServiceID           uint       `json:"service_id" gorm:"not null;index;uniqueIndex:idx_failover_v2_service_line;uniqueIndex:idx_failover_v2_service_client"`
-	Name                string     `json:"name" gorm:"type:varchar(255);not null"`
-	Enabled             bool       `json:"enabled" gorm:"default:true"`
-	Priority            int        `json:"priority" gorm:"type:int;not null;default:1"`
-	WatchClientUUID     string     `json:"watch_client_uuid" gorm:"type:varchar(36);index;uniqueIndex:idx_failover_v2_service_client"`
-	DNSLine             string     `json:"dns_line" gorm:"type:varchar(64);not null;uniqueIndex:idx_failover_v2_service_line"`
-	DNSRecordRefs       string     `json:"dns_record_refs" gorm:"type:longtext"`
-	CurrentAddress      string     `json:"current_address" gorm:"type:varchar(255)"`
-	CurrentInstanceRef  string     `json:"current_instance_ref" gorm:"type:longtext"`
-	Provider            string     `json:"provider" gorm:"type:varchar(32);not null;index"`
-	ProviderEntryID     string     `json:"provider_entry_id" gorm:"type:varchar(64);not null"`
-	PlanPayload         string     `json:"plan_payload" gorm:"type:longtext"`
-	FailureThreshold    int        `json:"failure_threshold" gorm:"type:int;not null;default:2"`
-	StaleAfterSeconds   int        `json:"stale_after_seconds" gorm:"type:int;not null;default:300"`
-	CooldownSeconds     int        `json:"cooldown_seconds" gorm:"type:int;not null;default:1800"`
-	TriggerFailureCount int        `json:"trigger_failure_count" gorm:"type:int;not null;default:0"`
-	LastExecutionID     *uint      `json:"last_execution_id,omitempty" gorm:"index"`
-	LastStatus          string     `json:"last_status" gorm:"type:varchar(64);not null;default:'unknown'"`
-	LastMessage         string     `json:"last_message" gorm:"type:text"`
-	LastTriggeredAt     *LocalTime `json:"last_triggered_at" gorm:"type:timestamp"`
-	LastSucceededAt     *LocalTime `json:"last_succeeded_at" gorm:"type:timestamp"`
-	LastFailedAt        *LocalTime `json:"last_failed_at" gorm:"type:timestamp"`
-	CreatedAt           LocalTime  `json:"created_at"`
-	UpdatedAt           LocalTime  `json:"updated_at"`
+	ID                  uint                   `json:"id,omitempty" gorm:"primaryKey;autoIncrement"`
+	ServiceID           uint                   `json:"service_id" gorm:"not null;index;uniqueIndex:idx_failover_v2_service_line;index:idx_failover_v2_service_client"`
+	Name                string                 `json:"name" gorm:"type:varchar(255);not null"`
+	Enabled             bool                   `json:"enabled" gorm:"default:true"`
+	Priority            int                    `json:"priority" gorm:"type:int;not null;default:1"`
+	Mode                string                 `json:"mode" gorm:"type:varchar(32);not null;default:'provider_template'"`
+	WatchClientUUID     string                 `json:"watch_client_uuid" gorm:"type:varchar(36);index;index:idx_failover_v2_service_client"`
+	DNSLine             string                 `json:"dns_line" gorm:"type:varchar(64);not null;uniqueIndex:idx_failover_v2_service_line"`
+	DNSRecordRefs       string                 `json:"dns_record_refs" gorm:"type:longtext"`
+	CurrentAddress      string                 `json:"current_address" gorm:"type:varchar(255)"`
+	CurrentInstanceRef  string                 `json:"current_instance_ref" gorm:"type:longtext"`
+	Provider            string                 `json:"provider" gorm:"type:varchar(32);not null;index"`
+	ProviderEntryID     string                 `json:"provider_entry_id" gorm:"type:varchar(64);not null"`
+	ProviderEntryGroup  string                 `json:"provider_entry_group" gorm:"type:varchar(100)"`
+	PlanPayload         string                 `json:"plan_payload" gorm:"type:longtext"`
+	FailureThreshold    int                    `json:"failure_threshold" gorm:"type:int;not null;default:2"`
+	StaleAfterSeconds   int                    `json:"stale_after_seconds" gorm:"type:int;not null;default:300"`
+	CooldownSeconds     int                    `json:"cooldown_seconds" gorm:"type:int;not null;default:1800"`
+	TriggerFailureCount int                    `json:"trigger_failure_count" gorm:"type:int;not null;default:0"`
+	LastExecutionID     *uint                  `json:"last_execution_id,omitempty" gorm:"index"`
+	LastStatus          string                 `json:"last_status" gorm:"type:varchar(64);not null;default:'unknown'"`
+	LastMessage         string                 `json:"last_message" gorm:"type:text"`
+	LastTriggeredAt     *LocalTime             `json:"last_triggered_at" gorm:"type:timestamp"`
+	LastSucceededAt     *LocalTime             `json:"last_succeeded_at" gorm:"type:timestamp"`
+	LastFailedAt        *LocalTime             `json:"last_failed_at" gorm:"type:timestamp"`
+	Lines               []FailoverV2MemberLine `json:"lines,omitempty" gorm:"foreignKey:MemberID;references:ID;constraint:OnDelete:CASCADE,OnUpdate:CASCADE"`
+	CreatedAt           LocalTime              `json:"created_at"`
+	UpdatedAt           LocalTime              `json:"updated_at"`
+}
+
+type FailoverV2MemberLine struct {
+	ID            uint      `json:"id,omitempty" gorm:"primaryKey;autoIncrement"`
+	ServiceID     uint      `json:"service_id" gorm:"not null;index;uniqueIndex:idx_failover_v2_service_line_code"`
+	MemberID      uint      `json:"member_id" gorm:"not null;index;uniqueIndex:idx_failover_v2_member_line_code"`
+	LineCode      string    `json:"line_code" gorm:"type:varchar(64);not null;uniqueIndex:idx_failover_v2_service_line_code;uniqueIndex:idx_failover_v2_member_line_code"`
+	DNSRecordRefs string    `json:"dns_record_refs" gorm:"type:longtext"`
+	CreatedAt     LocalTime `json:"created_at"`
+	UpdatedAt     LocalTime `json:"updated_at"`
 }
 
 type FailoverV2Execution struct {
