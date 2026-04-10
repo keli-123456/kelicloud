@@ -6,6 +6,8 @@ type Legacy struct {
 	ID                     uint   `json:"id,omitempty"`                                        // 1
 	Sitename               string `json:"sitename" default:"Komari"`                           // 站点名称，默认 "Komari"
 	Description            string `json:"description" default:"A simple server monitor tool."` // 站点描述
+	SiteSubtitle           string `json:"site_subtitle" default:"Komari Monitor"`              // 站点副标题
+	GithubURL              string `json:"github_url" default:"https://github.com/keli-123456"` // 站点 GitHub 外链
 	AllowCors              bool   `json:"allow_cors" default:"false"`                          // 是否允许跨域，默认 false
 	ApiKey                 string `json:"api_key" default:""`                                  // API 密钥，默认空字符串
 	AutoDiscoveryKey       string `json:"auto_discovery_key" default:""`                       // 自动发现密钥
@@ -61,6 +63,8 @@ type Legacy struct {
 const (
 	SitenameKey                            = "sitename"
 	DescriptionKey                         = "description"
+	SiteSubtitleKey                        = "site_subtitle"
+	GithubURLKey                           = "github_url"
 	AllowCorsKey                           = "allow_cors"
 	ApiKeyKey                              = "api_key"
 	AutoDiscoveryKeyKey                    = "auto_discovery_key"

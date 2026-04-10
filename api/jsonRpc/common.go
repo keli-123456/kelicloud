@@ -494,7 +494,7 @@ func getMe(ctx context.Context, _ *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) 
 		resp.Username = "client"
 		resp.UUID = meta.ClientToken
 		client, err := clients.GetClientUUIDByToken(meta.ClientToken)
-		if err != nil {
+		if err == nil {
 			resp.UUID = client
 		}
 		return resp, nil

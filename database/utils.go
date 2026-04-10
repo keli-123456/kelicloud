@@ -28,6 +28,12 @@ func GetPublicInfo() (map[string]interface{}, error) {
 	if !hasKey("description") {
 		cst.Description = "Komari Monitor, a simple server monitoring tool."
 	}
+	if !hasKey("site_subtitle") {
+		cst.SiteSubtitle = "Komari Monitor"
+	}
+	if !hasKey("github_url") {
+		cst.GithubURL = "https://github.com/keli-123456"
+	}
 	if !hasKey("o_auth_provider") {
 		cst.OAuthProvider = "github"
 	}
@@ -49,11 +55,19 @@ func GetPublicInfo() (map[string]interface{}, error) {
 		if cst.Description == "" {
 			cst.Description = "Komari Monitor, a simple server monitoring tool."
 		}
+		if cst.SiteSubtitle == "" {
+			cst.SiteSubtitle = "Komari Monitor"
+		}
+		if cst.GithubURL == "" {
+			cst.GithubURL = "https://github.com/keli-123456"
+		}
 	}
 
 	return gin.H{
 		"sitename":                  cst.Sitename,
 		"description":               cst.Description,
+		"site_subtitle":             cst.SiteSubtitle,
+		"github_url":                cst.GithubURL,
 		"custom_head":               cst.CustomHead,
 		"custom_body":               cst.CustomBody,
 		"oauth_enable":              cst.OAuthEnabled,

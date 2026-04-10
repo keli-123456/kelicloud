@@ -1,11 +1,14 @@
 package client
 
 import (
+	"errors"
+	"log"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/database/tasks"
+	"gorm.io/gorm"
 )
 
 func TaskResult(c *gin.Context) {
@@ -33,10 +36,39 @@ func TaskResult(c *gin.Context) {
 		c.JSON(400, gin.H{"status": "error", "message": "Missing user context"})
 		return
 	}
+	existingResult, lookupErr := tasks.GetSpecificTaskResultForUser(userUUID, req.TaskId, clientId)
+	if lookupErr != nil && !errors.Is(lookupErr, gorm.ErrRecordNotFound) {
+		log.Printf("Task result lookup failed before save: task=%s client=%s user=%s err=%v", req.TaskId, clientId, userUUID, lookupErr)
+	}
+	wasAlreadyFinished := lookupErr == nil && existingResult != nil && existingResult.FinishedAt != nil
+	previousFinishedAt := ""
+	if wasAlreadyFinished {
+		previousFinishedAt = existingResult.FinishedAt.ToTime().UTC().Format(time.RFC3339)
+	}
+
 	err = tasks.SaveTaskResultForUser(userUUID, req.TaskId, clientId, req.Result, req.ExitCode, models.FromTime(req.FinishedAt))
 	if err != nil {
 		c.JSON(500, gin.H{"status": "error", "message": "Failed to update task result: " + err.Error()})
 		return
+	}
+
+	if wasAlreadyFinished {
+		log.Printf(
+			"Task result overwrite detected: task=%s client=%s user=%s previous_finished_at=%s new_finished_at=%s",
+			req.TaskId,
+			clientId,
+			userUUID,
+			previousFinishedAt,
+			req.FinishedAt.UTC().Format(time.RFC3339),
+		)
+	} else {
+		log.Printf(
+			"Task result stored: task=%s client=%s user=%s finished_at=%s",
+			req.TaskId,
+			clientId,
+			userUUID,
+			req.FinishedAt.UTC().Format(time.RFC3339),
+		)
 	}
 
 	c.JSON(200, gin.H{"status": "success", "message": "Task result updated successfully"})

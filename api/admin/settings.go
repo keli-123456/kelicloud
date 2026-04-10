@@ -23,6 +23,8 @@ import (
 var systemSettingKeys = map[string]struct{}{
 	config.SitenameKey:                        {},
 	config.DescriptionKey:                     {},
+	config.SiteSubtitleKey:                    {},
+	config.GithubURLKey:                       {},
 	config.AllowCorsKey:                       {},
 	config.ApiKeyKey:                          {},
 	config.CustomHeadKey:                      {},

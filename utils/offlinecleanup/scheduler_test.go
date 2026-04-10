@@ -122,7 +122,7 @@ func TestCleanupOfflineClients(t *testing.T) {
 	}
 }
 
-func TestEffectiveOfflineReferenceTimeFallsBackToUpdatedAt(t *testing.T) {
+func TestEffectiveOfflineReferenceTimeFallsBackToCreatedAt(t *testing.T) {
 	t.Parallel()
 
 	now := time.Date(2026, 3, 28, 12, 0, 0, 0, time.UTC)
@@ -133,7 +133,7 @@ func TestEffectiveOfflineReferenceTimeFallsBackToUpdatedAt(t *testing.T) {
 	}
 
 	got := effectiveOfflineReferenceTime(client)
-	if !got.Equal(now.Add(-36 * time.Hour)) {
-		t.Fatalf("expected fallback to updated_at, got %v", got)
+	if !got.Equal(now.Add(-72 * time.Hour)) {
+		t.Fatalf("expected fallback to created_at, got %v", got)
 	}
 }

@@ -4,23 +4,17 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/komari-monitor/komari/cmd/flags"
 	"github.com/komari-monitor/komari/config"
-	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
 )
 
 func TestRegisterClientCreatesUserOwnedClient(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	flags.DatabaseType = "sqlite"
-	flags.DatabaseFile = filepath.Join(t.TempDir(), "komari-test.db")
-
-	db := dbcore.GetDBInstance()
+	db := configureClientTestDB(t)
 	now := models.FromTime(time.Now())
 
 	owner := models.User{

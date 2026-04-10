@@ -232,7 +232,6 @@ func loadSettings() (Settings, string, error) {
 func effectiveOfflineReferenceTime(client models.Client) time.Time {
 	for _, candidate := range []time.Time{
 		client.LatestOnline.ToTime(),
-		client.UpdatedAt.ToTime(),
 		client.CreatedAt.ToTime(),
 	} {
 		if !candidate.IsZero() {

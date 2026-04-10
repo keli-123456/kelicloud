@@ -3,6 +3,7 @@ package client
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"sync"
@@ -15,11 +16,13 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/komari-monitor/komari/api"
 	"github.com/komari-monitor/komari/common"
+	dbclients "github.com/komari-monitor/komari/database/clients"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/database/tasks"
 	"github.com/komari-monitor/komari/utils/notifier"
 	"github.com/komari-monitor/komari/ws"
 	"github.com/patrickmn/go-cache"
+	"gorm.io/gorm"
 )
 
 const (
@@ -276,11 +279,17 @@ func SaveClientReport(uuid string, report common.Report) error {
 	if reports == nil {
 		reports = []common.Report{}
 	}
+	if report.UpdatedAt.IsZero() {
+		report.UpdatedAt = time.Now()
+	}
 	if report.CPU.Usage < 0.01 {
 		report.CPU.Usage = 0.01
 	}
 	reports = append(reports.([]common.Report), report)
 	api.Records.Set(uuid, reports, cache.DefaultExpiration)
+	if err := dbclients.UpdateClientLatestOnline(uuid, report.UpdatedAt); err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		log.Printf("Failed to update latest_online for client %s: %v", uuid, err)
+	}
 
 	return nil
 }
