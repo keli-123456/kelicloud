@@ -16,7 +16,14 @@ import (
 const (
 	scheduledDefaultFailureThreshold  = 2
 	scheduledDefaultStaleAfterSeconds = 300
+	scheduledDefaultCheckIntervalSec  = models.FailoverV2DefaultCheckIntervalSeconds
 )
+
+type scheduledTriggerCandidate struct {
+	member *models.FailoverV2Member
+	report *common.Report
+	reason string
+}
 
 func RunScheduledWork() error {
 	enabled, err := config.GetAs[bool](config.FailoverV2SchedulerEnabledKey, false)
@@ -40,87 +47,124 @@ func RunScheduledWork() error {
 	now := time.Now()
 	for index := range services {
 		service := &services[index]
-
-		active, err := failoverv2db.HasActiveExecutionForService(service.UserID, service.ID)
-		if err != nil {
-			log.Printf("failoverv2: failed to query active execution for service %d: %v", service.ID, err)
+		if !shouldRunServiceScheduledCheck(service, now) {
 			continue
 		}
-		if active {
-			continue
-		}
+		checkedAt := models.FromTime(now)
 
-		triggerMember, triggerReport, triggerReason := evaluateServiceHealth(service, latestReports, now)
-		if triggerMember == nil {
+		triggers := evaluateServiceHealth(service, latestReports, now)
+		if len(triggers) == 0 {
 			status, message := summarizeServiceHealth(service)
 			if err := failoverv2db.UpdateServiceFieldsForUser(service.UserID, service.ID, map[string]interface{}{
-				"last_status":  status,
-				"last_message": message,
+				"last_status":     status,
+				"last_message":    message,
+				"last_checked_at": checkedAt,
 			}); err != nil {
 				log.Printf("failoverv2: failed to update service %d health: %v", service.ID, err)
+			} else {
+				service.LastCheckedAt = &checkedAt
 			}
 			continue
 		}
 
-		startAction := "automatic failover"
-		if memberUsesExistingClient(triggerMember) {
-			startAction = "automatic protection"
-		}
-		startMessage := fmt.Sprintf(
-			"%s started for member %s: %s",
-			startAction,
-			memberDisplayLabel(triggerMember),
-			strings.TrimSpace(triggerReason),
-		)
-		var execution *models.FailoverV2Execution
-		if memberUsesExistingClient(triggerMember) {
-			execution, err = queueMemberDetachExecution(
-				service.UserID,
-				service,
-				triggerMember,
-				"automatic existing_client protection",
-				buildTriggerSnapshot(triggerReport),
-				startMessage,
-			)
-		} else {
-			execution, err = queueMemberProvisioningFailoverExecution(
-				service.UserID,
-				service,
-				triggerMember,
-				triggerReason,
-				buildTriggerSnapshot(triggerReport),
-				startMessage,
-			)
-		}
-		if err != nil {
-			message := fmt.Sprintf(
-				"failed to queue automatic action for member %s: %v",
-				memberDisplayLabel(triggerMember),
-				err,
-			)
-			log.Printf("failoverv2: %s", message)
-			if updateErr := failoverv2db.UpdateServiceFieldsForUser(service.UserID, service.ID, map[string]interface{}{
-				"last_status":  models.FailoverV2ServiceStatusFailed,
-				"last_message": message,
-			}); updateErr != nil {
-				log.Printf("failoverv2: failed to update service %d queue error: %v", service.ID, updateErr)
+		for _, trigger := range triggers {
+			triggerMember := trigger.member
+			triggerReport := trigger.report
+			triggerReason := trigger.reason
+			startAction := "automatic failover"
+			if memberUsesExistingClient(triggerMember) {
+				startAction = "automatic protection"
 			}
-			continue
+			startMessage := fmt.Sprintf(
+				"%s started for member %s: %s",
+				startAction,
+				memberDisplayLabel(triggerMember),
+				strings.TrimSpace(triggerReason),
+			)
+			var execution *models.FailoverV2Execution
+			if memberUsesExistingClient(triggerMember) {
+				execution, err = queueMemberDetachExecution(
+					service.UserID,
+					service,
+					triggerMember,
+					"automatic existing_client protection",
+					buildTriggerSnapshot(triggerReport),
+					startMessage,
+				)
+			} else {
+				execution, err = queueMemberProvisioningFailoverExecution(
+					service.UserID,
+					service,
+					triggerMember,
+					triggerReason,
+					buildTriggerSnapshot(triggerReport),
+					startMessage,
+				)
+			}
+			if err != nil {
+				message := fmt.Sprintf(
+					"failed to queue automatic action for member %s: %v",
+					memberDisplayLabel(triggerMember),
+					err,
+				)
+				log.Printf("failoverv2: %s", message)
+				if updateErr := failoverv2db.UpdateServiceFieldsForUser(service.UserID, service.ID, map[string]interface{}{
+					"last_status":  models.FailoverV2ServiceStatusFailed,
+					"last_message": message,
+				}); updateErr != nil {
+					log.Printf("failoverv2: failed to update service %d queue error: %v", service.ID, updateErr)
+				}
+				continue
+			}
+			notifyAutomaticFailoverTriggered(service, triggerMember, execution, triggerReason)
 		}
-		notifyAutomaticFailoverTriggered(service, triggerMember, execution, triggerReason)
+
+		if err := failoverv2db.UpdateServiceFieldsForUser(service.UserID, service.ID, map[string]interface{}{
+			"last_checked_at": checkedAt,
+		}); err != nil {
+			log.Printf("failoverv2: failed to update service %d last_checked_at: %v", service.ID, err)
+		} else {
+			service.LastCheckedAt = &checkedAt
+		}
 	}
 
 	return nil
 }
 
-func evaluateServiceHealth(service *models.FailoverV2Service, latestReports map[string]*common.Report, now time.Time) (*models.FailoverV2Member, *common.Report, string) {
+func normalizedServiceCheckIntervalSeconds(service *models.FailoverV2Service) int {
 	if service == nil {
-		return nil, nil, ""
+		return scheduledDefaultCheckIntervalSec
+	}
+	if service.CheckIntervalSeconds < models.FailoverV2MinCheckIntervalSeconds {
+		return scheduledDefaultCheckIntervalSec
+	}
+	return service.CheckIntervalSeconds
+}
+
+func shouldRunServiceScheduledCheck(service *models.FailoverV2Service, now time.Time) bool {
+	if service == nil {
+		return false
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	if service.LastCheckedAt == nil {
+		return true
+	}
+	lastChecked := service.LastCheckedAt.ToTime()
+	if lastChecked.IsZero() {
+		return true
+	}
+	nextCheckAt := lastChecked.Add(time.Duration(normalizedServiceCheckIntervalSeconds(service)) * time.Second)
+	return !nextCheckAt.After(now)
+}
+
+func evaluateServiceHealth(service *models.FailoverV2Service, latestReports map[string]*common.Report, now time.Time) []scheduledTriggerCandidate {
+	if service == nil {
+		return nil
 	}
 
-	var triggerMember *models.FailoverV2Member
-	var triggerReport *common.Report
-	var triggerReason string
+	var triggers []scheduledTriggerCandidate
 
 	for index := range service.Members {
 		member := &service.Members[index]
@@ -137,14 +181,16 @@ func evaluateServiceHealth(service *models.FailoverV2Service, latestReports map[
 				applyScheduledMemberFields(member, fields)
 			}
 		}
-		if shouldTrigger && triggerMember == nil {
-			triggerMember = member
-			triggerReport = report
-			triggerReason = reason
+		if shouldTrigger {
+			triggers = append(triggers, scheduledTriggerCandidate{
+				member: member,
+				report: report,
+				reason: reason,
+			})
 		}
 	}
 
-	return triggerMember, triggerReport, triggerReason
+	return triggers
 }
 
 func evaluateMemberHealth(member *models.FailoverV2Member, report *common.Report, now time.Time) (bool, map[string]interface{}, string) {

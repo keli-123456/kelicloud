@@ -215,7 +215,7 @@ func TestRunMemberFailoverNowForUserRejectsOwnershipConflict(t *testing.T) {
 	}
 }
 
-func TestRunMemberFailoverNowForUserRejectsActiveDNSLock(t *testing.T) {
+func TestRunMemberFailoverNowForUserAllowsActiveDNSLock(t *testing.T) {
 	configureFailoverV2RunnerTestDB(t)
 	useMockFailoverV2RunnerDeps(t)
 	useMockFailoverV2OwnershipConfig(t)
@@ -233,9 +233,11 @@ func TestRunMemberFailoverNowForUserRejectsActiveDNSLock(t *testing.T) {
 		releaseDNSRun(ownership.Key, 999)
 	})
 
-	if _, err := RunMemberFailoverNowForUser("user-a", service.ID, member.ID); err == nil {
-		t.Fatal("expected active dns lock to block failover")
-	} else if !strings.Contains(err.Error(), "already being modified") {
-		t.Fatalf("expected active dns lock error, got %v", err)
+	execution, err := RunMemberFailoverNowForUser("user-a", service.ID, member.ID)
+	if err != nil {
+		t.Fatalf("expected failover start to ignore active dns lock, got %v", err)
+	}
+	if execution == nil || execution.ID == 0 {
+		t.Fatal("expected failover execution to be created")
 	}
 }

@@ -17,6 +17,7 @@ const (
 	defaultCooldownSeconds     = 1800
 	defaultScriptTimeoutSec    = 600
 	defaultWaitAgentTimeoutSec = 600
+	defaultCheckIntervalSec    = models.FailoverV2DefaultCheckIntervalSeconds
 	maxProviderEntryGroupLen   = 100
 )
 
@@ -104,6 +105,9 @@ func applyServiceDefaults(service *models.FailoverV2Service) {
 	}
 	if service.WaitAgentTimeoutSec <= 0 {
 		service.WaitAgentTimeoutSec = defaultWaitAgentTimeoutSec
+	}
+	if service.CheckIntervalSeconds < models.FailoverV2MinCheckIntervalSeconds {
+		service.CheckIntervalSeconds = defaultCheckIntervalSec
 	}
 	if service.DeleteDelaySeconds < 0 {
 		service.DeleteDelaySeconds = 0
@@ -442,6 +446,7 @@ func updateServiceForUserWithDB(db *gorm.DB, userUUID string, serviceID uint, se
 			"script_clipboard_ids":   service.ScriptClipboardIDs,
 			"script_timeout_sec":     service.ScriptTimeoutSec,
 			"wait_agent_timeout_sec": service.WaitAgentTimeoutSec,
+			"check_interval_seconds": service.CheckIntervalSeconds,
 			"delete_strategy":        service.DeleteStrategy,
 			"delete_delay_seconds":   service.DeleteDelaySeconds,
 			"last_status":            serviceStatusForEnabled(service.Enabled, existing.LastStatus),

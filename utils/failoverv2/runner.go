@@ -99,6 +99,29 @@ func failoverV2DNSRunLockKey(ownershipKey string) string {
 	return "failover_v2:dns:" + hex.EncodeToString(sum[:])
 }
 
+func failoverV2ProvisionRunLockKey(userUUID string, member *models.FailoverV2Member) string {
+	if member == nil {
+		return ""
+	}
+	provider := strings.ToLower(strings.TrimSpace(member.Provider))
+	if provider == "" {
+		return ""
+	}
+	entryID := strings.TrimSpace(member.ProviderEntryID)
+	if entryID == "" {
+		entryID = activeProviderEntryID
+	}
+	entryGroup := normalizeProviderEntryGroup(member.ProviderEntryGroup)
+	payload := strings.Join([]string{
+		strings.ToLower(strings.TrimSpace(userUUID)),
+		provider,
+		strings.ToLower(entryID),
+		strings.ToLower(entryGroup),
+	}, "|")
+	sum := sha256.Sum256([]byte(payload))
+	return "failover_v2:provision:" + hex.EncodeToString(sum[:])
+}
+
 func newFailoverV2RunLockOwner() string {
 	var random [16]byte
 	if _, err := rand.Read(random[:]); err == nil {
@@ -165,6 +188,30 @@ func claimServiceRunLock(serviceID uint, ttl time.Duration) (*failoverV2RunLockH
 	)
 }
 
+func claimMemberProvisionRunLock(userUUID string, service *models.FailoverV2Service, member *models.FailoverV2Member) (*failoverV2RunLockHandle, error) {
+	if member == nil || memberUsesExistingClient(member) {
+		return nil, nil
+	}
+	lockKey := failoverV2ProvisionRunLockKey(userUUID, member)
+	if lockKey == "" {
+		return nil, nil
+	}
+
+	owner := newFailoverV2RunLockOwner()
+	claimed, err := failoverv2db.ClaimRunLock(lockKey, owner, failoverV2ServiceRunLockTTL(service))
+	if err != nil {
+		return nil, err
+	}
+	if !claimed {
+		return nil, fmt.Errorf("provider credential is busy provisioning another member")
+	}
+
+	return &failoverV2RunLockHandle{
+		lockKey: lockKey,
+		owner:   owner,
+	}, nil
+}
+
 func buildMemberOldAddressesSnapshot(member *models.FailoverV2Member) string {
 	return string(marshalJSON(map[string]interface{}{
 		"current_address": strings.TrimSpace(member.CurrentAddress),
@@ -195,29 +242,8 @@ func queueMemberExecution(
 	if err := ensureMemberTargetAvailableFromLegacyFailover(userUUID, member); err != nil {
 		return nil, err
 	}
-
-	ownership, err := claimServiceExecutionLocks(userUUID, service)
-	if err != nil {
+	if _, err := EnsureServiceDNSOwnershipAvailable(userUUID, service.ID, service); err != nil {
 		return nil, err
-	}
-
-	recovered, err := failoverv2db.RecoverInterruptedExecutionsForService(userUUID, service.ID, interruptedExecutionMessage)
-	if err != nil {
-		releaseServiceExecutionLocks(service.ID, ownership)
-		return nil, err
-	}
-	if recovered > 0 {
-		log.Printf("failoverv2: recovered %d interrupted execution(s) for service %d", recovered, service.ID)
-	}
-
-	active, err := failoverv2db.HasActiveExecutionForService(userUUID, service.ID)
-	if err != nil {
-		releaseServiceExecutionLocks(service.ID, ownership)
-		return nil, err
-	}
-	if active {
-		releaseServiceExecutionLocks(service.ID, ownership)
-		return nil, fmt.Errorf("failover v2 service %d already has an active execution", service.ID)
 	}
 
 	now := time.Now()
@@ -228,7 +254,6 @@ func queueMemberExecution(
 	}
 	execution, err := failoverv2db.CreateExecutionForUser(userUUID, service.ID, member.ID, executionTemplate)
 	if err != nil {
-		releaseServiceExecutionLocks(service.ID, ownership)
 		return nil, err
 	}
 
@@ -237,7 +262,6 @@ func queueMemberExecution(
 		"last_status":       models.FailoverV2ServiceStatusRunning,
 		"last_message":      startMessage,
 	}); err != nil {
-		releaseServiceExecutionLocks(service.ID, ownership)
 		return nil, err
 	}
 	if err := failoverv2db.UpdateMemberFieldsForUser(userUUID, service.ID, member.ID, map[string]interface{}{
@@ -246,12 +270,10 @@ func queueMemberExecution(
 		"last_message":      startMessage,
 		"last_triggered_at": models.FromTime(now),
 	}); err != nil {
-		releaseServiceExecutionLocks(service.ID, ownership)
 		return nil, err
 	}
 
-	go func(serviceCopy models.FailoverV2Service, memberCopy models.FailoverV2Member, executionCopy models.FailoverV2Execution, ownershipCopy ServiceDNSOwnership) {
-		defer releaseServiceExecutionLocks(serviceCopy.ID, &ownershipCopy)
+	go func(serviceCopy models.FailoverV2Service, memberCopy models.FailoverV2Member, executionCopy models.FailoverV2Execution) {
 		ctx, cancel := context.WithCancel(context.Background())
 		registerExecutionCancel(executionCopy.ID, cancel)
 		defer unregisterExecutionCancel(executionCopy.ID)
@@ -263,7 +285,7 @@ func queueMemberExecution(
 			ctx:       ctx,
 		}
 		run(runner)
-	}(*service, *member, *execution, *ownership)
+	}(*service, *member, *execution)
 
 	return execution, nil
 }

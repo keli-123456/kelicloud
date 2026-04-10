@@ -379,6 +379,59 @@ func TestRunScheduledWorkSkipsAutomaticFailoverWhenSchedulerDisabled(t *testing.
 	}
 }
 
+func TestRunScheduledWorkSkipsServiceBeforeCheckInterval(t *testing.T) {
+	configureFailoverV2RunnerTestDB(t)
+	useMockFailoverV2RunnerDeps(t)
+	if err := config.Set(config.FailoverV2SchedulerEnabledKey, true); err != nil {
+		t.Fatalf("failed to enable failover v2 scheduler: %v", err)
+	}
+
+	service, member := createTestRunnerServiceAndMember(t)
+	seedCheckedAt := models.FromTime(time.Now().Add(10 * time.Minute))
+	if err := failoverv2db.UpdateServiceFieldsForUser("user-a", service.ID, map[string]interface{}{
+		"check_interval_seconds": 300,
+		"last_checked_at":        seedCheckedAt,
+	}); err != nil {
+		t.Fatalf("failed to seed service check interval: %v", err)
+	}
+
+	failoverV2DetachDNSFunc = func(ctx context.Context, userUUID string, service *models.FailoverV2Service, member *models.FailoverV2Member) (interface{}, error) {
+		t.Fatal("did not expect scheduler to trigger failover before check interval")
+		return nil, nil
+	}
+
+	report := &common.Report{
+		UpdatedAt: time.Now(),
+		CNConnectivity: &common.CNConnectivityReport{
+			Status:              "blocked_suspected",
+			CheckedAt:           time.Now(),
+			ConsecutiveFailures: member.FailureThreshold,
+		},
+	}
+	ws.SetLatestReport(member.WatchClientUUID, report)
+	t.Cleanup(func() {
+		ws.DeleteLatestReport(member.WatchClientUUID)
+	})
+
+	if err := RunScheduledWork(); err != nil {
+		t.Fatalf("run scheduled work failed: %v", err)
+	}
+
+	reloadedService, err := failoverv2db.GetServiceByIDForUser("user-a", service.ID)
+	if err != nil {
+		t.Fatalf("failed to reload service: %v", err)
+	}
+	if reloadedService.LastExecutionID != nil {
+		t.Fatalf("expected no execution before check interval, got last_execution_id=%d", *reloadedService.LastExecutionID)
+	}
+	if reloadedService.LastCheckedAt == nil {
+		t.Fatal("expected last_checked_at to remain set")
+	}
+	if reloadedService.LastCheckedAt.ToTime().Unix() != seedCheckedAt.ToTime().Unix() {
+		t.Fatalf("expected last_checked_at to remain unchanged, got %s want %s", reloadedService.LastCheckedAt.ToTime(), seedCheckedAt.ToTime())
+	}
+}
+
 func TestMemberExecutionRunnerRunFailoverSuccessUpdatesMemberAndExecution(t *testing.T) {
 	configureFailoverV2RunnerTestDB(t)
 	useMockFailoverV2RunnerDeps(t)
