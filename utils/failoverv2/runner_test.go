@@ -250,12 +250,13 @@ func TestEvaluateMemberHealthTriggersWhenMissingReportThresholdReached(t *testin
 
 func TestEvaluateMemberHealthTriggersWhenMissingReportThresholdReachedDuringCooldown(t *testing.T) {
 	now := time.Now()
+	lastTriggeredAt := models.FromTime(now.Add(-10 * time.Minute))
 	member := &models.FailoverV2Member{
 		FailureThreshold:    2,
 		WatchClientUUID:     "client-1",
 		TriggerFailureCount: 1,
 		CooldownSeconds:     3600,
-		LastTriggeredAt:     models.FromTime(now.Add(-10 * time.Minute)),
+		LastTriggeredAt:     &lastTriggeredAt,
 	}
 
 	shouldTrigger, fields, reason := evaluateMemberHealth(member, nil, now)
@@ -646,12 +647,13 @@ func TestRunScheduledWorkShowsHealthyStatusDuringCooldownWindow(t *testing.T) {
 
 func TestEvaluateMemberHealthTriggersBlockedSuspectedDuringCooldown(t *testing.T) {
 	now := time.Now()
+	lastTriggeredAt := models.FromTime(now.Add(-15 * time.Second))
 	member := &models.FailoverV2Member{
 		FailureThreshold:    2,
 		WatchClientUUID:     "client-1",
 		TriggerFailureCount: 1,
 		CooldownSeconds:     1800,
-		LastTriggeredAt:     models.FromTime(now.Add(-15 * time.Second)),
+		LastTriggeredAt:     &lastTriggeredAt,
 	}
 
 	report := &common.Report{
