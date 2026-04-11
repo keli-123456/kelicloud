@@ -375,7 +375,7 @@ func TestApplyAliyunMemberDNSDetachFallsBackToCurrentAddressWhenRecordRefsMissin
 	}
 }
 
-func TestApplyAliyunMemberDNSDetachFailsWhenRefNoLongerMatchesTarget(t *testing.T) {
+func TestApplyAliyunMemberDNSDetachFailsWhenRefBelongsToAnotherMember(t *testing.T) {
 	client := &mockAliyunDNSClient{
 		records: []aliyunDNSRecord{
 			{RecordID: "record-member-1-a", RR: "@", Type: "A", Value: "198.51.100.10", TTL: 60, Line: "telecom"},
@@ -384,17 +384,55 @@ func TestApplyAliyunMemberDNSDetachFailsWhenRefNoLongerMatchesTarget(t *testing.
 	}
 	useMockAliyunDNSDependencies(t, client)
 
+	service := testAliyunService()
+	service.Members = []models.FailoverV2Member{
+		{ID: 1, Enabled: true, DNSLine: "telecom", CurrentAddress: "198.51.100.10"},
+		{ID: 2, Enabled: true, DNSLine: "telecom", CurrentAddress: "198.51.100.11"},
+	}
+
 	member := testAliyunMember()
+	member.ID = 1
 	member.DNSRecordRefs = `{"A":"record-member-2-a"}`
 	member.CurrentAddress = "198.51.100.10"
 
-	if _, err := ApplyAliyunMemberDNSDetach(context.Background(), "user-a", testAliyunService(), member); err == nil {
+	if _, err := ApplyAliyunMemberDNSDetach(context.Background(), "user-a", service, member); err == nil {
 		t.Fatal("expected detach to fail when record ref does not match target line/record")
-	} else if got := err.Error(); !strings.Contains(got, "current address") {
-		t.Fatalf("expected stale record ref mismatch error, got %v", err)
+	} else if got := err.Error(); !strings.Contains(got, "another member") {
+		t.Fatalf("expected another-member protection error, got %v", err)
 	}
 	if len(client.deleteCalls) != 0 {
 		t.Fatalf("expected no deletes when record ref mismatches target, got %#v", client.deleteCalls)
+	}
+}
+
+func TestApplyAliyunMemberDNSDetachAllowsStaleAddressWhenNotAnotherMember(t *testing.T) {
+	client := &mockAliyunDNSClient{
+		records: []aliyunDNSRecord{
+			{RecordID: "record-member-stale-a", RR: "@", Type: "A", Value: "198.51.100.99", TTL: 60, Line: "telecom"},
+		},
+	}
+	useMockAliyunDNSDependencies(t, client)
+
+	service := testAliyunService()
+	service.Members = []models.FailoverV2Member{
+		{ID: 1, Enabled: true, DNSLine: "telecom", CurrentAddress: "198.51.100.10"},
+		{ID: 2, Enabled: true, DNSLine: "telecom", CurrentAddress: "198.51.100.11"},
+	}
+
+	member := testAliyunMember()
+	member.ID = 1
+	member.DNSRecordRefs = `{"A":"record-member-stale-a"}`
+	member.CurrentAddress = "198.51.100.10"
+
+	result, err := ApplyAliyunMemberDNSDetach(context.Background(), "user-a", service, member)
+	if err != nil {
+		t.Fatalf("expected stale-address detach to continue, got %v", err)
+	}
+	if len(client.deleteCalls) != 1 || client.deleteCalls[0] != "record-member-stale-a" {
+		t.Fatalf("expected stale owned ref to be deleted, got %#v", client.deleteCalls)
+	}
+	if len(result.Removed) != 1 || result.Removed[0].ID != "record-member-stale-a" {
+		t.Fatalf("expected stale owned record to be removed, got %#v", result.Removed)
 	}
 }
 

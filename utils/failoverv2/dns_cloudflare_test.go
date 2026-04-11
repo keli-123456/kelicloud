@@ -379,24 +379,60 @@ func TestApplyCloudflareMemberDNSDetachRemovesStoredAAAAWhenCurrentAddressIsIPv4
 	}
 }
 
-func TestApplyCloudflareMemberDNSDetachFailsWhenRefNoLongerMatchesTarget(t *testing.T) {
+func TestApplyCloudflareMemberDNSDetachFailsWhenRefBelongsToAnotherMember(t *testing.T) {
 	api := newTestCloudflareAPI([]cloudflareDNSRecord{
 		{ID: "rec-member-1-a", Name: "app.example.com", Type: "A", Content: "198.51.100.10", TTL: 120},
 		{ID: "rec-member-2-a", Name: "app.example.com", Type: "A", Content: "198.51.100.11", TTL: 120},
 	})
 	useMockCloudflareDNSDependencies(t, api)
 
+	service := testCloudflareService()
+	service.Members = []models.FailoverV2Member{
+		{ID: 1, Enabled: true, DNSLine: "telecom", CurrentAddress: "198.51.100.10"},
+		{ID: 2, Enabled: true, DNSLine: "unicom", CurrentAddress: "198.51.100.11"},
+	}
+
 	member := testCloudflareMember()
+	member.ID = 1
 	member.DNSRecordRefs = `{"A":"rec-member-2-a"}`
 	member.CurrentAddress = "198.51.100.10"
 
-	if _, err := ApplyCloudflareMemberDNSDetach(context.Background(), "user-a", testCloudflareService(), member); err == nil {
+	if _, err := ApplyCloudflareMemberDNSDetach(context.Background(), "user-a", service, member); err == nil {
 		t.Fatal("expected detach to fail when record ref does not match target")
-	} else if got := err.Error(); !strings.Contains(got, "current address") {
-		t.Fatalf("expected stale record ref mismatch error, got %v", err)
+	} else if got := err.Error(); !strings.Contains(got, "another member") {
+		t.Fatalf("expected another-member protection error, got %v", err)
 	}
 	if _, ok := api.records["rec-member-1-a"]; !ok {
 		t.Fatalf("expected no delete when record ref mismatches target, got %#v", api.records)
+	}
+}
+
+func TestApplyCloudflareMemberDNSDetachAllowsStaleAddressWhenNotAnotherMember(t *testing.T) {
+	api := newTestCloudflareAPI([]cloudflareDNSRecord{
+		{ID: "rec-member-stale-a", Name: "app.example.com", Type: "A", Content: "198.51.100.99", TTL: 120},
+	})
+	useMockCloudflareDNSDependencies(t, api)
+
+	service := testCloudflareService()
+	service.Members = []models.FailoverV2Member{
+		{ID: 1, Enabled: true, DNSLine: "telecom", CurrentAddress: "198.51.100.10"},
+		{ID: 2, Enabled: true, DNSLine: "unicom", CurrentAddress: "198.51.100.11"},
+	}
+
+	member := testCloudflareMember()
+	member.ID = 1
+	member.DNSRecordRefs = `{"A":"rec-member-stale-a"}`
+	member.CurrentAddress = "198.51.100.10"
+
+	result, err := ApplyCloudflareMemberDNSDetach(context.Background(), "user-a", service, member)
+	if err != nil {
+		t.Fatalf("expected stale-address detach to continue, got %v", err)
+	}
+	if len(result.Removed) != 1 || result.Removed[0].ID != "rec-member-stale-a" {
+		t.Fatalf("expected stale owned record to be removed, got %#v", result.Removed)
+	}
+	if _, ok := api.records["rec-member-stale-a"]; ok {
+		t.Fatalf("expected stale owned ref to be deleted, got %#v", api.records)
 	}
 }
 
