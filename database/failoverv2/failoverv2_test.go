@@ -360,8 +360,8 @@ func TestCreateMemberForUserAppliesDefaults(t *testing.T) {
 	if member.StaleAfterSeconds != 300 {
 		t.Fatalf("expected default stale_after_seconds 300, got %d", member.StaleAfterSeconds)
 	}
-	if member.CooldownSeconds != 1800 {
-		t.Fatalf("expected default cooldown_seconds 1800, got %d", member.CooldownSeconds)
+	if member.CooldownSeconds != 0 {
+		t.Fatalf("expected default cooldown_seconds 0, got %d", member.CooldownSeconds)
 	}
 	if member.PlanPayload != "{}" {
 		t.Fatalf("expected default plan payload, got %q", member.PlanPayload)

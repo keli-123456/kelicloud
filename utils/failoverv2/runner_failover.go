@@ -36,6 +36,8 @@ var (
 	failoverV2GetClientByUUIDFunc = clientdb.GetClientByUUIDForUser
 )
 
+const failoverV2BlockedOutletRetryLimit = 3
+
 type commandResult struct {
 	TaskID     string
 	Output     string
@@ -190,43 +192,65 @@ func (r *memberExecutionRunner) runProvisioningFailover() {
 		return
 	}
 
-	outcome, err := r.provisionReplacementInstance()
-	if err != nil {
-		r.failExecution(executionFailureMessage("failed to provision replacement instance", err))
-		return
-	}
-	if err := r.checkStopped(); err != nil {
-		r.failWithRollback(outcome, executionFailureMessage("", err), err)
-		return
-	}
+	var (
+		outcome          *memberProvisionOutcome
+		targetClientUUID string
+		scriptDetail     interface{}
+	)
+	for attempt := 1; attempt <= failoverV2BlockedOutletRetryLimit; attempt++ {
+		outcome, err = r.provisionReplacementInstance()
+		if err != nil {
+			r.failExecution(executionFailureMessage("failed to provision replacement instance", err))
+			return
+		}
+		if err := r.checkStopped(); err != nil {
+			r.failWithRollback(outcome, executionFailureMessage("", err), err)
+			return
+		}
 
-	targetClientUUID, err := r.waitForReplacementAgent(outcome)
-	if err != nil {
-		r.failWithRollback(outcome, executionFailureMessage("failed to wait for replacement agent", err), err)
-		return
-	}
-	if err := r.checkStopped(); err != nil {
-		r.failWithRollback(outcome, executionFailureMessage("", err), err)
-		return
-	}
+		targetClientUUID, err = r.waitForReplacementAgent(outcome)
+		if err != nil {
+			r.failWithRollback(outcome, executionFailureMessage("failed to wait for replacement agent", err), err)
+			return
+		}
+		if err := r.checkStopped(); err != nil {
+			r.failWithRollback(outcome, executionFailureMessage("", err), err)
+			return
+		}
 
-	if err := r.validateReplacementOutlet(targetClientUUID); err != nil {
-		r.failWithRollback(outcome, executionFailureMessage("", err), err)
-		return
-	}
-	if err := r.checkStopped(); err != nil {
-		r.failWithRollback(outcome, executionFailureMessage("", err), err)
-		return
-	}
+		outletErr := r.validateReplacementOutlet(targetClientUUID)
+		if outletErr != nil {
+			var blockedErr *blockedOutletError
+			if errors.As(outletErr, &blockedErr) && attempt < failoverV2BlockedOutletRetryLimit {
+				retryMessage := fmt.Sprintf(
+					"replacement outlet blocked on attempt %d/%d; reprovisioning",
+					attempt,
+					failoverV2BlockedOutletRetryLimit,
+				)
+				if rollbackErr := r.rollbackProvisionOutcome(outcome, retryMessage, outletErr); rollbackErr != nil {
+					r.failExecution(executionFailureMessage("", outletErr) + "; rollback_new failed: " + rollbackErr.Error())
+					return
+				}
+				continue
+			}
+			r.failWithRollback(outcome, executionFailureMessage("", outletErr), outletErr)
+			return
+		}
+		if err := r.checkStopped(); err != nil {
+			r.failWithRollback(outcome, executionFailureMessage("", err), err)
+			return
+		}
 
-	scriptDetail, err := r.runReplacementScripts(targetClientUUID, outcome)
-	if err != nil {
-		r.failWithRollback(outcome, executionFailureMessage("", err), err)
-		return
-	}
-	if err := r.checkStopped(); err != nil {
-		r.failWithRollback(outcome, executionFailureMessage("", err), err)
-		return
+		scriptDetail, err = r.runReplacementScripts(targetClientUUID, outcome)
+		if err != nil {
+			r.failWithRollback(outcome, executionFailureMessage("", err), err)
+			return
+		}
+		if err := r.checkStopped(); err != nil {
+			r.failWithRollback(outcome, executionFailureMessage("", err), err)
+			return
+		}
+		break
 	}
 
 	r.mergeOutcomeAddressesFromClient(targetClientUUID, outcome)
@@ -721,6 +745,18 @@ func (r *memberExecutionRunner) failWithRollback(outcome *memberProvisionOutcome
 		return
 	}
 
+	if err := r.rollbackProvisionOutcome(outcome, message, cause); err != nil {
+		r.failExecution(message + "; rollback_new failed: " + err.Error())
+		return
+	}
+	r.failExecution(message)
+}
+
+func (r *memberExecutionRunner) rollbackProvisionOutcome(outcome *memberProvisionOutcome, message string, cause error) error {
+	if outcome == nil || outcome.Rollback == nil {
+		return nil
+	}
+
 	step := r.startStep("rollback_new", "Cleanup Failed New Instance", map[string]interface{}{
 		"label": outcome.RollbackLabel,
 		"error": message,
@@ -735,14 +771,13 @@ func (r *memberExecutionRunner) failWithRollback(outcome *memberProvisionOutcome
 			"error": err.Error(),
 		}
 		r.finishStep(step, models.FailoverStepStatusFailed, err.Error(), detail)
-		r.failExecution(message + "; rollback_new failed: " + err.Error())
-		return
+		return err
 	}
 
 	r.finishStep(step, models.FailoverStepStatusSuccess, "replacement instance rolled back", map[string]interface{}{
 		"label": outcome.RollbackLabel,
 	})
-	r.failExecution(message)
+	return nil
 }
 
 func runFailoverV2Scripts(ctx context.Context, userUUID, clientUUID string, service *models.FailoverV2Service) (interface{}, error) {

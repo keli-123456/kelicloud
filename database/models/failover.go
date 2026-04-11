@@ -103,7 +103,7 @@ type FailoverTask struct {
 	TriggerSource                 string              `json:"trigger_source" gorm:"type:varchar(64);not null;default:'cn_connectivity'"`
 	FailureThreshold              int                 `json:"failure_threshold" gorm:"type:int;not null;default:2"`
 	StaleAfterSeconds             int                 `json:"stale_after_seconds" gorm:"type:int;not null;default:300"`
-	CooldownSeconds               int                 `json:"cooldown_seconds" gorm:"type:int;not null;default:1800"`
+	CooldownSeconds               int                 `json:"cooldown_seconds" gorm:"type:int;not null;default:0"`
 	ProvisionRetryLimit           int                 `json:"provision_retry_limit" gorm:"type:int;not null;default:6"`
 	ProvisionFailureFallbackLimit int                 `json:"provision_failure_fallback_limit" gorm:"type:int;not null;default:3"`
 	DNSProvider                   string              `json:"dns_provider" gorm:"type:varchar(32);not null"`

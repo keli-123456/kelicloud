@@ -91,7 +91,7 @@ type FailoverV2Member struct {
 	PlanPayload         string                 `json:"plan_payload" gorm:"type:longtext"`
 	FailureThreshold    int                    `json:"failure_threshold" gorm:"type:int;not null;default:2"`
 	StaleAfterSeconds   int                    `json:"stale_after_seconds" gorm:"type:int;not null;default:300"`
-	CooldownSeconds     int                    `json:"cooldown_seconds" gorm:"type:int;not null;default:1800"`
+	CooldownSeconds     int                    `json:"cooldown_seconds" gorm:"type:int;not null;default:0"`
 	TriggerFailureCount int                    `json:"trigger_failure_count" gorm:"type:int;not null;default:0"`
 	LastExecutionID     *uint                  `json:"last_execution_id,omitempty" gorm:"index"`
 	LastStatus          string                 `json:"last_status" gorm:"type:varchar(64);not null;default:'unknown'"`

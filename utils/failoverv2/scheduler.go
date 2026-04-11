@@ -155,14 +155,14 @@ func shouldRunServiceScheduledCheck(service *models.FailoverV2Service, now time.
 	if lastChecked.IsZero() {
 		return true
 	}
-	if hasExpiredCooldownMember(service, now) {
+	if hasExpiredCooldownMember(service, lastChecked, now) {
 		return true
 	}
 	nextCheckAt := lastChecked.Add(time.Duration(normalizedServiceCheckIntervalSeconds(service)) * time.Second)
 	return !nextCheckAt.After(now)
 }
 
-func hasExpiredCooldownMember(service *models.FailoverV2Service, now time.Time) bool {
+func hasExpiredCooldownMember(service *models.FailoverV2Service, lastChecked, now time.Time) bool {
 	if service == nil {
 		return false
 	}
@@ -175,14 +175,23 @@ func hasExpiredCooldownMember(service *models.FailoverV2Service, now time.Time) 
 		if !member.Enabled {
 			continue
 		}
-		if strings.TrimSpace(member.LastStatus) != models.FailoverV2MemberStatusCooldown {
+		if member.CooldownSeconds <= 0 || member.LastTriggeredAt == nil {
+			if strings.TrimSpace(member.LastStatus) == models.FailoverV2MemberStatusCooldown {
+				// Legacy/stale cooldown rows should be rechecked immediately.
+				return true
+			}
 			continue
 		}
-		if member.CooldownSeconds <= 0 || member.LastTriggeredAt == nil {
+		nextRun := member.LastTriggeredAt.ToTime().Add(time.Duration(member.CooldownSeconds) * time.Second)
+		if nextRun.IsZero() || nextRun.After(now) {
+			continue
+		}
+		if strings.TrimSpace(member.LastStatus) == models.FailoverV2MemberStatusCooldown {
+			// If the UI is still showing cooldown but the window has expired, force an immediate recheck.
 			return true
 		}
-		nextRun := member.LastTriggeredAt.ToTime().Add(time.Duration(member.CooldownSeconds) * time.Second)
-		if !nextRun.After(now) {
+		// Re-check once when cooldown expires, even if the regular interval has not elapsed yet.
+		if lastChecked.IsZero() || lastChecked.Before(nextRun) {
 			return true
 		}
 	}
@@ -230,13 +239,11 @@ func evaluateMemberHealth(member *models.FailoverV2Member, report *common.Report
 		return false, fields, ""
 	}
 
+	var cooldownUntil time.Time
+	cooldownActive := false
 	if member.CooldownSeconds > 0 && member.LastTriggeredAt != nil {
-		nextRun := member.LastTriggeredAt.ToTime().Add(time.Duration(member.CooldownSeconds) * time.Second)
-		if nextRun.After(now) {
-			fields["last_status"] = models.FailoverV2MemberStatusCooldown
-			fields["last_message"] = "cooldown until " + nextRun.UTC().Format(time.RFC3339)
-			return false, fields, ""
-		}
+		cooldownUntil = member.LastTriggeredAt.ToTime().Add(time.Duration(member.CooldownSeconds) * time.Second)
+		cooldownActive = cooldownUntil.After(now)
 	}
 
 	if memberUsesExistingClient(member) && memberHasAllLinesDetached(member) {
@@ -258,7 +265,12 @@ func evaluateMemberHealth(member *models.FailoverV2Member, report *common.Report
 	}
 
 	if report == nil || report.CNConnectivity == nil {
-		return evaluateMissingMemberHealth(member, fields, "cn_connectivity report is unavailable")
+		shouldTrigger, updatedFields, reason := evaluateMissingMemberHealth(member, fields, "cn_connectivity report is unavailable")
+		if shouldTrigger && cooldownActive {
+			updatedFields["last_message"] = appendCooldownUntilMessage(stringMapValue(updatedFields, "last_message"), cooldownUntil)
+			return false, updatedFields, ""
+		}
+		return shouldTrigger, updatedFields, reason
 	}
 
 	staleAfter := member.StaleAfterSeconds
@@ -271,7 +283,12 @@ func evaluateMemberHealth(member *models.FailoverV2Member, report *common.Report
 		reportTime = report.CNConnectivity.CheckedAt
 	}
 	if reportTime.IsZero() || now.Sub(reportTime) > time.Duration(staleAfter)*time.Second {
-		return evaluateMissingMemberHealth(member, fields, "latest report is stale")
+		shouldTrigger, updatedFields, reason := evaluateMissingMemberHealth(member, fields, "latest report is stale")
+		if shouldTrigger && cooldownActive {
+			updatedFields["last_message"] = appendCooldownUntilMessage(stringMapValue(updatedFields, "last_message"), cooldownUntil)
+			return false, updatedFields, ""
+		}
+		return shouldTrigger, updatedFields, reason
 	}
 
 	fields["trigger_failure_count"] = 0
@@ -283,12 +300,32 @@ func evaluateMemberHealth(member *models.FailoverV2Member, report *common.Report
 	if report.CNConnectivity.Status == "blocked_suspected" && report.CNConnectivity.ConsecutiveFailures >= threshold {
 		fields["last_status"] = models.FailoverV2MemberStatusTriggered
 		fields["last_message"] = fmt.Sprintf("cn_connectivity blocked_suspected (%d failures)", report.CNConnectivity.ConsecutiveFailures)
+		if cooldownActive {
+			fields["last_message"] = appendCooldownUntilMessage(stringMapValue(fields, "last_message"), cooldownUntil)
+			return false, fields, ""
+		}
 		return true, fields, fields["last_message"].(string)
 	}
 
 	fields["last_status"] = models.FailoverV2MemberStatusHealthy
 	fields["last_message"] = strings.TrimSpace(report.CNConnectivity.Status)
 	return false, fields, ""
+}
+
+func appendCooldownUntilMessage(base string, cooldownUntil time.Time) string {
+	base = strings.TrimSpace(base)
+	if cooldownUntil.IsZero() {
+		return base
+	}
+
+	cooldownText := "cooldown until " + cooldownUntil.UTC().Format(time.RFC3339)
+	if base == "" {
+		return cooldownText
+	}
+	if strings.Contains(strings.ToLower(base), "cooldown until") {
+		return base
+	}
+	return base + "; " + cooldownText
 }
 
 func evaluateMissingMemberHealth(member *models.FailoverV2Member, fields map[string]interface{}, baseMessage string) (bool, map[string]interface{}, string) {

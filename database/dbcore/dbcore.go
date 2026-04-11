@@ -3,6 +3,7 @@ package dbcore
 import (
 	"archive/zip"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -21,6 +22,8 @@ import (
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
+
+const migrationKeyFailoverCooldownDefaultZero = "20260411_failover_cooldown_default_zero"
 
 func shouldUseSQLiteForTests() bool {
 	return strings.HasSuffix(filepath.Base(os.Args[0]), ".test") && flags.DatabaseType == "sqlite"
@@ -526,6 +529,64 @@ func prepareFailoverV2MemberSchemaCompatibility(db *gorm.DB) {
 	}
 }
 
+func applyFailoverCooldownDefaultZeroMigration(db *gorm.DB) {
+	if db == nil {
+		return
+	}
+
+	if err := db.AutoMigrate(&models.DBMigrationMarker{}); err != nil {
+		log.Printf("Failed to migrate db migration markers table: %v", err)
+		return
+	}
+
+	var marker models.DBMigrationMarker
+	err := db.Where("key = ?", migrationKeyFailoverCooldownDefaultZero).First(&marker).Error
+	if err == nil {
+		return
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		log.Printf("Failed to inspect cooldown migration marker: %v", err)
+		return
+	}
+
+	err = db.Transaction(func(tx *gorm.DB) error {
+		var existing models.DBMigrationMarker
+		if err := tx.Where("key = ?", migrationKeyFailoverCooldownDefaultZero).First(&existing).Error; err == nil {
+			return nil
+		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+
+		if tx.Migrator().HasTable(&models.FailoverTask{}) {
+			if err := tx.Model(&models.FailoverTask{}).
+				Where("cooldown_seconds = ?", 1800).
+				Update("cooldown_seconds", 0).Error; err != nil {
+				return err
+			}
+		}
+
+		if tx.Migrator().HasTable(&models.FailoverV2Member{}) {
+			if err := tx.Model(&models.FailoverV2Member{}).
+				Where("cooldown_seconds = ?", 1800).
+				Update("cooldown_seconds", 0).Error; err != nil {
+				return err
+			}
+		}
+
+		now := models.FromTime(time.Now())
+		return tx.Create(&models.DBMigrationMarker{
+			Key:       migrationKeyFailoverCooldownDefaultZero,
+			AppliedAt: now,
+		}).Error
+	})
+	if err != nil {
+		log.Printf("Failed to apply cooldown default zero migration: %v", err)
+		return
+	}
+
+	log.Printf("[migration] Applied %s", migrationKeyFailoverCooldownDefaultZero)
+}
+
 func prepareMySQLOfflineNotificationCompatibility(db *gorm.DB) {
 	migrator := db.Migrator()
 	if !migrator.HasTable(&models.OfflineNotification{}) {
@@ -849,6 +910,7 @@ func GetDBInstance() *gorm.DB {
 		if err != nil {
 			log.Printf("Failed to create failover tables, it may already exist: %v", err)
 		}
+		applyFailoverCooldownDefaultZeroMigration(instance)
 		prepareFailoverV2MemberSchemaCompatibility(instance)
 
 	})
