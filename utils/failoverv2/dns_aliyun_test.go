@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/komari-monitor/komari/database/models"
@@ -274,7 +275,7 @@ func TestApplyAliyunMemberDNSDetachRemovesStoredAAAAWhenCurrentAddressIsIPv4(t *
 	}
 }
 
-func TestApplyAliyunMemberDNSDetachFallsBackToCurrentAddress(t *testing.T) {
+func TestApplyAliyunMemberDNSDetachFailsWithoutRecordRefs(t *testing.T) {
 	client := &mockAliyunDNSClient{
 		records: []aliyunDNSRecord{
 			{RecordID: "record-telecom-a-old", RR: "@", Type: "A", Value: "198.51.100.10", TTL: 60, Line: "telecom"},
@@ -287,19 +288,17 @@ func TestApplyAliyunMemberDNSDetachFallsBackToCurrentAddress(t *testing.T) {
 	member.DNSRecordRefs = `{}`
 	member.CurrentAddress = "198.51.100.10"
 
-	result, err := ApplyAliyunMemberDNSDetach(context.Background(), "user-a", testAliyunService(), member)
-	if err != nil {
-		t.Fatalf("expected no error, got %v", err)
+	if _, err := ApplyAliyunMemberDNSDetach(context.Background(), "user-a", testAliyunService(), member); err == nil {
+		t.Fatal("expected detach to fail when managed record refs are missing")
+	} else if got := err.Error(); !strings.Contains(got, "record refs are required") {
+		t.Fatalf("expected missing record refs error, got %v", err)
 	}
-	if len(client.deleteCalls) != 1 || client.deleteCalls[0] != "record-telecom-a-old" {
-		t.Fatalf("expected only current address record to be deleted, got %#v", client.deleteCalls)
-	}
-	if len(result.Removed) != 1 || result.Removed[0].ID != "record-telecom-a-old" {
-		t.Fatalf("expected removed record to match fallback address, got %#v", result.Removed)
+	if len(client.deleteCalls) != 0 {
+		t.Fatalf("expected no deletes when refs are missing, got %#v", client.deleteCalls)
 	}
 }
 
-func TestApplyAliyunMemberDNSDetachSkipsStaleRefWhenCurrentAddressMismatches(t *testing.T) {
+func TestApplyAliyunMemberDNSDetachFailsWhenRefNoLongerMatchesTarget(t *testing.T) {
 	client := &mockAliyunDNSClient{
 		records: []aliyunDNSRecord{
 			{RecordID: "record-member-1-a", RR: "@", Type: "A", Value: "198.51.100.10", TTL: 60, Line: "telecom"},
@@ -312,15 +311,13 @@ func TestApplyAliyunMemberDNSDetachSkipsStaleRefWhenCurrentAddressMismatches(t *
 	member.DNSRecordRefs = `{"A":"record-member-2-a"}`
 	member.CurrentAddress = "198.51.100.10"
 
-	result, err := ApplyAliyunMemberDNSDetach(context.Background(), "user-a", testAliyunService(), member)
-	if err != nil {
-		t.Fatalf("expected no error, got %v", err)
+	if _, err := ApplyAliyunMemberDNSDetach(context.Background(), "user-a", testAliyunService(), member); err == nil {
+		t.Fatal("expected detach to fail when record ref does not match target line/record")
+	} else if got := err.Error(); !strings.Contains(got, "current address") {
+		t.Fatalf("expected stale record ref mismatch error, got %v", err)
 	}
-	if len(client.deleteCalls) != 1 || client.deleteCalls[0] != "record-member-1-a" {
-		t.Fatalf("expected only current-address record to be deleted, got %#v", client.deleteCalls)
-	}
-	if len(result.Removed) != 1 || result.Removed[0].ID != "record-member-1-a" {
-		t.Fatalf("expected removed record to match current address, got %#v", result.Removed)
+	if len(client.deleteCalls) != 0 {
+		t.Fatalf("expected no deletes when record ref mismatches target, got %#v", client.deleteCalls)
 	}
 }
 

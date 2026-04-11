@@ -2,6 +2,7 @@ package failoverv2
 
 import (
 	"encoding/json"
+	"fmt"
 	"strconv"
 	"strings"
 )
@@ -58,4 +59,24 @@ func encodeMemberDNSRecordRefs(recordRefs map[string]string) string {
 		return "{}"
 	}
 	return string(payload)
+}
+
+func selectManagedRecordRefsForDetach(recordRefs map[string]string, managedTypes []string) (map[string]string, error) {
+	managedTypeSet := stringSliceSet(managedTypes)
+	selected := make(map[string]string, len(recordRefs))
+	for recordType, recordID := range recordRefs {
+		recordType = strings.ToUpper(strings.TrimSpace(recordType))
+		recordID = strings.TrimSpace(recordID)
+		if recordType == "" || recordID == "" {
+			continue
+		}
+		if _, ok := managedTypeSet[recordType]; !ok {
+			continue
+		}
+		selected[recordType] = recordID
+	}
+	if len(selected) == 0 {
+		return nil, fmt.Errorf("managed dns record refs are required for detach")
+	}
+	return selected, nil
 }
