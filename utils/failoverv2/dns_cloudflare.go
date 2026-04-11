@@ -312,15 +312,14 @@ func ApplyCloudflareMemberDNSDetach(ctx context.Context, userUUID string, servic
 
 		typedCurrentAddress, hasTypedCurrentAddress := normalizeMemberAddressForRecordType(recordType, currentAddress)
 		if strings.TrimSpace(record.ID) != "" && recordID != "" {
-			if hasTypedCurrentAddress && !sameAddress(record.Content, typedCurrentAddress) {
-				if detachRecordBelongsToAnotherMember(service, member, recordType, record.Content, nil) {
-					continue
-				}
+			if detachRecordReferencedByOtherMember(service, member, recordType, recordID, nil) {
+				continue
 			}
-			if !hasTypedCurrentAddress {
-				if detachRecordBelongsToAnotherMember(service, member, recordType, record.Content, nil) {
-					continue
-				}
+			if !hasTypedCurrentAddress && detachRecordBelongsToAnotherMember(service, member, recordType, record.Content, nil) {
+				continue
+			}
+			if hasTypedCurrentAddress && !sameAddress(record.Content, typedCurrentAddress) {
+				// stale ref: continue to detach as long as this record is not explicitly owned by another member
 			}
 		}
 		existingRecordID := strings.TrimSpace(record.ID)
@@ -500,15 +499,14 @@ func VerifyCloudflareMemberDNSDetached(ctx context.Context, userUUID string, ser
 
 		typedCurrentAddress, hasTypedCurrentAddress := normalizeMemberAddressForRecordType(recordType, currentAddress)
 		if strings.TrimSpace(record.ID) != "" && recordID != "" {
-			if hasTypedCurrentAddress && !sameAddress(record.Content, typedCurrentAddress) {
-				if detachRecordBelongsToAnotherMember(service, member, recordType, record.Content, nil) {
-					continue
-				}
+			if detachRecordReferencedByOtherMember(service, member, recordType, recordID, nil) {
+				continue
 			}
-			if !hasTypedCurrentAddress {
-				if detachRecordBelongsToAnotherMember(service, member, recordType, record.Content, nil) {
-					continue
-				}
+			if !hasTypedCurrentAddress && detachRecordBelongsToAnotherMember(service, member, recordType, record.Content, nil) {
+				continue
+			}
+			if hasTypedCurrentAddress && !sameAddress(record.Content, typedCurrentAddress) {
+				// stale ref: allow verification to proceed unless explicitly owned by another member
 			}
 		}
 		observed = append(observed, buildCloudflareMemberDNSRecord(operation.zoneID, operation.zoneName, operation.recordName, operation.line, record))

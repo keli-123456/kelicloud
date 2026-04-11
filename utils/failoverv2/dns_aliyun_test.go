@@ -385,8 +385,8 @@ func TestApplyAliyunMemberDNSDetachSkipsRecordWhenRefBelongsToAnotherMember(t *t
 
 	service := testAliyunService()
 	service.Members = []models.FailoverV2Member{
-		{ID: 1, Enabled: true, DNSLine: "telecom", CurrentAddress: "198.51.100.10"},
-		{ID: 2, Enabled: true, DNSLine: "telecom", CurrentAddress: "198.51.100.11"},
+		{ID: 1, Enabled: true, DNSLine: "telecom", CurrentAddress: "198.51.100.10", DNSRecordRefs: `{"A":"record-member-1-a"}`},
+		{ID: 2, Enabled: true, DNSLine: "telecom", CurrentAddress: "198.51.100.11", DNSRecordRefs: `{"A":"record-member-2-a"}`},
 	}
 
 	member := testAliyunMember()
@@ -441,8 +441,8 @@ func TestApplyAliyunMemberDNSDetachSkipsAAAAWhenRefBelongsToAnotherMember(t *tes
 	service := testAliyunService()
 	service.DNSPayload = `{"domain_name":"example.com","rr":"@","record_type":"A","sync_ipv6":true,"ttl":60}`
 	service.Members = []models.FailoverV2Member{
-		{ID: 1, Enabled: true, DNSLine: "telecom", CurrentAddress: "198.51.100.10"},
-		{ID: 2, Enabled: true, DNSLine: "telecom", CurrentAddress: "2600:3c15::2000:acff:fe65:9be6"},
+		{ID: 1, Enabled: true, DNSLine: "telecom", CurrentAddress: "198.51.100.10", DNSRecordRefs: `{"A":"record-member-1-a"}`},
+		{ID: 2, Enabled: true, DNSLine: "telecom", CurrentAddress: "2600:3c15::2000:acff:fe65:9be6", DNSRecordRefs: `{"AAAA":"record-member-2-aaaa"}`},
 	}
 
 	client := &mockAliyunDNSClient{
