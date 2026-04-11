@@ -155,8 +155,39 @@ func shouldRunServiceScheduledCheck(service *models.FailoverV2Service, now time.
 	if lastChecked.IsZero() {
 		return true
 	}
+	if hasExpiredCooldownMember(service, now) {
+		return true
+	}
 	nextCheckAt := lastChecked.Add(time.Duration(normalizedServiceCheckIntervalSeconds(service)) * time.Second)
 	return !nextCheckAt.After(now)
+}
+
+func hasExpiredCooldownMember(service *models.FailoverV2Service, now time.Time) bool {
+	if service == nil {
+		return false
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+
+	for index := range service.Members {
+		member := &service.Members[index]
+		if !member.Enabled {
+			continue
+		}
+		if strings.TrimSpace(member.LastStatus) != models.FailoverV2MemberStatusCooldown {
+			continue
+		}
+		if member.CooldownSeconds <= 0 || member.LastTriggeredAt == nil {
+			return true
+		}
+		nextRun := member.LastTriggeredAt.ToTime().Add(time.Duration(member.CooldownSeconds) * time.Second)
+		if !nextRun.After(now) {
+			return true
+		}
+	}
+
+	return false
 }
 
 func evaluateServiceHealth(service *models.FailoverV2Service, latestReports map[string]*common.Report, now time.Time) []scheduledTriggerCandidate {

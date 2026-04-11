@@ -432,6 +432,62 @@ func TestRunScheduledWorkSkipsServiceBeforeCheckInterval(t *testing.T) {
 	}
 }
 
+func TestRunScheduledWorkRechecksExpiredCooldownBeforeServiceInterval(t *testing.T) {
+	configureFailoverV2RunnerTestDB(t)
+	useMockFailoverV2RunnerDeps(t)
+	if err := config.Set(config.FailoverV2SchedulerEnabledKey, true); err != nil {
+		t.Fatalf("failed to enable failover v2 scheduler: %v", err)
+	}
+
+	service, member := createTestRunnerServiceAndMember(t)
+	seedCheckedAt := models.FromTime(time.Now().Add(10 * time.Minute))
+	expiredTriggeredAt := models.FromTime(time.Now().Add(-2 * time.Minute))
+	if err := failoverv2db.UpdateServiceFieldsForUser("user-a", service.ID, map[string]interface{}{
+		"check_interval_seconds": 300,
+		"last_checked_at":        seedCheckedAt,
+	}); err != nil {
+		t.Fatalf("failed to seed service check interval: %v", err)
+	}
+	if err := failoverv2db.UpdateMemberFieldsForUser("user-a", service.ID, member.ID, map[string]interface{}{
+		"last_status":           models.FailoverV2MemberStatusCooldown,
+		"last_message":          "cooldown until stale-placeholder",
+		"last_triggered_at":     expiredTriggeredAt,
+		"cooldown_seconds":      30,
+		"trigger_failure_count": 0,
+	}); err != nil {
+		t.Fatalf("failed to seed member cooldown status: %v", err)
+	}
+
+	if err := RunScheduledWork(); err != nil {
+		t.Fatalf("run scheduled work failed: %v", err)
+	}
+
+	reloadedService, err := failoverv2db.GetServiceByIDForUser("user-a", service.ID)
+	if err != nil {
+		t.Fatalf("failed to reload service: %v", err)
+	}
+	if reloadedService.LastCheckedAt == nil {
+		t.Fatal("expected last_checked_at to be updated")
+	}
+	if reloadedService.LastCheckedAt.ToTime().Unix() == seedCheckedAt.ToTime().Unix() {
+		t.Fatalf("expected last_checked_at to change when cooldown expired, got unchanged %s", reloadedService.LastCheckedAt.ToTime())
+	}
+
+	reloadedMember, err := findMemberOnService(reloadedService, member.ID)
+	if err != nil {
+		t.Fatalf("failed to reload member: %v", err)
+	}
+	if reloadedMember.LastStatus == models.FailoverV2MemberStatusCooldown {
+		t.Fatalf("expected member status to leave cooldown after recheck, got %q", reloadedMember.LastStatus)
+	}
+	if reloadedMember.TriggerFailureCount != 1 {
+		t.Fatalf("expected trigger_failure_count=1 after missing report recheck, got %d", reloadedMember.TriggerFailureCount)
+	}
+	if !strings.Contains(reloadedMember.LastMessage, "cn_connectivity report is unavailable") {
+		t.Fatalf("expected missing report message after cooldown recheck, got %q", reloadedMember.LastMessage)
+	}
+}
+
 func TestMemberExecutionRunnerRunFailoverSuccessUpdatesMemberAndExecution(t *testing.T) {
 	configureFailoverV2RunnerTestDB(t)
 	useMockFailoverV2RunnerDeps(t)
