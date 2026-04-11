@@ -270,20 +270,31 @@ func ApplyAliyunMemberDNSDetach(ctx context.Context, userUUID string, service *m
 
 		typedCurrentAddress, hasTypedCurrentAddress := normalizeMemberAddressForRecordType(recordType, currentAddress)
 		if strings.TrimSpace(record.RecordID) != "" && recordID != "" {
-			if hasTypedCurrentAddress {
-				if !sameAddress(record.Value, typedCurrentAddress) {
-					return nil, fmt.Errorf("aliyun dns record ref for %s does not match member current address: %s", recordType, recordID)
+			if hasTypedCurrentAddress && !sameAddress(record.Value, typedCurrentAddress) {
+				if err := ensureDetachRecordDoesNotBelongToAnotherMember(
+					service,
+					member,
+					recordType,
+					record.Value,
+					func(candidate *models.FailoverV2Member) bool {
+						return memberHasAliyunLine(candidate, operation.line)
+					},
+				); err != nil {
+					return nil, err
 				}
-			} else if err := ensureDetachRecordDoesNotBelongToAnotherMember(
-				service,
-				member,
-				recordType,
-				record.Value,
-				func(candidate *models.FailoverV2Member) bool {
-					return memberHasAliyunLine(candidate, operation.line)
-				},
-			); err != nil {
-				return nil, err
+			}
+			if !hasTypedCurrentAddress {
+				if err := ensureDetachRecordDoesNotBelongToAnotherMember(
+					service,
+					member,
+					recordType,
+					record.Value,
+					func(candidate *models.FailoverV2Member) bool {
+						return memberHasAliyunLine(candidate, operation.line)
+					},
+				); err != nil {
+					return nil, err
+				}
 			}
 		}
 		existingRecordID := strings.TrimSpace(record.RecordID)
@@ -412,20 +423,31 @@ func VerifyAliyunMemberDNSDetached(ctx context.Context, userUUID string, service
 
 		typedCurrentAddress, hasTypedCurrentAddress := normalizeMemberAddressForRecordType(recordType, currentAddress)
 		if strings.TrimSpace(record.RecordID) != "" && recordID != "" {
-			if hasTypedCurrentAddress {
-				if !sameAddress(record.Value, typedCurrentAddress) {
-					return nil, fmt.Errorf("aliyun dns record ref for %s does not match member current address: %s", recordType, recordID)
+			if hasTypedCurrentAddress && !sameAddress(record.Value, typedCurrentAddress) {
+				if err := ensureDetachRecordDoesNotBelongToAnotherMember(
+					service,
+					member,
+					recordType,
+					record.Value,
+					func(candidate *models.FailoverV2Member) bool {
+						return memberHasAliyunLine(candidate, operation.line)
+					},
+				); err != nil {
+					return nil, err
 				}
-			} else if err := ensureDetachRecordDoesNotBelongToAnotherMember(
-				service,
-				member,
-				recordType,
-				record.Value,
-				func(candidate *models.FailoverV2Member) bool {
-					return memberHasAliyunLine(candidate, operation.line)
-				},
-			); err != nil {
-				return nil, err
+			}
+			if !hasTypedCurrentAddress {
+				if err := ensureDetachRecordDoesNotBelongToAnotherMember(
+					service,
+					member,
+					recordType,
+					record.Value,
+					func(candidate *models.FailoverV2Member) bool {
+						return memberHasAliyunLine(candidate, operation.line)
+					},
+				); err != nil {
+					return nil, err
+				}
 			}
 		}
 		observed = append(observed, buildAliyunMemberDNSRecordFromExisting(operation.domainName, record))
