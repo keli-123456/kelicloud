@@ -388,8 +388,8 @@ func TestApplyCloudflareMemberDNSDetachSkipsRecordWhenRefBelongsToAnotherMember(
 
 	service := testCloudflareService()
 	service.Members = []models.FailoverV2Member{
-		{ID: 1, Enabled: true, DNSLine: "telecom", CurrentAddress: "198.51.100.10"},
-		{ID: 2, Enabled: true, DNSLine: "unicom", CurrentAddress: "198.51.100.11"},
+		{ID: 1, Enabled: true, DNSLine: "telecom", CurrentAddress: "198.51.100.10", DNSRecordRefs: `{"A":"rec-member-1-a"}`},
+		{ID: 2, Enabled: true, DNSLine: "unicom", CurrentAddress: "198.51.100.11", DNSRecordRefs: `{"A":"rec-member-2-a"}`},
 	}
 
 	member := testCloudflareMember()
@@ -442,8 +442,8 @@ func TestApplyCloudflareMemberDNSDetachSkipsAAAAWhenRefBelongsToAnotherMember(t 
 	service := testCloudflareService()
 	service.DNSPayload = `{"zone_name":"example.com","record_name":"app.example.com","record_type":"A","sync_ipv6":true,"ttl":120}`
 	service.Members = []models.FailoverV2Member{
-		{ID: 1, Enabled: true, DNSLine: "telecom", CurrentAddress: "198.51.100.10"},
-		{ID: 2, Enabled: true, DNSLine: "unicom", CurrentAddress: "2600:3c15::2000:acff:fe65:9be6"},
+		{ID: 1, Enabled: true, DNSLine: "telecom", CurrentAddress: "198.51.100.10", DNSRecordRefs: `{"A":"rec-member-1-a"}`},
+		{ID: 2, Enabled: true, DNSLine: "unicom", CurrentAddress: "2600:3c15::2000:acff:fe65:9be6", DNSRecordRefs: `{"AAAA":"rec-member-2-aaaa"}`},
 	}
 
 	api := newTestCloudflareAPI([]cloudflareDNSRecord{

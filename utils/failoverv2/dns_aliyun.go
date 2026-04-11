@@ -270,31 +270,30 @@ func ApplyAliyunMemberDNSDetach(ctx context.Context, userUUID string, service *m
 
 		typedCurrentAddress, hasTypedCurrentAddress := normalizeMemberAddressForRecordType(recordType, currentAddress)
 		if strings.TrimSpace(record.RecordID) != "" && recordID != "" {
-			if hasTypedCurrentAddress && !sameAddress(record.Value, typedCurrentAddress) {
-				if detachRecordBelongsToAnotherMember(
-					service,
-					member,
-					recordType,
-					record.Value,
-					func(candidate *models.FailoverV2Member) bool {
-						return memberHasAliyunLine(candidate, operation.line)
-					},
-				) {
-					continue
-				}
+			if detachRecordReferencedByOtherMember(
+				service,
+				member,
+				recordType,
+				recordID,
+				func(candidate *models.FailoverV2Member) bool {
+					return memberHasAliyunLine(candidate, operation.line)
+				},
+			) {
+				continue
 			}
-			if !hasTypedCurrentAddress {
-				if detachRecordBelongsToAnotherMember(
-					service,
-					member,
-					recordType,
-					record.Value,
-					func(candidate *models.FailoverV2Member) bool {
-						return memberHasAliyunLine(candidate, operation.line)
-					},
-				) {
-					continue
-				}
+			if !hasTypedCurrentAddress && detachRecordBelongsToAnotherMember(
+				service,
+				member,
+				recordType,
+				record.Value,
+				func(candidate *models.FailoverV2Member) bool {
+					return memberHasAliyunLine(candidate, operation.line)
+				},
+			) {
+				continue
+			}
+			if hasTypedCurrentAddress && !sameAddress(record.Value, typedCurrentAddress) {
+				// stale ref: continue to detach as long as this record is not explicitly owned by another member
 			}
 		}
 		existingRecordID := strings.TrimSpace(record.RecordID)
@@ -423,31 +422,30 @@ func VerifyAliyunMemberDNSDetached(ctx context.Context, userUUID string, service
 
 		typedCurrentAddress, hasTypedCurrentAddress := normalizeMemberAddressForRecordType(recordType, currentAddress)
 		if strings.TrimSpace(record.RecordID) != "" && recordID != "" {
-			if hasTypedCurrentAddress && !sameAddress(record.Value, typedCurrentAddress) {
-				if detachRecordBelongsToAnotherMember(
-					service,
-					member,
-					recordType,
-					record.Value,
-					func(candidate *models.FailoverV2Member) bool {
-						return memberHasAliyunLine(candidate, operation.line)
-					},
-				) {
-					continue
-				}
+			if detachRecordReferencedByOtherMember(
+				service,
+				member,
+				recordType,
+				recordID,
+				func(candidate *models.FailoverV2Member) bool {
+					return memberHasAliyunLine(candidate, operation.line)
+				},
+			) {
+				continue
 			}
-			if !hasTypedCurrentAddress {
-				if detachRecordBelongsToAnotherMember(
-					service,
-					member,
-					recordType,
-					record.Value,
-					func(candidate *models.FailoverV2Member) bool {
-						return memberHasAliyunLine(candidate, operation.line)
-					},
-				) {
-					continue
-				}
+			if !hasTypedCurrentAddress && detachRecordBelongsToAnotherMember(
+				service,
+				member,
+				recordType,
+				record.Value,
+				func(candidate *models.FailoverV2Member) bool {
+					return memberHasAliyunLine(candidate, operation.line)
+				},
+			) {
+				continue
+			}
+			if hasTypedCurrentAddress && !sameAddress(record.Value, typedCurrentAddress) {
+				// stale ref: allow verification to proceed unless explicitly owned by another member
 			}
 		}
 		observed = append(observed, buildAliyunMemberDNSRecordFromExisting(operation.domainName, record))
