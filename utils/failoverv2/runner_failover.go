@@ -142,6 +142,7 @@ func queueMemberProvisioningFailoverExecution(userUUID string, service *models.F
 			CleanupStatus:   models.FailoverCleanupStatusSkipped,
 		},
 		startMessage,
+		true,
 		func(runner *memberExecutionRunner) {
 			runner.runProvisioningFailover()
 		},
