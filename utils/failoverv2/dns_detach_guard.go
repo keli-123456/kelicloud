@@ -1,33 +1,32 @@
 package failoverv2
 
 import (
-	"fmt"
 	"strings"
 
 	"github.com/komari-monitor/komari/database/models"
 )
 
-func ensureDetachRecordDoesNotBelongToAnotherMember(
+func detachRecordBelongsToAnotherMember(
 	service *models.FailoverV2Service,
 	member *models.FailoverV2Member,
 	recordType string,
 	recordValue string,
 	includeMember func(*models.FailoverV2Member) bool,
-) error {
+) bool {
 	if service == nil || member == nil {
-		return nil
+		return false
 	}
 
 	recordType = strings.ToUpper(strings.TrimSpace(recordType))
 	switch recordType {
 	case "A", "AAAA":
 	default:
-		return nil
+		return false
 	}
 
 	normalizedValue, err := normalizeDNSRecordIPValue("record_value", recordType, recordValue, recordType == "A")
 	if err != nil || normalizedValue == "" {
-		return nil
+		return false
 	}
 
 	for index := range service.Members {
@@ -49,13 +48,8 @@ func ensureDetachRecordDoesNotBelongToAnotherMember(
 		if !sameAddress(candidateAddress, normalizedValue) {
 			continue
 		}
-
-		label := strings.TrimSpace(candidate.Name)
-		if label == "" {
-			label = fmt.Sprintf("id:%d", candidate.ID)
-		}
-		return fmt.Errorf("dns %s record appears to belong to another member (%s)", recordType, label)
+		return true
 	}
 
-	return nil
+	return false
 }

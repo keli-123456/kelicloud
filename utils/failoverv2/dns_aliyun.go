@@ -271,7 +271,7 @@ func ApplyAliyunMemberDNSDetach(ctx context.Context, userUUID string, service *m
 		typedCurrentAddress, hasTypedCurrentAddress := normalizeMemberAddressForRecordType(recordType, currentAddress)
 		if strings.TrimSpace(record.RecordID) != "" && recordID != "" {
 			if hasTypedCurrentAddress && !sameAddress(record.Value, typedCurrentAddress) {
-				if err := ensureDetachRecordDoesNotBelongToAnotherMember(
+				if detachRecordBelongsToAnotherMember(
 					service,
 					member,
 					recordType,
@@ -279,12 +279,12 @@ func ApplyAliyunMemberDNSDetach(ctx context.Context, userUUID string, service *m
 					func(candidate *models.FailoverV2Member) bool {
 						return memberHasAliyunLine(candidate, operation.line)
 					},
-				); err != nil {
-					return nil, err
+				) {
+					continue
 				}
 			}
 			if !hasTypedCurrentAddress {
-				if err := ensureDetachRecordDoesNotBelongToAnotherMember(
+				if detachRecordBelongsToAnotherMember(
 					service,
 					member,
 					recordType,
@@ -292,8 +292,8 @@ func ApplyAliyunMemberDNSDetach(ctx context.Context, userUUID string, service *m
 					func(candidate *models.FailoverV2Member) bool {
 						return memberHasAliyunLine(candidate, operation.line)
 					},
-				); err != nil {
-					return nil, err
+				) {
+					continue
 				}
 			}
 		}
@@ -424,7 +424,7 @@ func VerifyAliyunMemberDNSDetached(ctx context.Context, userUUID string, service
 		typedCurrentAddress, hasTypedCurrentAddress := normalizeMemberAddressForRecordType(recordType, currentAddress)
 		if strings.TrimSpace(record.RecordID) != "" && recordID != "" {
 			if hasTypedCurrentAddress && !sameAddress(record.Value, typedCurrentAddress) {
-				if err := ensureDetachRecordDoesNotBelongToAnotherMember(
+				if detachRecordBelongsToAnotherMember(
 					service,
 					member,
 					recordType,
@@ -432,12 +432,12 @@ func VerifyAliyunMemberDNSDetached(ctx context.Context, userUUID string, service
 					func(candidate *models.FailoverV2Member) bool {
 						return memberHasAliyunLine(candidate, operation.line)
 					},
-				); err != nil {
-					return nil, err
+				) {
+					continue
 				}
 			}
 			if !hasTypedCurrentAddress {
-				if err := ensureDetachRecordDoesNotBelongToAnotherMember(
+				if detachRecordBelongsToAnotherMember(
 					service,
 					member,
 					recordType,
@@ -445,8 +445,8 @@ func VerifyAliyunMemberDNSDetached(ctx context.Context, userUUID string, service
 					func(candidate *models.FailoverV2Member) bool {
 						return memberHasAliyunLine(candidate, operation.line)
 					},
-				); err != nil {
-					return nil, err
+				) {
+					continue
 				}
 			}
 		}

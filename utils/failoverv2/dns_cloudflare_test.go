@@ -379,7 +379,7 @@ func TestApplyCloudflareMemberDNSDetachRemovesStoredAAAAWhenCurrentAddressIsIPv4
 	}
 }
 
-func TestApplyCloudflareMemberDNSDetachFailsWhenRefBelongsToAnotherMember(t *testing.T) {
+func TestApplyCloudflareMemberDNSDetachSkipsRecordWhenRefBelongsToAnotherMember(t *testing.T) {
 	api := newTestCloudflareAPI([]cloudflareDNSRecord{
 		{ID: "rec-member-1-a", Name: "app.example.com", Type: "A", Content: "198.51.100.10", TTL: 120},
 		{ID: "rec-member-2-a", Name: "app.example.com", Type: "A", Content: "198.51.100.11", TTL: 120},
@@ -397,13 +397,15 @@ func TestApplyCloudflareMemberDNSDetachFailsWhenRefBelongsToAnotherMember(t *tes
 	member.DNSRecordRefs = `{"A":"rec-member-2-a"}`
 	member.CurrentAddress = "198.51.100.10"
 
-	if _, err := ApplyCloudflareMemberDNSDetach(context.Background(), "user-a", service, member); err == nil {
-		t.Fatal("expected detach to fail when record ref does not match target")
-	} else if got := err.Error(); !strings.Contains(got, "another member") {
-		t.Fatalf("expected another-member protection error, got %v", err)
+	result, err := ApplyCloudflareMemberDNSDetach(context.Background(), "user-a", service, member)
+	if err != nil {
+		t.Fatalf("expected detach to continue when record belongs to another member, got %v", err)
 	}
-	if _, ok := api.records["rec-member-1-a"]; !ok {
-		t.Fatalf("expected no delete when record ref mismatches target, got %#v", api.records)
+	if _, ok := api.records["rec-member-2-a"]; !ok {
+		t.Fatalf("expected no delete when record ref belongs to another member, got %#v", api.records)
+	}
+	if len(result.Removed) != 0 {
+		t.Fatalf("expected no removed records when ref belongs to another member, got %#v", result.Removed)
 	}
 }
 
@@ -436,7 +438,7 @@ func TestApplyCloudflareMemberDNSDetachAllowsStaleAddressWhenNotAnotherMember(t 
 	}
 }
 
-func TestApplyCloudflareMemberDNSDetachFailsWhenAAAARefBelongsToAnotherMember(t *testing.T) {
+func TestApplyCloudflareMemberDNSDetachSkipsAAAAWhenRefBelongsToAnotherMember(t *testing.T) {
 	service := testCloudflareService()
 	service.DNSPayload = `{"zone_name":"example.com","record_name":"app.example.com","record_type":"A","sync_ipv6":true,"ttl":120}`
 	service.Members = []models.FailoverV2Member{
@@ -454,13 +456,15 @@ func TestApplyCloudflareMemberDNSDetachFailsWhenAAAARefBelongsToAnotherMember(t 
 	member.DNSRecordRefs = `{"AAAA":"rec-member-2-aaaa"}`
 	member.CurrentAddress = "198.51.100.10"
 
-	if _, err := ApplyCloudflareMemberDNSDetach(context.Background(), "user-a", service, member); err == nil {
-		t.Fatal("expected detach to fail when AAAA record ref belongs to another member")
-	} else if got := err.Error(); !strings.Contains(got, "another member") {
-		t.Fatalf("expected another-member protection error, got %v", err)
+	result, err := ApplyCloudflareMemberDNSDetach(context.Background(), "user-a", service, member)
+	if err != nil {
+		t.Fatalf("expected detach to continue when AAAA belongs to another member, got %v", err)
 	}
 	if _, ok := api.records["rec-member-2-aaaa"]; !ok {
 		t.Fatalf("expected no delete when AAAA ref belongs to another member, got %#v", api.records)
+	}
+	if len(result.Removed) != 0 {
+		t.Fatalf("expected no removed records when AAAA belongs to another member, got %#v", result.Removed)
 	}
 }
 
