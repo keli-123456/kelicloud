@@ -275,6 +275,36 @@ func TestApplyAliyunMemberDNSDetachRemovesStoredAAAAWhenCurrentAddressIsIPv4(t *
 	}
 }
 
+func TestApplyAliyunMemberDNSDetachSkipsMissingStoredRefs(t *testing.T) {
+	service := testAliyunService()
+	service.DNSPayload = `{"domain_name":"example.com","rr":"@","record_type":"A","sync_ipv6":true,"ttl":60}`
+
+	client := &mockAliyunDNSClient{
+		records: []aliyunDNSRecord{
+			{RecordID: "record-telecom-a", RR: "@", Type: "A", Value: "198.51.100.11", TTL: 60, Line: "telecom"},
+		},
+	}
+	useMockAliyunDNSDependencies(t, client)
+
+	member := testAliyunMember()
+	member.DNSRecordRefs = `{"A":"record-telecom-a","AAAA":"record-telecom-aaaa-missing"}`
+	member.CurrentAddress = "198.51.100.11"
+
+	result, err := ApplyAliyunMemberDNSDetach(context.Background(), "user-a", service, member)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if len(client.deleteCalls) != 1 || client.deleteCalls[0] != "record-telecom-a" {
+		t.Fatalf("expected only existing record to be deleted, got %#v", client.deleteCalls)
+	}
+	if len(result.Removed) != 1 || result.Removed[0].ID != "record-telecom-a" {
+		t.Fatalf("expected only existing record to be marked removed, got %#v", result.Removed)
+	}
+	if len(result.RecordRefs) != 0 {
+		t.Fatalf("expected record refs to be cleared, got %#v", result.RecordRefs)
+	}
+}
+
 func TestApplyAliyunMemberDNSDetachFailsWithoutRecordRefs(t *testing.T) {
 	client := &mockAliyunDNSClient{
 		records: []aliyunDNSRecord{
