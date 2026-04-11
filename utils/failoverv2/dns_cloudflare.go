@@ -280,58 +280,46 @@ func ApplyCloudflareMemberDNSDetach(ctx context.Context, userUUID string, servic
 	}
 
 	managedTypes := managedAliyunRecordTypes(operation.payload.RecordType)
-	managedTypeSet := stringSliceSet(managedTypes)
+	recordRefs, err := selectManagedRecordRefsForDetach(operation.recordRefs, managedTypes)
+	if err != nil {
+		return nil, err
+	}
 	removed := make([]CloudflareMemberDNSRecord, 0)
-	removedIDs := map[string]struct{}{}
+	removedIDs := make(map[string]struct{}, len(recordRefs))
 	currentAddress := normalizeIPAddress(member.CurrentAddress)
-
-	for recordType, recordID := range operation.recordRefs {
+	for _, managedType := range managedTypes {
+		recordType := strings.ToUpper(strings.TrimSpace(managedType))
+		if recordType == "" {
+			continue
+		}
+		recordID := strings.TrimSpace(recordRefs[recordType])
 		recordType = strings.ToUpper(strings.TrimSpace(recordType))
-		if _, ok := managedTypeSet[recordType]; !ok {
+		recordID = strings.TrimSpace(recordID)
+		if recordID == "" {
 			continue
 		}
 		record := findCloudflareDNSRecordByID(existingRecords, recordID)
 		if strings.TrimSpace(record.ID) == "" {
-			continue
+			return nil, fmt.Errorf("cloudflare dns record ref for %s not found: %s", recordType, recordID)
 		}
 		if !sameCloudflareRecordIdentity(record, operation.recordName, recordType) {
-			continue
+			return nil, fmt.Errorf("cloudflare dns record ref for %s no longer matches target: %s", recordType, recordID)
 		}
 		if currentAddress != "" {
 			typedCurrentAddress, hasTypedCurrentAddress := normalizeMemberAddressForRecordType(recordType, currentAddress)
 			if hasTypedCurrentAddress && !sameAddress(record.Content, typedCurrentAddress) {
-				continue
+				return nil, fmt.Errorf("cloudflare dns record ref for %s does not match member current address: %s", recordType, recordID)
 			}
 		}
-		if err := operation.client.deleteRecord(contextOrBackground(ctx), operation.zoneID, record.ID); err != nil {
+		existingRecordID := strings.TrimSpace(record.ID)
+		if _, ok := removedIDs[existingRecordID]; ok {
+			continue
+		}
+		if err := operation.client.deleteRecord(contextOrBackground(ctx), operation.zoneID, existingRecordID); err != nil {
 			return nil, err
 		}
-		removedIDs[record.ID] = struct{}{}
+		removedIDs[existingRecordID] = struct{}{}
 		removed = append(removed, buildCloudflareMemberDNSRecord(operation.zoneID, operation.zoneName, operation.recordName, operation.line, record))
-	}
-
-	if currentAddress != "" {
-		for _, record := range existingRecords {
-			recordType := strings.ToUpper(strings.TrimSpace(record.Type))
-			if _, ok := managedTypeSet[recordType]; !ok {
-				continue
-			}
-			if !sameCloudflareRecordIdentity(record, operation.recordName, recordType) || !sameAddress(record.Content, currentAddress) {
-				continue
-			}
-			recordID := strings.TrimSpace(record.ID)
-			if recordID == "" {
-				continue
-			}
-			if _, ok := removedIDs[recordID]; ok {
-				continue
-			}
-			if err := operation.client.deleteRecord(contextOrBackground(ctx), operation.zoneID, recordID); err != nil {
-				return nil, err
-			}
-			removedIDs[recordID] = struct{}{}
-			removed = append(removed, buildCloudflareMemberDNSRecord(operation.zoneID, operation.zoneName, operation.recordName, operation.line, record))
-		}
 	}
 
 	return &CloudflareMemberDNSResult{
@@ -462,31 +450,42 @@ func VerifyCloudflareMemberDNSDetached(ctx context.Context, userUUID string, ser
 	if err != nil {
 		return nil, err
 	}
+	managedTypes := managedAliyunRecordTypes(operation.payload.RecordType)
+	recordRefs, err := selectManagedRecordRefsForDetach(operation.recordRefs, managedTypes)
+	if err != nil {
+		return nil, err
+	}
 
 	existingRecords, err := operation.client.listRecords(contextOrBackground(ctx), operation.zoneID)
 	if err != nil {
 		return nil, err
 	}
 
-	managedTypes := stringSliceSet(managedAliyunRecordTypes(operation.payload.RecordType))
-	currentAddress := normalizeIPAddress(member.CurrentAddress)
 	observed := make([]CloudflareMemberDNSRecord, 0)
-
-	for _, record := range existingRecords {
-		recordType := strings.ToUpper(strings.TrimSpace(record.Type))
-		if _, ok := managedTypes[recordType]; !ok {
+	currentAddress := normalizeIPAddress(member.CurrentAddress)
+	for _, managedType := range managedTypes {
+		recordType := strings.ToUpper(strings.TrimSpace(managedType))
+		if recordType == "" {
 			continue
 		}
-		recordID := strings.TrimSpace(record.ID)
-		if recordID != "" {
-			if storedID := strings.TrimSpace(operation.recordRefs[recordType]); storedID != "" && storedID == recordID {
-				observed = append(observed, buildCloudflareMemberDNSRecord(operation.zoneID, operation.zoneName, operation.recordName, operation.line, record))
-				continue
+		recordID := strings.TrimSpace(recordRefs[recordType])
+		if recordID == "" {
+			continue
+		}
+		record := findCloudflareDNSRecordByID(existingRecords, recordID)
+		if strings.TrimSpace(record.ID) == "" {
+			continue
+		}
+		if !sameCloudflareRecordIdentity(record, operation.recordName, recordType) {
+			return nil, fmt.Errorf("cloudflare dns record ref for %s no longer matches target: %s", recordType, recordID)
+		}
+		if currentAddress != "" {
+			typedCurrentAddress, hasTypedCurrentAddress := normalizeMemberAddressForRecordType(recordType, currentAddress)
+			if hasTypedCurrentAddress && !sameAddress(record.Content, typedCurrentAddress) {
+				return nil, fmt.Errorf("cloudflare dns record ref for %s does not match member current address: %s", recordType, recordID)
 			}
 		}
-		if currentAddress != "" && sameCloudflareRecordIdentity(record, operation.recordName, recordType) && sameAddress(record.Content, currentAddress) {
-			observed = append(observed, buildCloudflareMemberDNSRecord(operation.zoneID, operation.zoneName, operation.recordName, operation.line, record))
-		}
+		observed = append(observed, buildCloudflareMemberDNSRecord(operation.zoneID, operation.zoneName, operation.recordName, operation.line, record))
 	}
 
 	sortCloudflareMemberDNSRecords(observed)
