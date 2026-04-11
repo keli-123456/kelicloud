@@ -248,6 +248,31 @@ func TestEvaluateMemberHealthTriggersWhenMissingReportThresholdReached(t *testin
 	}
 }
 
+func TestEvaluateMemberHealthTriggersWhenMissingReportThresholdReachedDuringCooldown(t *testing.T) {
+	now := time.Now()
+	member := &models.FailoverV2Member{
+		FailureThreshold:    2,
+		WatchClientUUID:     "client-1",
+		TriggerFailureCount: 1,
+		CooldownSeconds:     3600,
+		LastTriggeredAt:     models.FromTime(now.Add(-10 * time.Minute)),
+	}
+
+	shouldTrigger, fields, reason := evaluateMemberHealth(member, nil, now)
+	if !shouldTrigger {
+		t.Fatal("expected missing report threshold to still trigger during cooldown")
+	}
+	if got := intMapValue(fields, "trigger_failure_count"); got != 2 {
+		t.Fatalf("expected trigger_failure_count=2, got %d", got)
+	}
+	if stringMapValue(fields, "last_status") != models.FailoverV2MemberStatusTriggered {
+		t.Fatalf("expected member status triggered, got %q", stringMapValue(fields, "last_status"))
+	}
+	if reason == "" {
+		t.Fatal("expected trigger reason for missing report threshold during cooldown")
+	}
+}
+
 func TestRunScheduledWorkTriggersAutomaticFailover(t *testing.T) {
 	configureFailoverV2RunnerTestDB(t)
 	useMockFailoverV2RunnerDeps(t)
@@ -619,58 +644,37 @@ func TestRunScheduledWorkShowsHealthyStatusDuringCooldownWindow(t *testing.T) {
 	}
 }
 
-func TestRunScheduledWorkSuppressesTriggerWhenCooldownActive(t *testing.T) {
-	configureFailoverV2RunnerTestDB(t)
-	useMockFailoverV2RunnerDeps(t)
-	if err := config.Set(config.FailoverV2SchedulerEnabledKey, true); err != nil {
-		t.Fatalf("failed to enable failover v2 scheduler: %v", err)
-	}
-
-	service, member := createTestRunnerServiceAndMember(t)
-	activeTriggeredAt := models.FromTime(time.Now().Add(-15 * time.Second))
-	if err := failoverv2db.UpdateMemberFieldsForUser("user-a", service.ID, member.ID, map[string]interface{}{
-		"last_status":       models.FailoverV2MemberStatusCooldown,
-		"last_message":      "cooldown until placeholder",
-		"last_triggered_at": activeTriggeredAt,
-		"cooldown_seconds":  1800,
-	}); err != nil {
-		t.Fatalf("failed to seed member cooldown state: %v", err)
-	}
-
+func TestEvaluateMemberHealthTriggersBlockedSuspectedDuringCooldown(t *testing.T) {
 	now := time.Now()
-	ws.SetLatestReport(member.WatchClientUUID, &common.Report{
+	member := &models.FailoverV2Member{
+		FailureThreshold:    2,
+		WatchClientUUID:     "client-1",
+		TriggerFailureCount: 1,
+		CooldownSeconds:     1800,
+		LastTriggeredAt:     models.FromTime(now.Add(-15 * time.Second)),
+	}
+
+	report := &common.Report{
 		UpdatedAt: now,
 		CNConnectivity: &common.CNConnectivityReport{
 			Status:              "blocked_suspected",
 			CheckedAt:           now,
-			ConsecutiveFailures: member.FailureThreshold,
+			ConsecutiveFailures: 2,
 		},
-	})
-	t.Cleanup(func() {
-		ws.DeleteLatestReport(member.WatchClientUUID)
-	})
-
-	if err := RunScheduledWork(); err != nil {
-		t.Fatalf("run scheduled work failed: %v", err)
 	}
 
-	reloadedService, err := failoverv2db.GetServiceByIDForUser("user-a", service.ID)
-	if err != nil {
-		t.Fatalf("failed to reload service: %v", err)
+	shouldTrigger, fields, reason := evaluateMemberHealth(member, report, now)
+	if !shouldTrigger {
+		t.Fatal("expected blocked_suspected threshold to still trigger during cooldown")
 	}
-	if reloadedService.LastExecutionID != nil {
-		t.Fatalf("expected cooldown to suppress auto-trigger, got last_execution_id=%d", *reloadedService.LastExecutionID)
+	if stringMapValue(fields, "last_status") != models.FailoverV2MemberStatusTriggered {
+		t.Fatalf("expected member status triggered, got %q", stringMapValue(fields, "last_status"))
 	}
-
-	reloadedMember, err := findMemberOnService(reloadedService, member.ID)
-	if err != nil {
-		t.Fatalf("failed to reload member: %v", err)
+	if !strings.Contains(strings.ToLower(stringMapValue(fields, "last_message")), "cooldown until") {
+		t.Fatalf("expected cooldown hint in message, got %q", stringMapValue(fields, "last_message"))
 	}
-	if reloadedMember.LastStatus != models.FailoverV2MemberStatusTriggered {
-		t.Fatalf("expected member status triggered when probe is blocked, got %q", reloadedMember.LastStatus)
-	}
-	if !strings.Contains(strings.ToLower(reloadedMember.LastMessage), "cooldown until") {
-		t.Fatalf("expected cooldown hint in message when trigger is suppressed, got %q", reloadedMember.LastMessage)
+	if reason == "" {
+		t.Fatal("expected trigger reason for blocked_suspected threshold during cooldown")
 	}
 }
 
