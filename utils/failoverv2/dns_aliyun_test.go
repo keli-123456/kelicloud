@@ -208,6 +208,51 @@ func TestApplyAliyunMemberDNSAttachUpdatesOnlyTargetLine(t *testing.T) {
 	}
 }
 
+func TestApplyAliyunMemberDNSAttachDoesNotReuseSelectedRecordForAnotherExpectedValue(t *testing.T) {
+	service := testAliyunService()
+	service.DNSPayload = `{"domain_name":"example.com","rr":"@","record_type":"AAAA","ttl":600}`
+	service.Members = []models.FailoverV2Member{
+		{ID: 1, Enabled: true, DNSLine: "telecom", CurrentAddress: "2001:db8::8"},
+		{ID: 2, Enabled: true, DNSLine: "telecom", CurrentAddress: "2600:3c15::2000:acff:fe65:9be6"},
+	}
+
+	client := &mockAliyunDNSClient{
+		records: []aliyunDNSRecord{
+			{
+				RecordID: "record-telecom-aaaa-other-member",
+				RR:       "@",
+				Type:     "AAAA",
+				Value:    "2600:3c15::2000:acff:fe65:9be6",
+				TTL:      600,
+				Line:     "telecom",
+			},
+		},
+	}
+	useMockAliyunDNSDependencies(t, client)
+
+	member := testAliyunMember()
+	member.ID = 1
+	member.DNSLine = "telecom"
+	member.DNSRecordRefs = `{}`
+
+	result, err := ApplyAliyunMemberDNSAttach(context.Background(), "user-a", service, member, "", "2001:db8::8")
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if len(client.upsertCalls) != 2 {
+		t.Fatalf("expected two upsert calls (update+create), got %#v", client.upsertCalls)
+	}
+	if client.upsertCalls[0].ExistingRecordID != "record-telecom-aaaa-other-member" || client.upsertCalls[0].Value != "2001:db8::8" {
+		t.Fatalf("unexpected first upsert call: %#v", client.upsertCalls[0])
+	}
+	if client.upsertCalls[1].ExistingRecordID != "" || client.upsertCalls[1].Value != "2600:3c15::2000:acff:fe65:9be6" {
+		t.Fatalf("expected second upsert to create old-member AAAA record, got %#v", client.upsertCalls[1])
+	}
+	if got := result.RecordRefs["AAAA"]; got != "record-telecom-aaaa-other-member" {
+		t.Fatalf("expected target AAAA record ref to remain on updated record, got %#v", result.RecordRefs)
+	}
+}
+
 func TestApplyAliyunMemberDNSDetachRemovesOnlyManagedTargetLine(t *testing.T) {
 	service := testAliyunService()
 	service.DNSPayload = `{"domain_name":"example.com","rr":"@","record_type":"A","sync_ipv6":true,"ttl":60}`

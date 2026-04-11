@@ -171,7 +171,7 @@ func ApplyCloudflareMemberDNSAttach(ctx context.Context, userUUID string, servic
 		targetRecord := cloudflareDNSRecord{}
 
 		for _, expectedValue := range expectedValues {
-			existingMatch := findCloudflareMatchingRecord(existingRecords, operation.recordName, recordType, expectedValue)
+			existingMatch := findCloudflareMatchingRecordForAssignment(existingRecords, selectedRecordIDs, operation.recordName, recordType, expectedValue)
 			if strings.TrimSpace(existingMatch.ID) == "" {
 				existingMatch = findCloudflareRecordForAssignment(existingRecords, selectedRecordIDs, operation.recordName, recordType)
 			}
@@ -737,6 +737,25 @@ func findCloudflareMatchingRecord(records []cloudflareDNSRecord, name, recordTyp
 	for _, record := range records {
 		if !sameCloudflareRecordIdentity(record, name, recordType) || !sameAddress(record.Content, content) {
 			continue
+		}
+		return record
+	}
+	return cloudflareDNSRecord{}
+}
+
+func findCloudflareMatchingRecordForAssignment(records []cloudflareDNSRecord, selectedRecordIDs map[string]struct{}, name, recordType, content string) cloudflareDNSRecord {
+	for _, record := range records {
+		if !sameCloudflareRecordIdentity(record, name, recordType) || !sameAddress(record.Content, content) {
+			continue
+		}
+		recordID := strings.TrimSpace(record.ID)
+		if recordID == "" {
+			continue
+		}
+		if selectedRecordIDs != nil {
+			if _, ok := selectedRecordIDs[recordID]; ok {
+				continue
+			}
 		}
 		return record
 	}

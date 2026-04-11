@@ -245,6 +245,64 @@ func TestApplyCloudflareMemberDNSAttachPrunesNonMemberRecords(t *testing.T) {
 	}
 }
 
+func TestApplyCloudflareMemberDNSAttachDoesNotReuseSelectedRecordForAnotherExpectedValue(t *testing.T) {
+	service := testCloudflareService()
+	service.DNSPayload = `{"zone_name":"example.com","record_name":"app.example.com","record_type":"AAAA","ttl":600}`
+	service.Members = []models.FailoverV2Member{
+		{ID: 1, Enabled: true, DNSLine: "telecom", CurrentAddress: "2001:db8::8"},
+		{ID: 2, Enabled: true, DNSLine: "telecom", CurrentAddress: "2600:3c15::2000:acff:fe65:9be6"},
+	}
+
+	api := newTestCloudflareAPI([]cloudflareDNSRecord{
+		{
+			ID:      "rec-telecom-aaaa-other-member",
+			Name:    "app.example.com",
+			Type:    "AAAA",
+			Content: "2600:3c15::2000:acff:fe65:9be6",
+			TTL:     600,
+		},
+	})
+	useMockCloudflareDNSDependencies(t, api)
+
+	member := testCloudflareMember()
+	member.ID = 1
+	member.DNSLine = "telecom"
+	member.DNSRecordRefs = `{}`
+
+	result, err := ApplyCloudflareMemberDNSAttach(context.Background(), "user-a", service, member, "", "2001:db8::8")
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+
+	aaaaValues := map[string]struct{}{}
+	for _, record := range api.records {
+		if strings.EqualFold(record.Name, "app.example.com") && strings.EqualFold(record.Type, "AAAA") {
+			aaaaValues[record.Content] = struct{}{}
+		}
+	}
+	if _, ok := aaaaValues["2001:db8::8"]; !ok {
+		t.Fatalf("expected target AAAA value to exist after attach, got %#v", api.records)
+	}
+	if _, ok := aaaaValues["2600:3c15::2000:acff:fe65:9be6"]; !ok {
+		t.Fatalf("expected other member AAAA value to be preserved after attach, got %#v", api.records)
+	}
+	if len(aaaaValues) != 2 {
+		t.Fatalf("expected two distinct AAAA values after attach, got %#v", aaaaValues)
+	}
+
+	targetRecordID := strings.TrimSpace(result.RecordRefs["AAAA"])
+	if targetRecordID == "" {
+		t.Fatalf("expected AAAA record ref in result, got %#v", result.RecordRefs)
+	}
+	targetRecord, ok := api.records[targetRecordID]
+	if !ok {
+		t.Fatalf("expected target record id %q to exist, got %#v", targetRecordID, api.records)
+	}
+	if targetRecord.Content != "2001:db8::8" {
+		t.Fatalf("expected target record content to match member ipv6, got %#v", targetRecord)
+	}
+}
+
 func TestApplyCloudflareMemberDNSDetachFallsBackToCurrentAddressWhenRecordRefsMissing(t *testing.T) {
 	api := newTestCloudflareAPI([]cloudflareDNSRecord{
 		{ID: "rec-old-a", Name: "app.example.com", Type: "A", Content: "198.51.100.10", TTL: 120},
