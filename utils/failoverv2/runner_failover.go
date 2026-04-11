@@ -33,6 +33,7 @@ var (
 	failoverV2WaitClientFunc      = waitForClientByGroup
 	failoverV2ValidateOutletFunc  = waitForHealthyClientConnectivity
 	failoverV2RunScriptsFunc      = runFailoverV2Scripts
+	failoverV2GetClientByUUIDFunc = clientdb.GetClientByUUIDForUser
 )
 
 type commandResult struct {
@@ -228,6 +229,8 @@ func (r *memberExecutionRunner) runProvisioningFailover() {
 		return
 	}
 
+	r.mergeOutcomeAddressesFromClient(targetClientUUID, outcome)
+
 	attachResult, attachVerification, err := r.attachMemberDNSFlow(baseDetail, outcome)
 	if err != nil {
 		r.failExecution(executionFailureMessage("", err))
@@ -286,6 +289,41 @@ func (r *memberExecutionRunner) runProvisioningFailover() {
 
 func (r *memberExecutionRunner) runFailover() {
 	r.runProvisioningFailover()
+}
+
+func (r *memberExecutionRunner) mergeOutcomeAddressesFromClient(clientUUID string, outcome *memberProvisionOutcome) {
+	if outcome == nil {
+		return
+	}
+	clientUUID = strings.TrimSpace(clientUUID)
+	if clientUUID == "" {
+		return
+	}
+	if strings.TrimSpace(outcome.IPv4) != "" && strings.TrimSpace(outcome.IPv6) != "" {
+		return
+	}
+
+	client, err := failoverV2GetClientByUUIDFunc(clientUUID, r.userUUID)
+	if err != nil {
+		return
+	}
+
+	if strings.TrimSpace(outcome.IPv4) == "" {
+		outcome.IPv4 = normalizeIPAddress(client.IPv4)
+	}
+	if strings.TrimSpace(outcome.IPv6) == "" {
+		outcome.IPv6 = normalizeIPAddress(client.IPv6)
+	}
+
+	if outcome.NewAddresses == nil {
+		outcome.NewAddresses = map[string]interface{}{}
+	}
+	if _, exists := outcome.NewAddresses["ipv4"]; !exists && strings.TrimSpace(outcome.IPv4) != "" {
+		outcome.NewAddresses["ipv4"] = outcome.IPv4
+	}
+	if _, exists := outcome.NewAddresses["ipv6"]; !exists && strings.TrimSpace(outcome.IPv6) != "" {
+		outcome.NewAddresses["ipv6"] = outcome.IPv6
+	}
 }
 
 func (r *memberExecutionRunner) cleanupOldInstanceBeforeProvisionIfRequired() (string, map[string]interface{}, string, error) {

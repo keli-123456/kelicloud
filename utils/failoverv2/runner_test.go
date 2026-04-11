@@ -100,6 +100,7 @@ func useMockFailoverV2RunnerDeps(t *testing.T) {
 	previousScripts := failoverV2RunScriptsFunc
 	previousAttach := failoverV2AttachDNSFunc
 	previousVerifyAttach := failoverV2VerifyAttachDNSFunc
+	previousGetClient := failoverV2GetClientByUUIDFunc
 	previousResolveCleanup := failoverV2ResolveOldInstanceCleanupFunc
 	previousResolveCleanupFromRef := failoverV2ResolveOldInstanceCleanupFromRefFunc
 	previousLoadConfig := loadAliyunDNSConfigFunc
@@ -137,6 +138,7 @@ func useMockFailoverV2RunnerDeps(t *testing.T) {
 		failoverV2RunScriptsFunc = previousScripts
 		failoverV2AttachDNSFunc = previousAttach
 		failoverV2VerifyAttachDNSFunc = previousVerifyAttach
+		failoverV2GetClientByUUIDFunc = previousGetClient
 		failoverV2ResolveOldInstanceCleanupFunc = previousResolveCleanup
 		failoverV2ResolveOldInstanceCleanupFromRefFunc = previousResolveCleanupFromRef
 		loadAliyunDNSConfigFunc = previousLoadConfig
@@ -376,6 +378,69 @@ func TestRunScheduledWorkSkipsAutomaticFailoverWhenSchedulerDisabled(t *testing.
 	}
 	if reloadedService.LastExecutionID != nil {
 		t.Fatalf("expected no execution while scheduler disabled, got last_execution_id=%d", *reloadedService.LastExecutionID)
+	}
+}
+
+func TestRunMemberFailoverBackfillsIPv6FromReplacementClientBeforeAttach(t *testing.T) {
+	configureFailoverV2RunnerTestDB(t)
+	useMockFailoverV2RunnerDeps(t)
+
+	service, member := createTestRunnerServiceAndMember(t)
+
+	failoverV2DetachDNSFunc = func(ctx context.Context, userUUID string, service *models.FailoverV2Service, member *models.FailoverV2Member) (interface{}, error) {
+		return &AliyunMemberDNSResult{Line: member.DNSLine, RecordRefs: map[string]string{}}, nil
+	}
+	failoverV2VerifyDetachDNSFunc = func(ctx context.Context, userUUID string, service *models.FailoverV2Service, member *models.FailoverV2Member) (interface{}, error) {
+		return &AliyunMemberDNSVerification{Line: member.DNSLine, Success: true}, nil
+	}
+	failoverV2ProvisionFunc = func(ctx context.Context, userUUID string, service *models.FailoverV2Service, member *models.FailoverV2Member) (*memberProvisionOutcome, error) {
+		return &memberProvisionOutcome{
+			IPv4:             "203.0.113.8",
+			AutoConnectGroup: "failover-v2/1/1",
+			NewInstanceRef:   map[string]interface{}{"provider": "linode", "instance_id": 123},
+			NewAddresses:     map[string]interface{}{"ipv4": "203.0.113.8"},
+		}, nil
+	}
+	failoverV2WaitClientFunc = func(ctx context.Context, userUUID, group, excludeUUID string, startedAt time.Time, timeoutSeconds int, expectedAddresses map[string]struct{}) (string, error) {
+		return "client-new", nil
+	}
+	failoverV2ValidateOutletFunc = func(ctx context.Context, userUUID, clientUUID string, startedAt time.Time) (*common.Report, error) {
+		return &common.Report{CNConnectivity: &common.CNConnectivityReport{Status: "ok"}}, nil
+	}
+	failoverV2RunScriptsFunc = func(ctx context.Context, userUUID, clientUUID string, service *models.FailoverV2Service) (interface{}, error) {
+		return map[string]interface{}{"count": 0}, nil
+	}
+	failoverV2GetClientByUUIDFunc = func(uuid, userUUID string) (models.Client, error) {
+		return models.Client{
+			UUID: uuid,
+			IPv4: "203.0.113.8",
+			IPv6: "2001:db8::10",
+		}, nil
+	}
+
+	attachedIPv4 := ""
+	attachedIPv6 := ""
+	failoverV2AttachDNSFunc = func(ctx context.Context, userUUID string, service *models.FailoverV2Service, member *models.FailoverV2Member, ipv4, ipv6 string) (interface{}, error) {
+		attachedIPv4 = strings.TrimSpace(ipv4)
+		attachedIPv6 = strings.TrimSpace(ipv6)
+		return &AliyunMemberDNSResult{Line: member.DNSLine, RecordRefs: map[string]string{"A": "record-a", "AAAA": "record-aaaa"}}, nil
+	}
+	failoverV2VerifyAttachDNSFunc = func(ctx context.Context, userUUID string, service *models.FailoverV2Service, member *models.FailoverV2Member, ipv4, ipv6 string) (interface{}, error) {
+		return &AliyunMemberDNSVerification{Line: member.DNSLine, Success: true}, nil
+	}
+
+	execution, err := RunMemberFailoverNowForUser("user-a", service.ID, member.ID)
+	if err != nil {
+		t.Fatalf("run member failover failed: %v", err)
+	}
+
+	waitForFailoverV2ExecutionStatus(t, "user-a", service.ID, execution.ID, models.FailoverV2ExecutionStatusSuccess)
+
+	if attachedIPv4 != "203.0.113.8" {
+		t.Fatalf("expected attach flow to keep ipv4, got %q", attachedIPv4)
+	}
+	if attachedIPv6 != "2001:db8::10" {
+		t.Fatalf("expected attach flow to backfill ipv6 from replacement client, got %q", attachedIPv6)
 	}
 }
 
