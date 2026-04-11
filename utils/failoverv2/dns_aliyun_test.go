@@ -305,7 +305,7 @@ func TestApplyAliyunMemberDNSDetachSkipsMissingStoredRefs(t *testing.T) {
 	}
 }
 
-func TestApplyAliyunMemberDNSDetachFailsWithoutRecordRefs(t *testing.T) {
+func TestApplyAliyunMemberDNSDetachFallsBackToCurrentAddressWhenRecordRefsMissing(t *testing.T) {
 	client := &mockAliyunDNSClient{
 		records: []aliyunDNSRecord{
 			{RecordID: "record-telecom-a-old", RR: "@", Type: "A", Value: "198.51.100.10", TTL: 60, Line: "telecom"},
@@ -318,13 +318,15 @@ func TestApplyAliyunMemberDNSDetachFailsWithoutRecordRefs(t *testing.T) {
 	member.DNSRecordRefs = `{}`
 	member.CurrentAddress = "198.51.100.10"
 
-	if _, err := ApplyAliyunMemberDNSDetach(context.Background(), "user-a", testAliyunService(), member); err == nil {
-		t.Fatal("expected detach to fail when managed record refs are missing")
-	} else if got := err.Error(); !strings.Contains(got, "record refs are required") {
-		t.Fatalf("expected missing record refs error, got %v", err)
+	result, err := ApplyAliyunMemberDNSDetach(context.Background(), "user-a", testAliyunService(), member)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
 	}
-	if len(client.deleteCalls) != 0 {
-		t.Fatalf("expected no deletes when refs are missing, got %#v", client.deleteCalls)
+	if len(client.deleteCalls) != 1 || client.deleteCalls[0] != "record-telecom-a-old" {
+		t.Fatalf("expected only matching current address record to be deleted, got %#v", client.deleteCalls)
+	}
+	if len(result.Removed) != 1 || result.Removed[0].ID != "record-telecom-a-old" {
+		t.Fatalf("expected only existing matching record to be marked removed, got %#v", result.Removed)
 	}
 }
 

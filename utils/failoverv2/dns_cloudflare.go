@@ -293,19 +293,24 @@ func ApplyCloudflareMemberDNSDetach(ctx context.Context, userUUID string, servic
 			continue
 		}
 		recordID := strings.TrimSpace(recordRefs[recordType])
-		recordType = strings.ToUpper(strings.TrimSpace(recordType))
-		recordID = strings.TrimSpace(recordID)
-		if recordID == "" {
-			continue
-		}
 		record := findCloudflareDNSRecordByID(existingRecords, recordID)
 		if strings.TrimSpace(record.ID) == "" {
-			return nil, fmt.Errorf("cloudflare dns record ref for %s not found: %s", recordType, recordID)
-		}
-		if !sameCloudflareRecordIdentity(record, operation.recordName, recordType) {
+			if currentAddress == "" {
+				continue
+			}
+			typedCurrentAddress, hasTypedCurrentAddress := normalizeMemberAddressForRecordType(recordType, currentAddress)
+			if !hasTypedCurrentAddress {
+				continue
+			}
+			record = findCloudflareMatchingRecord(existingRecords, operation.recordName, recordType, typedCurrentAddress)
+			if strings.TrimSpace(record.ID) == "" {
+				continue
+			}
+		} else if !sameCloudflareRecordIdentity(record, operation.recordName, recordType) {
 			return nil, fmt.Errorf("cloudflare dns record ref for %s no longer matches target: %s", recordType, recordID)
 		}
-		if currentAddress != "" {
+
+		if strings.TrimSpace(record.ID) != "" && currentAddress != "" && recordID != "" {
 			typedCurrentAddress, hasTypedCurrentAddress := normalizeMemberAddressForRecordType(recordType, currentAddress)
 			if hasTypedCurrentAddress && !sameAddress(record.Content, typedCurrentAddress) {
 				return nil, fmt.Errorf("cloudflare dns record ref for %s does not match member current address: %s", recordType, recordID)
@@ -469,17 +474,24 @@ func VerifyCloudflareMemberDNSDetached(ctx context.Context, userUUID string, ser
 			continue
 		}
 		recordID := strings.TrimSpace(recordRefs[recordType])
-		if recordID == "" {
-			continue
-		}
 		record := findCloudflareDNSRecordByID(existingRecords, recordID)
 		if strings.TrimSpace(record.ID) == "" {
-			continue
-		}
-		if !sameCloudflareRecordIdentity(record, operation.recordName, recordType) {
+			if currentAddress == "" {
+				continue
+			}
+			typedCurrentAddress, hasTypedCurrentAddress := normalizeMemberAddressForRecordType(recordType, currentAddress)
+			if !hasTypedCurrentAddress {
+				continue
+			}
+			record = findCloudflareMatchingRecord(existingRecords, operation.recordName, recordType, typedCurrentAddress)
+			if strings.TrimSpace(record.ID) == "" {
+				continue
+			}
+		} else if !sameCloudflareRecordIdentity(record, operation.recordName, recordType) {
 			return nil, fmt.Errorf("cloudflare dns record ref for %s no longer matches target: %s", recordType, recordID)
 		}
-		if currentAddress != "" {
+
+		if strings.TrimSpace(record.ID) != "" && currentAddress != "" && recordID != "" {
 			typedCurrentAddress, hasTypedCurrentAddress := normalizeMemberAddressForRecordType(recordType, currentAddress)
 			if hasTypedCurrentAddress && !sameAddress(record.Content, typedCurrentAddress) {
 				return nil, fmt.Errorf("cloudflare dns record ref for %s does not match member current address: %s", recordType, recordID)

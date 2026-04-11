@@ -2,7 +2,6 @@ package failoverv2
 
 import (
 	"encoding/json"
-	"fmt"
 	"strconv"
 	"strings"
 )
@@ -74,9 +73,6 @@ func selectManagedRecordRefsForDetach(recordRefs map[string]string, managedTypes
 			continue
 		}
 		selected[recordType] = recordID
-	}
-	if len(selected) == 0 {
-		return nil, fmt.Errorf("managed dns record refs are required for detach")
 	}
 	return selected, nil
 }

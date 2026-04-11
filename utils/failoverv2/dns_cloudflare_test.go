@@ -245,7 +245,7 @@ func TestApplyCloudflareMemberDNSAttachPrunesNonMemberRecords(t *testing.T) {
 	}
 }
 
-func TestApplyCloudflareMemberDNSDetachFailsWithoutRecordRefs(t *testing.T) {
+func TestApplyCloudflareMemberDNSDetachFallsBackToCurrentAddressWhenRecordRefsMissing(t *testing.T) {
 	api := newTestCloudflareAPI([]cloudflareDNSRecord{
 		{ID: "rec-old-a", Name: "app.example.com", Type: "A", Content: "198.51.100.10", TTL: 120},
 		{ID: "rec-other-a", Name: "app.example.com", Type: "A", Content: "198.51.100.11", TTL: 120},
@@ -255,13 +255,18 @@ func TestApplyCloudflareMemberDNSDetachFailsWithoutRecordRefs(t *testing.T) {
 	member := testCloudflareMember()
 	member.CurrentAddress = "198.51.100.10"
 
-	if _, err := ApplyCloudflareMemberDNSDetach(context.Background(), "user-a", testCloudflareService(), member); err == nil {
-		t.Fatal("expected detach to fail when managed record refs are missing")
-	} else if got := err.Error(); !strings.Contains(got, "record refs are required") {
-		t.Fatalf("expected missing record refs error, got %v", err)
+	result, err := ApplyCloudflareMemberDNSDetach(context.Background(), "user-a", testCloudflareService(), member)
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
 	}
-	if _, ok := api.records["rec-old-a"]; !ok {
-		t.Fatalf("expected no delete when refs are missing, got %#v", api.records)
+	if _, ok := api.records["rec-old-a"]; ok {
+		t.Fatalf("expected matching current address record to be deleted, got %#v", api.records)
+	}
+	if _, ok := api.records["rec-other-a"]; !ok {
+		t.Fatalf("expected non-matching record to remain, got %#v", api.records)
+	}
+	if len(result.Removed) != 1 || result.Removed[0].ID != "rec-old-a" {
+		t.Fatalf("expected only matching record to be removed, got %#v", result.Removed)
 	}
 }
 

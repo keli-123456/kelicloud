@@ -251,23 +251,33 @@ func ApplyAliyunMemberDNSDetach(ctx context.Context, userUUID string, service *m
 			continue
 		}
 		recordID := strings.TrimSpace(recordRefs[recordType])
-		if recordID == "" {
-			continue
-		}
 		record := findAliyunDNSRecordByID(existingRecords, recordID)
 		if strings.TrimSpace(record.RecordID) == "" {
-			continue
-		}
-		if !sameAliyunRecordIdentity(record, operation.rr, recordType) || !sameAliyunRecordLine(record.Line, operation.line) {
+			if currentAddress == "" {
+				continue
+			}
+			typedCurrentAddress, hasTypedCurrentAddress := normalizeMemberAddressForRecordType(recordType, currentAddress)
+			if !hasTypedCurrentAddress {
+				continue
+			}
+			record = findAliyunDNSRecordExactMatch(existingRecords, operation.rr, recordType, operation.line, typedCurrentAddress)
+			if strings.TrimSpace(record.RecordID) == "" {
+				continue
+			}
+		} else if !sameAliyunRecordIdentity(record, operation.rr, recordType) || !sameAliyunRecordLine(record.Line, operation.line) {
 			return nil, fmt.Errorf("aliyun dns record ref for %s no longer matches target: %s", recordType, recordID)
 		}
-		if currentAddress != "" {
+
+		if strings.TrimSpace(record.RecordID) != "" && currentAddress != "" && recordID != "" {
 			typedCurrentAddress, hasTypedCurrentAddress := normalizeMemberAddressForRecordType(recordType, currentAddress)
 			if hasTypedCurrentAddress && !sameAddress(record.Value, typedCurrentAddress) {
 				return nil, fmt.Errorf("aliyun dns record ref for %s does not match member current address: %s", recordType, recordID)
 			}
 		}
 		existingRecordID := strings.TrimSpace(record.RecordID)
+		if existingRecordID == "" {
+			continue
+		}
 		if _, ok := removedRecordIDs[existingRecordID]; ok {
 			continue
 		}
@@ -371,17 +381,24 @@ func VerifyAliyunMemberDNSDetached(ctx context.Context, userUUID string, service
 			continue
 		}
 		recordID := strings.TrimSpace(recordRefs[recordType])
-		if recordID == "" {
-			continue
-		}
 		record := findAliyunDNSRecordByID(existingRecords, recordID)
 		if strings.TrimSpace(record.RecordID) == "" {
-			continue
-		}
-		if !sameAliyunRecordIdentity(record, operation.rr, recordType) || !sameAliyunRecordLine(record.Line, operation.line) {
+			if currentAddress == "" {
+				continue
+			}
+			typedCurrentAddress, hasTypedCurrentAddress := normalizeMemberAddressForRecordType(recordType, currentAddress)
+			if !hasTypedCurrentAddress {
+				continue
+			}
+			record = findAliyunDNSRecordExactMatch(existingRecords, operation.rr, recordType, operation.line, typedCurrentAddress)
+			if strings.TrimSpace(record.RecordID) == "" {
+				continue
+			}
+		} else if !sameAliyunRecordIdentity(record, operation.rr, recordType) || !sameAliyunRecordLine(record.Line, operation.line) {
 			return nil, fmt.Errorf("aliyun dns record ref for %s no longer matches target: %s", recordType, recordID)
 		}
-		if currentAddress != "" {
+
+		if strings.TrimSpace(record.RecordID) != "" && currentAddress != "" && recordID != "" {
 			typedCurrentAddress, hasTypedCurrentAddress := normalizeMemberAddressForRecordType(recordType, currentAddress)
 			if hasTypedCurrentAddress && !sameAddress(record.Value, typedCurrentAddress) {
 				return nil, fmt.Errorf("aliyun dns record ref for %s does not match member current address: %s", recordType, recordID)
