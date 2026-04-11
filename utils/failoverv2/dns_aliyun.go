@@ -127,11 +127,39 @@ func ApplyAliyunMemberDNSAttach(ctx context.Context, userUUID string, service *m
 
 		selectedRecordIDs := map[string]struct{}{}
 		targetRecordID := ""
+		ownedRecordID := strings.TrimSpace(operation.recordRefs[recordType])
+		if ownedRecordID != "" && detachRecordReferencedByOtherMember(
+			service,
+			member,
+			recordType,
+			ownedRecordID,
+			func(candidate *models.FailoverV2Member) bool {
+				return memberHasAliyunLine(candidate, operation.line)
+			},
+		) {
+			ownedRecordID = ""
+		}
 
 		for _, expectedValue := range expectedValues {
-			existingMatch := findAliyunDNSRecordExactMatchForAssignment(existingRecords, selectedRecordIDs, operation.rr, recordType, operation.line, expectedValue)
+			isTargetExpected := targetValue != "" && sameAddress(expectedValue, targetValue)
+			existingMatch := aliyunDNSRecord{}
+			if isTargetExpected && ownedRecordID != "" {
+				owned := findAliyunDNSRecordByID(existingRecords, ownedRecordID)
+				if strings.TrimSpace(owned.RecordID) != "" &&
+					sameAliyunRecordIdentity(owned, operation.rr, recordType) &&
+					sameAliyunRecordLine(owned.Line, operation.line) {
+					if _, selected := selectedRecordIDs[ownedRecordID]; !selected {
+						existingMatch = owned
+					}
+				}
+			}
 			if strings.TrimSpace(existingMatch.RecordID) == "" {
-				existingMatch = findAliyunDNSRecordForAssignment(existingRecords, selectedRecordIDs, operation.rr, recordType, operation.line)
+				existingMatch = findAliyunDNSRecordExactMatchForAssignment(existingRecords, selectedRecordIDs, operation.rr, recordType, operation.line, expectedValue)
+			}
+			if strings.TrimSpace(existingMatch.RecordID) == "" {
+				if !isTargetExpected {
+					existingMatch = findAliyunDNSRecordForAssignment(existingRecords, selectedRecordIDs, operation.rr, recordType, operation.line)
+				}
 			}
 			recordID := strings.TrimSpace(existingMatch.RecordID)
 			if recordID == "" || !sameAliyunRecordValue(existingMatch.Value, expectedValue) || existingMatch.TTL != operation.ttl {
