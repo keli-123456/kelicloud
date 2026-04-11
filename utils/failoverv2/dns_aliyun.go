@@ -256,7 +256,7 @@ func ApplyAliyunMemberDNSDetach(ctx context.Context, userUUID string, service *m
 		}
 		record := findAliyunDNSRecordByID(existingRecords, recordID)
 		if strings.TrimSpace(record.RecordID) == "" {
-			return nil, fmt.Errorf("aliyun dns record ref for %s not found: %s", recordType, recordID)
+			continue
 		}
 		if !sameAliyunRecordIdentity(record, operation.rr, recordType) || !sameAliyunRecordLine(record.Line, operation.line) {
 			return nil, fmt.Errorf("aliyun dns record ref for %s no longer matches target: %s", recordType, recordID)
