@@ -243,9 +243,16 @@ func queueMemberExecution(
 	if err := ensureMemberTargetAvailableFromLegacyFailover(userUUID, member); err != nil {
 		return nil, err
 	}
-	if _, err := EnsureServiceDNSOwnershipAvailable(userUUID, service.ID, service); err != nil {
+	ownership, err := claimServiceExecutionLocks(userUUID, service)
+	if err != nil {
 		return nil, err
 	}
+	locksHeld := true
+	defer func() {
+		if locksHeld {
+			releaseServiceExecutionLocks(service.ID, ownership)
+		}
+	}()
 
 	now := time.Now()
 	executionTemplate.StartedAt = models.FromTime(now)
@@ -277,7 +284,8 @@ func queueMemberExecution(
 		return nil, err
 	}
 
-	go func(serviceCopy models.FailoverV2Service, memberCopy models.FailoverV2Member, executionCopy models.FailoverV2Execution) {
+	go func(serviceCopy models.FailoverV2Service, memberCopy models.FailoverV2Member, executionCopy models.FailoverV2Execution, ownershipCopy *ServiceDNSOwnership) {
+		defer releaseServiceExecutionLocks(serviceCopy.ID, ownershipCopy)
 		ctx, cancel := context.WithCancel(context.Background())
 		registerExecutionCancel(executionCopy.ID, cancel)
 		defer unregisterExecutionCancel(executionCopy.ID)
@@ -289,7 +297,8 @@ func queueMemberExecution(
 			ctx:       ctx,
 		}
 		run(runner)
-	}(*service, *member, *execution)
+	}(*service, *member, *execution, ownership)
+	locksHeld = false
 
 	return execution, nil
 }
