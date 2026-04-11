@@ -310,10 +310,14 @@ func ApplyCloudflareMemberDNSDetach(ctx context.Context, userUUID string, servic
 			return nil, fmt.Errorf("cloudflare dns record ref for %s no longer matches target: %s", recordType, recordID)
 		}
 
-		if strings.TrimSpace(record.ID) != "" && currentAddress != "" && recordID != "" {
-			typedCurrentAddress, hasTypedCurrentAddress := normalizeMemberAddressForRecordType(recordType, currentAddress)
-			if hasTypedCurrentAddress && !sameAddress(record.Content, typedCurrentAddress) {
-				return nil, fmt.Errorf("cloudflare dns record ref for %s does not match member current address: %s", recordType, recordID)
+		typedCurrentAddress, hasTypedCurrentAddress := normalizeMemberAddressForRecordType(recordType, currentAddress)
+		if strings.TrimSpace(record.ID) != "" && recordID != "" {
+			if hasTypedCurrentAddress {
+				if !sameAddress(record.Content, typedCurrentAddress) {
+					return nil, fmt.Errorf("cloudflare dns record ref for %s does not match member current address: %s", recordType, recordID)
+				}
+			} else if err := ensureDetachRecordDoesNotBelongToAnotherMember(service, member, recordType, record.Content, nil); err != nil {
+				return nil, err
 			}
 		}
 		existingRecordID := strings.TrimSpace(record.ID)
@@ -491,10 +495,14 @@ func VerifyCloudflareMemberDNSDetached(ctx context.Context, userUUID string, ser
 			return nil, fmt.Errorf("cloudflare dns record ref for %s no longer matches target: %s", recordType, recordID)
 		}
 
-		if strings.TrimSpace(record.ID) != "" && currentAddress != "" && recordID != "" {
-			typedCurrentAddress, hasTypedCurrentAddress := normalizeMemberAddressForRecordType(recordType, currentAddress)
-			if hasTypedCurrentAddress && !sameAddress(record.Content, typedCurrentAddress) {
-				return nil, fmt.Errorf("cloudflare dns record ref for %s does not match member current address: %s", recordType, recordID)
+		typedCurrentAddress, hasTypedCurrentAddress := normalizeMemberAddressForRecordType(recordType, currentAddress)
+		if strings.TrimSpace(record.ID) != "" && recordID != "" {
+			if hasTypedCurrentAddress {
+				if !sameAddress(record.Content, typedCurrentAddress) {
+					return nil, fmt.Errorf("cloudflare dns record ref for %s does not match member current address: %s", recordType, recordID)
+				}
+			} else if err := ensureDetachRecordDoesNotBelongToAnotherMember(service, member, recordType, record.Content, nil); err != nil {
+				return nil, err
 			}
 		}
 		observed = append(observed, buildCloudflareMemberDNSRecord(operation.zoneID, operation.zoneName, operation.recordName, operation.line, record))
