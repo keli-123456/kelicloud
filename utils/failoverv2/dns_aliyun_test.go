@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 
 	"github.com/komari-monitor/komari/database/models"
@@ -375,7 +374,7 @@ func TestApplyAliyunMemberDNSDetachFallsBackToCurrentAddressWhenRecordRefsMissin
 	}
 }
 
-func TestApplyAliyunMemberDNSDetachFailsWhenRefBelongsToAnotherMember(t *testing.T) {
+func TestApplyAliyunMemberDNSDetachSkipsRecordWhenRefBelongsToAnotherMember(t *testing.T) {
 	client := &mockAliyunDNSClient{
 		records: []aliyunDNSRecord{
 			{RecordID: "record-member-1-a", RR: "@", Type: "A", Value: "198.51.100.10", TTL: 60, Line: "telecom"},
@@ -395,13 +394,15 @@ func TestApplyAliyunMemberDNSDetachFailsWhenRefBelongsToAnotherMember(t *testing
 	member.DNSRecordRefs = `{"A":"record-member-2-a"}`
 	member.CurrentAddress = "198.51.100.10"
 
-	if _, err := ApplyAliyunMemberDNSDetach(context.Background(), "user-a", service, member); err == nil {
-		t.Fatal("expected detach to fail when record ref does not match target line/record")
-	} else if got := err.Error(); !strings.Contains(got, "another member") {
-		t.Fatalf("expected another-member protection error, got %v", err)
+	result, err := ApplyAliyunMemberDNSDetach(context.Background(), "user-a", service, member)
+	if err != nil {
+		t.Fatalf("expected detach to continue when record belongs to another member, got %v", err)
 	}
 	if len(client.deleteCalls) != 0 {
-		t.Fatalf("expected no deletes when record ref mismatches target, got %#v", client.deleteCalls)
+		t.Fatalf("expected no deletes when record ref belongs to another member, got %#v", client.deleteCalls)
+	}
+	if len(result.Removed) != 0 {
+		t.Fatalf("expected no removed records when ref belongs to another member, got %#v", result.Removed)
 	}
 }
 
@@ -436,7 +437,7 @@ func TestApplyAliyunMemberDNSDetachAllowsStaleAddressWhenNotAnotherMember(t *tes
 	}
 }
 
-func TestApplyAliyunMemberDNSDetachFailsWhenAAAARefBelongsToAnotherMember(t *testing.T) {
+func TestApplyAliyunMemberDNSDetachSkipsAAAAWhenRefBelongsToAnotherMember(t *testing.T) {
 	service := testAliyunService()
 	service.DNSPayload = `{"domain_name":"example.com","rr":"@","record_type":"A","sync_ipv6":true,"ttl":60}`
 	service.Members = []models.FailoverV2Member{
@@ -456,13 +457,15 @@ func TestApplyAliyunMemberDNSDetachFailsWhenAAAARefBelongsToAnotherMember(t *tes
 	member.DNSRecordRefs = `{"AAAA":"record-member-2-aaaa"}`
 	member.CurrentAddress = "198.51.100.10"
 
-	if _, err := ApplyAliyunMemberDNSDetach(context.Background(), "user-a", service, member); err == nil {
-		t.Fatal("expected detach to fail when AAAA record ref belongs to another member")
-	} else if got := err.Error(); !strings.Contains(got, "another member") {
-		t.Fatalf("expected another-member protection error, got %v", err)
+	result, err := ApplyAliyunMemberDNSDetach(context.Background(), "user-a", service, member)
+	if err != nil {
+		t.Fatalf("expected detach to continue when AAAA belongs to another member, got %v", err)
 	}
 	if len(client.deleteCalls) != 0 {
 		t.Fatalf("expected no deletes when AAAA ref belongs to another member, got %#v", client.deleteCalls)
+	}
+	if len(result.Removed) != 0 {
+		t.Fatalf("expected no removed records when AAAA belongs to another member, got %#v", result.Removed)
 	}
 }
 

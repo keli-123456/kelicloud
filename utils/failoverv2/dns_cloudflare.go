@@ -313,13 +313,13 @@ func ApplyCloudflareMemberDNSDetach(ctx context.Context, userUUID string, servic
 		typedCurrentAddress, hasTypedCurrentAddress := normalizeMemberAddressForRecordType(recordType, currentAddress)
 		if strings.TrimSpace(record.ID) != "" && recordID != "" {
 			if hasTypedCurrentAddress && !sameAddress(record.Content, typedCurrentAddress) {
-				if err := ensureDetachRecordDoesNotBelongToAnotherMember(service, member, recordType, record.Content, nil); err != nil {
-					return nil, err
+				if detachRecordBelongsToAnotherMember(service, member, recordType, record.Content, nil) {
+					continue
 				}
 			}
 			if !hasTypedCurrentAddress {
-				if err := ensureDetachRecordDoesNotBelongToAnotherMember(service, member, recordType, record.Content, nil); err != nil {
-					return nil, err
+				if detachRecordBelongsToAnotherMember(service, member, recordType, record.Content, nil) {
+					continue
 				}
 			}
 		}
@@ -501,13 +501,13 @@ func VerifyCloudflareMemberDNSDetached(ctx context.Context, userUUID string, ser
 		typedCurrentAddress, hasTypedCurrentAddress := normalizeMemberAddressForRecordType(recordType, currentAddress)
 		if strings.TrimSpace(record.ID) != "" && recordID != "" {
 			if hasTypedCurrentAddress && !sameAddress(record.Content, typedCurrentAddress) {
-				if err := ensureDetachRecordDoesNotBelongToAnotherMember(service, member, recordType, record.Content, nil); err != nil {
-					return nil, err
+				if detachRecordBelongsToAnotherMember(service, member, recordType, record.Content, nil) {
+					continue
 				}
 			}
 			if !hasTypedCurrentAddress {
-				if err := ensureDetachRecordDoesNotBelongToAnotherMember(service, member, recordType, record.Content, nil); err != nil {
-					return nil, err
+				if detachRecordBelongsToAnotherMember(service, member, recordType, record.Content, nil) {
+					continue
 				}
 			}
 		}
