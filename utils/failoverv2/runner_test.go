@@ -488,6 +488,42 @@ func TestRunScheduledWorkRechecksExpiredCooldownBeforeServiceInterval(t *testing
 	}
 }
 
+func TestRunMemberDetachDNSNowDoesNotStartCooldownWindow(t *testing.T) {
+	configureFailoverV2RunnerTestDB(t)
+	useMockFailoverV2RunnerDeps(t)
+
+	service, member := createTestRunnerServiceAndMember(t)
+
+	failoverV2DetachDNSFunc = func(ctx context.Context, userUUID string, service *models.FailoverV2Service, member *models.FailoverV2Member) (interface{}, error) {
+		return &AliyunMemberDNSResult{Line: member.DNSLine, RecordRefs: map[string]string{}}, nil
+	}
+	failoverV2VerifyDetachDNSFunc = func(ctx context.Context, userUUID string, service *models.FailoverV2Service, member *models.FailoverV2Member) (interface{}, error) {
+		return &AliyunMemberDNSVerification{Line: member.DNSLine, Success: true}, nil
+	}
+
+	execution, err := RunMemberDetachDNSNowForUser("user-a", service.ID, member.ID)
+	if err != nil {
+		t.Fatalf("manual detach dns failed: %v", err)
+	}
+
+	waitForFailoverV2ExecutionStatus(t, "user-a", service.ID, execution.ID, models.FailoverV2ExecutionStatusSuccess)
+
+	reloadedService, err := failoverv2db.GetServiceByIDForUser("user-a", service.ID)
+	if err != nil {
+		t.Fatalf("failed to reload service: %v", err)
+	}
+	reloadedMember, err := findMemberOnService(reloadedService, member.ID)
+	if err != nil {
+		t.Fatalf("failed to reload member: %v", err)
+	}
+	if reloadedMember.LastTriggeredAt != nil {
+		t.Fatalf("expected manual detach to keep last_triggered_at empty, got %s", reloadedMember.LastTriggeredAt.ToTime())
+	}
+	if reloadedMember.LastStatus != models.FailoverV2MemberStatusFailed {
+		t.Fatalf("expected member failed after dns detach, got %q", reloadedMember.LastStatus)
+	}
+}
+
 func TestMemberExecutionRunnerRunFailoverSuccessUpdatesMemberAndExecution(t *testing.T) {
 	configureFailoverV2RunnerTestDB(t)
 	useMockFailoverV2RunnerDeps(t)

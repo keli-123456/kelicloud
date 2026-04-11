@@ -225,6 +225,7 @@ func queueMemberExecution(
 	member *models.FailoverV2Member,
 	executionTemplate *models.FailoverV2Execution,
 	startMessage string,
+	markTriggeredAt bool,
 	run func(*memberExecutionRunner),
 ) (*models.FailoverV2Execution, error) {
 	if service == nil {
@@ -264,12 +265,15 @@ func queueMemberExecution(
 	}); err != nil {
 		return nil, err
 	}
-	if err := failoverv2db.UpdateMemberFieldsForUser(userUUID, service.ID, member.ID, map[string]interface{}{
+	memberUpdates := map[string]interface{}{
 		"last_execution_id": execution.ID,
 		"last_status":       models.FailoverV2MemberStatusRunning,
 		"last_message":      startMessage,
-		"last_triggered_at": models.FromTime(now),
-	}); err != nil {
+	}
+	if markTriggeredAt {
+		memberUpdates["last_triggered_at"] = models.FromTime(now)
+	}
+	if err := failoverv2db.UpdateMemberFieldsForUser(userUUID, service.ID, member.ID, memberUpdates); err != nil {
 		return nil, err
 	}
 
@@ -295,6 +299,8 @@ func queueMemberDetachExecution(userUUID string, service *models.FailoverV2Servi
 	if triggerReason == "" {
 		triggerReason = "manual detach dns"
 	}
+	// Manual DNS detach is a maintenance action and should not extend failover cooldown.
+	markTriggeredAt := !strings.EqualFold(triggerReason, "manual detach dns")
 	return queueMemberExecution(
 		userUUID,
 		service,
@@ -311,6 +317,7 @@ func queueMemberDetachExecution(userUUID string, service *models.FailoverV2Servi
 			CleanupStatus:   models.FailoverCleanupStatusSkipped,
 		},
 		startMessage,
+		markTriggeredAt,
 		func(runner *memberExecutionRunner) {
 			runner.runDetachOnly()
 		},
