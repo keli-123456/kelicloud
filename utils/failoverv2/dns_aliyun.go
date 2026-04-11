@@ -129,7 +129,7 @@ func ApplyAliyunMemberDNSAttach(ctx context.Context, userUUID string, service *m
 		targetRecordID := ""
 
 		for _, expectedValue := range expectedValues {
-			existingMatch := findAliyunDNSRecordExactMatch(existingRecords, operation.rr, recordType, operation.line, expectedValue)
+			existingMatch := findAliyunDNSRecordExactMatchForAssignment(existingRecords, selectedRecordIDs, operation.rr, recordType, operation.line, expectedValue)
 			if strings.TrimSpace(existingMatch.RecordID) == "" {
 				existingMatch = findAliyunDNSRecordForAssignment(existingRecords, selectedRecordIDs, operation.rr, recordType, operation.line)
 			}
@@ -835,6 +835,28 @@ func findAliyunDNSRecordExactMatch(records []aliyunDNSRecord, rr, recordType, li
 		}
 		if !sameAliyunRecordValue(record.Value, value) {
 			continue
+		}
+		return record
+	}
+	return aliyunDNSRecord{}
+}
+
+func findAliyunDNSRecordExactMatchForAssignment(records []aliyunDNSRecord, selectedRecordIDs map[string]struct{}, rr, recordType, line, value string) aliyunDNSRecord {
+	for _, record := range records {
+		if !sameAliyunRecordIdentity(record, rr, recordType) || !sameAliyunRecordLine(record.Line, line) {
+			continue
+		}
+		if !sameAliyunRecordValue(record.Value, value) {
+			continue
+		}
+		recordID := strings.TrimSpace(record.RecordID)
+		if recordID == "" {
+			continue
+		}
+		if selectedRecordIDs != nil {
+			if _, ok := selectedRecordIDs[recordID]; ok {
+				continue
+			}
 		}
 		return record
 	}
