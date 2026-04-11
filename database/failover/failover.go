@@ -14,7 +14,7 @@ import (
 const (
 	defaultFailureThreshold              = 2
 	defaultStaleAfterSeconds             = 300
-	defaultCooldownSeconds               = 1800
+	defaultCooldownSeconds               = 0
 	defaultProvisionRetryLimit           = models.FailoverProvisionRetryLimitDefault
 	defaultProvisionFailureFallbackLimit = models.FailoverProvisionFailureFallbackLimitDefault
 	defaultScriptTimeoutSec              = 600
@@ -171,7 +171,15 @@ func CreateTaskForUser(userUUID string, task *models.FailoverTask, plans []model
 	err = db.Transaction(func(tx *gorm.DB) error {
 		task.UserID = userUUID
 		applyTaskDefaults(task)
+		requestedCooldownSeconds := task.CooldownSeconds
 		if err := tx.Create(task).Error; err != nil {
+			return err
+		}
+		// GORM may omit zero-valued fields with DB defaults on create.
+		// Force cooldown_seconds to the validated value (including 0).
+		if err := tx.Model(&models.FailoverTask{}).
+			Where("id = ?", task.ID).
+			Update("cooldown_seconds", requestedCooldownSeconds).Error; err != nil {
 			return err
 		}
 

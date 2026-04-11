@@ -3,6 +3,7 @@ package failoverv2
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -100,6 +101,7 @@ func useMockFailoverV2RunnerDeps(t *testing.T) {
 	previousScripts := failoverV2RunScriptsFunc
 	previousAttach := failoverV2AttachDNSFunc
 	previousVerifyAttach := failoverV2VerifyAttachDNSFunc
+	previousGetClient := failoverV2GetClientByUUIDFunc
 	previousResolveCleanup := failoverV2ResolveOldInstanceCleanupFunc
 	previousResolveCleanupFromRef := failoverV2ResolveOldInstanceCleanupFromRefFunc
 	previousLoadConfig := loadAliyunDNSConfigFunc
@@ -137,6 +139,7 @@ func useMockFailoverV2RunnerDeps(t *testing.T) {
 		failoverV2RunScriptsFunc = previousScripts
 		failoverV2AttachDNSFunc = previousAttach
 		failoverV2VerifyAttachDNSFunc = previousVerifyAttach
+		failoverV2GetClientByUUIDFunc = previousGetClient
 		failoverV2ResolveOldInstanceCleanupFunc = previousResolveCleanup
 		failoverV2ResolveOldInstanceCleanupFromRefFunc = previousResolveCleanupFromRef
 		loadAliyunDNSConfigFunc = previousLoadConfig
@@ -379,6 +382,69 @@ func TestRunScheduledWorkSkipsAutomaticFailoverWhenSchedulerDisabled(t *testing.
 	}
 }
 
+func TestRunMemberFailoverBackfillsIPv6FromReplacementClientBeforeAttach(t *testing.T) {
+	configureFailoverV2RunnerTestDB(t)
+	useMockFailoverV2RunnerDeps(t)
+
+	service, member := createTestRunnerServiceAndMember(t)
+
+	failoverV2DetachDNSFunc = func(ctx context.Context, userUUID string, service *models.FailoverV2Service, member *models.FailoverV2Member) (interface{}, error) {
+		return &AliyunMemberDNSResult{Line: member.DNSLine, RecordRefs: map[string]string{}}, nil
+	}
+	failoverV2VerifyDetachDNSFunc = func(ctx context.Context, userUUID string, service *models.FailoverV2Service, member *models.FailoverV2Member) (interface{}, error) {
+		return &AliyunMemberDNSVerification{Line: member.DNSLine, Success: true}, nil
+	}
+	failoverV2ProvisionFunc = func(ctx context.Context, userUUID string, service *models.FailoverV2Service, member *models.FailoverV2Member) (*memberProvisionOutcome, error) {
+		return &memberProvisionOutcome{
+			IPv4:             "203.0.113.8",
+			AutoConnectGroup: "failover-v2/1/1",
+			NewInstanceRef:   map[string]interface{}{"provider": "linode", "instance_id": 123},
+			NewAddresses:     map[string]interface{}{"ipv4": "203.0.113.8"},
+		}, nil
+	}
+	failoverV2WaitClientFunc = func(ctx context.Context, userUUID, group, excludeUUID string, startedAt time.Time, timeoutSeconds int, expectedAddresses map[string]struct{}) (string, error) {
+		return "client-new", nil
+	}
+	failoverV2ValidateOutletFunc = func(ctx context.Context, userUUID, clientUUID string, startedAt time.Time) (*common.Report, error) {
+		return &common.Report{CNConnectivity: &common.CNConnectivityReport{Status: "ok"}}, nil
+	}
+	failoverV2RunScriptsFunc = func(ctx context.Context, userUUID, clientUUID string, service *models.FailoverV2Service) (interface{}, error) {
+		return map[string]interface{}{"count": 0}, nil
+	}
+	failoverV2GetClientByUUIDFunc = func(uuid, userUUID string) (models.Client, error) {
+		return models.Client{
+			UUID: uuid,
+			IPv4: "203.0.113.8",
+			IPv6: "2001:db8::10",
+		}, nil
+	}
+
+	attachedIPv4 := ""
+	attachedIPv6 := ""
+	failoverV2AttachDNSFunc = func(ctx context.Context, userUUID string, service *models.FailoverV2Service, member *models.FailoverV2Member, ipv4, ipv6 string) (interface{}, error) {
+		attachedIPv4 = strings.TrimSpace(ipv4)
+		attachedIPv6 = strings.TrimSpace(ipv6)
+		return &AliyunMemberDNSResult{Line: member.DNSLine, RecordRefs: map[string]string{"A": "record-a", "AAAA": "record-aaaa"}}, nil
+	}
+	failoverV2VerifyAttachDNSFunc = func(ctx context.Context, userUUID string, service *models.FailoverV2Service, member *models.FailoverV2Member, ipv4, ipv6 string) (interface{}, error) {
+		return &AliyunMemberDNSVerification{Line: member.DNSLine, Success: true}, nil
+	}
+
+	execution, err := RunMemberFailoverNowForUser("user-a", service.ID, member.ID)
+	if err != nil {
+		t.Fatalf("run member failover failed: %v", err)
+	}
+
+	waitForFailoverV2ExecutionStatus(t, "user-a", service.ID, execution.ID, models.FailoverV2ExecutionStatusSuccess)
+
+	if attachedIPv4 != "203.0.113.8" {
+		t.Fatalf("expected attach flow to keep ipv4, got %q", attachedIPv4)
+	}
+	if attachedIPv6 != "2001:db8::10" {
+		t.Fatalf("expected attach flow to backfill ipv6 from replacement client, got %q", attachedIPv6)
+	}
+}
+
 func TestRunScheduledWorkSkipsServiceBeforeCheckInterval(t *testing.T) {
 	configureFailoverV2RunnerTestDB(t)
 	useMockFailoverV2RunnerDeps(t)
@@ -485,6 +551,126 @@ func TestRunScheduledWorkRechecksExpiredCooldownBeforeServiceInterval(t *testing
 	}
 	if !strings.Contains(reloadedMember.LastMessage, "cn_connectivity report is unavailable") {
 		t.Fatalf("expected missing report message after cooldown recheck, got %q", reloadedMember.LastMessage)
+	}
+}
+
+func TestRunScheduledWorkShowsHealthyStatusDuringCooldownWindow(t *testing.T) {
+	configureFailoverV2RunnerTestDB(t)
+	useMockFailoverV2RunnerDeps(t)
+	if err := config.Set(config.FailoverV2SchedulerEnabledKey, true); err != nil {
+		t.Fatalf("failed to enable failover v2 scheduler: %v", err)
+	}
+
+	service, member := createTestRunnerServiceAndMember(t)
+	activeTriggeredAt := models.FromTime(time.Now().Add(-15 * time.Second))
+	if err := failoverv2db.UpdateMemberFieldsForUser("user-a", service.ID, member.ID, map[string]interface{}{
+		"last_status":       models.FailoverV2MemberStatusCooldown,
+		"last_message":      "cooldown until placeholder",
+		"last_triggered_at": activeTriggeredAt,
+		"cooldown_seconds":  1800,
+	}); err != nil {
+		t.Fatalf("failed to seed member cooldown state: %v", err)
+	}
+
+	now := time.Now()
+	ws.SetLatestReport(member.WatchClientUUID, &common.Report{
+		UpdatedAt: now,
+		CNConnectivity: &common.CNConnectivityReport{
+			Status:    "ok",
+			CheckedAt: now,
+		},
+	})
+	t.Cleanup(func() {
+		ws.DeleteLatestReport(member.WatchClientUUID)
+	})
+
+	var (
+		reloadedService *models.FailoverV2Service
+		reloadedMember  *models.FailoverV2Member
+		err             error
+	)
+	for attempt := 0; attempt < 3; attempt++ {
+		if runErr := RunScheduledWork(); runErr != nil {
+			t.Fatalf("run scheduled work failed: %v", runErr)
+		}
+
+		reloadedService, err = failoverv2db.GetServiceByIDForUser("user-a", service.ID)
+		if err != nil {
+			t.Fatalf("failed to reload service: %v", err)
+		}
+		reloadedMember, err = findMemberOnService(reloadedService, member.ID)
+		if err != nil {
+			t.Fatalf("failed to reload member: %v", err)
+		}
+		if reloadedMember.LastStatus == models.FailoverV2MemberStatusHealthy {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	if reloadedService.LastExecutionID != nil {
+		t.Fatalf("expected no execution while cooldown is active, got last_execution_id=%d", *reloadedService.LastExecutionID)
+	}
+	if reloadedMember.LastStatus != models.FailoverV2MemberStatusHealthy {
+		t.Fatalf("expected healthy status during active cooldown with healthy probe, got %q", reloadedMember.LastStatus)
+	}
+	if strings.Contains(strings.ToLower(reloadedMember.LastMessage), "cooldown until") {
+		t.Fatalf("expected member message not to be forced into cooldown text, got %q", reloadedMember.LastMessage)
+	}
+}
+
+func TestRunScheduledWorkSuppressesTriggerWhenCooldownActive(t *testing.T) {
+	configureFailoverV2RunnerTestDB(t)
+	useMockFailoverV2RunnerDeps(t)
+	if err := config.Set(config.FailoverV2SchedulerEnabledKey, true); err != nil {
+		t.Fatalf("failed to enable failover v2 scheduler: %v", err)
+	}
+
+	service, member := createTestRunnerServiceAndMember(t)
+	activeTriggeredAt := models.FromTime(time.Now().Add(-15 * time.Second))
+	if err := failoverv2db.UpdateMemberFieldsForUser("user-a", service.ID, member.ID, map[string]interface{}{
+		"last_status":       models.FailoverV2MemberStatusCooldown,
+		"last_message":      "cooldown until placeholder",
+		"last_triggered_at": activeTriggeredAt,
+		"cooldown_seconds":  1800,
+	}); err != nil {
+		t.Fatalf("failed to seed member cooldown state: %v", err)
+	}
+
+	now := time.Now()
+	ws.SetLatestReport(member.WatchClientUUID, &common.Report{
+		UpdatedAt: now,
+		CNConnectivity: &common.CNConnectivityReport{
+			Status:              "blocked_suspected",
+			CheckedAt:           now,
+			ConsecutiveFailures: member.FailureThreshold,
+		},
+	})
+	t.Cleanup(func() {
+		ws.DeleteLatestReport(member.WatchClientUUID)
+	})
+
+	if err := RunScheduledWork(); err != nil {
+		t.Fatalf("run scheduled work failed: %v", err)
+	}
+
+	reloadedService, err := failoverv2db.GetServiceByIDForUser("user-a", service.ID)
+	if err != nil {
+		t.Fatalf("failed to reload service: %v", err)
+	}
+	if reloadedService.LastExecutionID != nil {
+		t.Fatalf("expected cooldown to suppress auto-trigger, got last_execution_id=%d", *reloadedService.LastExecutionID)
+	}
+
+	reloadedMember, err := findMemberOnService(reloadedService, member.ID)
+	if err != nil {
+		t.Fatalf("failed to reload member: %v", err)
+	}
+	if reloadedMember.LastStatus != models.FailoverV2MemberStatusTriggered {
+		t.Fatalf("expected member status triggered when probe is blocked, got %q", reloadedMember.LastStatus)
+	}
+	if !strings.Contains(strings.ToLower(reloadedMember.LastMessage), "cooldown until") {
+		t.Fatalf("expected cooldown hint in message when trigger is suppressed, got %q", reloadedMember.LastMessage)
 	}
 }
 
@@ -711,6 +897,92 @@ func TestMemberExecutionRunnerRunFailoverValidationFailureRollsBackNewInstance(t
 	}
 	if reloadedService.LastStatus != models.FailoverV2ServiceStatusFailed {
 		t.Fatalf("expected service failed after rollback path, got %q", reloadedService.LastStatus)
+	}
+}
+
+func TestMemberExecutionRunnerRunFailoverReprovisionsAfterBlockedOutlet(t *testing.T) {
+	configureFailoverV2RunnerTestDB(t)
+	useMockFailoverV2RunnerDeps(t)
+
+	service, member, execution := createTestRunnerState(t)
+	provisionCalls := 0
+	validateCalls := 0
+	rollbackCalls := 0
+	attachIPv4 := ""
+
+	failoverV2DetachDNSFunc = func(ctx context.Context, userUUID string, service *models.FailoverV2Service, member *models.FailoverV2Member) (interface{}, error) {
+		return &AliyunMemberDNSResult{Line: "telecom", RecordRefs: map[string]string{}}, nil
+	}
+	failoverV2VerifyDetachDNSFunc = func(ctx context.Context, userUUID string, service *models.FailoverV2Service, member *models.FailoverV2Member) (interface{}, error) {
+		return &AliyunMemberDNSVerification{Line: "telecom", Success: true}, nil
+	}
+	failoverV2ProvisionFunc = func(ctx context.Context, userUUID string, service *models.FailoverV2Service, member *models.FailoverV2Member) (*memberProvisionOutcome, error) {
+		provisionCalls++
+		ipv4 := fmt.Sprintf("203.0.113.%d", 20+provisionCalls)
+		return &memberProvisionOutcome{
+			IPv4:             ipv4,
+			AutoConnectGroup: "failover-v2/1/1",
+			NewInstanceRef:   map[string]interface{}{"provider": "digitalocean", "droplet_id": 400 + provisionCalls},
+			NewAddresses:     map[string]interface{}{"ipv4": ipv4},
+			RollbackLabel:    fmt.Sprintf("delete failed digitalocean droplet %d", 400+provisionCalls),
+			Rollback: func(ctx context.Context) error {
+				rollbackCalls++
+				return nil
+			},
+		}, nil
+	}
+	failoverV2WaitClientFunc = func(ctx context.Context, userUUID, group, excludeUUID string, startedAt time.Time, timeoutSeconds int, expectedAddresses map[string]struct{}) (string, error) {
+		return fmt.Sprintf("client-new-%d", provisionCalls), nil
+	}
+	failoverV2ValidateOutletFunc = func(ctx context.Context, userUUID, clientUUID string, startedAt time.Time) (*common.Report, error) {
+		validateCalls++
+		if validateCalls == 1 {
+			return &common.Report{
+				CNConnectivity: &common.CNConnectivityReport{Status: "blocked_suspected", Message: "blocked"},
+			}, &blockedOutletError{ClientUUID: clientUUID, Status: "blocked_suspected", Message: "blocked"}
+		}
+		return &common.Report{
+			CNConnectivity: &common.CNConnectivityReport{Status: "ok"},
+		}, nil
+	}
+	failoverV2RunScriptsFunc = func(ctx context.Context, userUUID, clientUUID string, service *models.FailoverV2Service) (interface{}, error) {
+		return map[string]interface{}{"count": 0}, nil
+	}
+	failoverV2AttachDNSFunc = func(ctx context.Context, userUUID string, service *models.FailoverV2Service, member *models.FailoverV2Member, ipv4, ipv6 string) (interface{}, error) {
+		attachIPv4 = strings.TrimSpace(ipv4)
+		return &AliyunMemberDNSResult{Line: member.DNSLine, RecordRefs: map[string]string{"A": "record-new"}}, nil
+	}
+	failoverV2VerifyAttachDNSFunc = func(ctx context.Context, userUUID string, service *models.FailoverV2Service, member *models.FailoverV2Member, ipv4, ipv6 string) (interface{}, error) {
+		return &AliyunMemberDNSVerification{Line: member.DNSLine, Success: true}, nil
+	}
+
+	runner := &memberExecutionRunner{
+		userUUID:  "user-a",
+		service:   service,
+		member:    member,
+		execution: execution,
+		ctx:       context.Background(),
+	}
+	runner.runFailover()
+
+	storedExecution, err := failoverv2db.GetExecutionByIDForUser("user-a", service.ID, execution.ID)
+	if err != nil {
+		t.Fatalf("failed to reload execution: %v", err)
+	}
+	if storedExecution.Status != models.FailoverV2ExecutionStatusSuccess {
+		t.Fatalf("expected execution success, got %q (%s)", storedExecution.Status, storedExecution.ErrorMessage)
+	}
+	if provisionCalls != 2 {
+		t.Fatalf("expected two provisioning attempts, got %d", provisionCalls)
+	}
+	if validateCalls != 2 {
+		t.Fatalf("expected two outlet validations, got %d", validateCalls)
+	}
+	if rollbackCalls != 1 {
+		t.Fatalf("expected one rollback for blocked attempt, got %d", rollbackCalls)
+	}
+	if attachIPv4 != "203.0.113.22" {
+		t.Fatalf("expected attach to use second replacement address, got %q", attachIPv4)
 	}
 }
 

@@ -139,6 +139,9 @@ func waitForLightsailInstance(ctx context.Context, region string, credential *aw
 
 func waitForLinodeInstance(ctx context.Context, client *linodecloud.Client, instanceID int) (*linodecloud.Instance, error) {
 	deadline := time.Now().Add(5 * time.Minute)
+	ipv4ReadyAt := time.Time{}
+	var latest *linodecloud.Instance
+	const ipv6GraceAfterIPv4 = 90 * time.Second
 	for time.Now().Before(deadline) {
 		if err := waitContextOrDelay(ctx, 0); err != nil {
 			return nil, err
@@ -149,12 +152,27 @@ func waitForLinodeInstance(ctx context.Context, client *linodecloud.Client, inst
 				return nil, normalizedErr
 			}
 		}
-		if err == nil && instance != nil && firstString(instance.IPv4) != "" {
-			return instance, nil
+		if err == nil && instance != nil {
+			latest = instance
+			hasIPv4 := strings.TrimSpace(firstString(instance.IPv4)) != ""
+			hasIPv6 := strings.TrimSpace(instance.IPv6) != ""
+			if hasIPv4 && hasIPv6 {
+				return instance, nil
+			}
+			if hasIPv4 {
+				if ipv4ReadyAt.IsZero() {
+					ipv4ReadyAt = time.Now()
+				} else if time.Since(ipv4ReadyAt) >= ipv6GraceAfterIPv4 {
+					return instance, nil
+				}
+			}
 		}
 		if err := waitContextOrDelay(ctx, 5*time.Second); err != nil {
 			return nil, err
 		}
+	}
+	if latest != nil {
+		return latest, nil
 	}
 	instance, err := client.GetInstance(ctx, instanceID)
 	return instance, normalizeExecutionStopError(err)

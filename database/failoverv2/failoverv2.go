@@ -14,7 +14,7 @@ import (
 const (
 	defaultFailureThreshold    = 2
 	defaultStaleAfterSeconds   = 300
-	defaultCooldownSeconds     = 1800
+	defaultCooldownSeconds     = 0
 	defaultScriptTimeoutSec    = 600
 	defaultWaitAgentTimeoutSec = 600
 	defaultCheckIntervalSec    = models.FailoverV2DefaultCheckIntervalSeconds
@@ -526,9 +526,17 @@ func createMemberForUserWithDB(db *gorm.DB, userUUID string, serviceID uint, mem
 
 		member.ServiceID = service.ID
 		applyMemberDefaults(member)
+		requestedCooldownSeconds := member.CooldownSeconds
 		lines := cloneFailoverV2MemberLines(member.Lines)
 		member.Lines = nil
 		if err := tx.Create(member).Error; err != nil {
+			return err
+		}
+		// GORM may omit zero-valued fields with DB defaults on create.
+		// Force cooldown_seconds to the validated value (including 0).
+		if err := tx.Model(&models.FailoverV2Member{}).
+			Where("service_id = ? AND id = ?", service.ID, member.ID).
+			Update("cooldown_seconds", requestedCooldownSeconds).Error; err != nil {
 			return err
 		}
 		if err := replaceFailoverV2MemberLinesWithDB(tx, service.ID, member.ID, lines, nil); err != nil {

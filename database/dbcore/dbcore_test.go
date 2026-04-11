@@ -155,3 +155,147 @@ func TestPrepareFailoverV2MemberSchemaCompatibilityRebuildsLegacyUniqueIndex(t *
 		testPrepareFailoverV2MemberSchemaCompatibilityRebuildsLegacyUniqueIndexWithLegacyLineIndex(t, "idx_failover_v2_service_line_code_legacy")
 	})
 }
+
+func TestApplyFailoverCooldownDefaultZeroMigration(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("failed to open sqlite database: %v", err)
+	}
+	if err := db.AutoMigrate(
+		&models.FailoverTask{},
+		&models.FailoverV2Service{},
+		&models.FailoverV2Member{},
+		&models.DBMigrationMarker{},
+	); err != nil {
+		t.Fatalf("failed to migrate failover schema: %v", err)
+	}
+
+	legacyTask := models.FailoverTask{
+		UserID:          "user-a",
+		Name:            "legacy-task",
+		WatchClientUUID: "client-legacy",
+		DNSProvider:     models.FailoverDNSProviderAliyun,
+		DNSEntryID:      "entry-legacy",
+		DNSPayload:      "{}",
+		CooldownSeconds: 1800,
+	}
+	customTask := models.FailoverTask{
+		UserID:          "user-a",
+		Name:            "custom-task",
+		WatchClientUUID: "client-custom",
+		DNSProvider:     models.FailoverDNSProviderAliyun,
+		DNSEntryID:      "entry-custom",
+		DNSPayload:      "{}",
+		CooldownSeconds: 900,
+	}
+	if err := db.Create(&legacyTask).Error; err != nil {
+		t.Fatalf("failed to create legacy failover task: %v", err)
+	}
+	if err := db.Create(&customTask).Error; err != nil {
+		t.Fatalf("failed to create custom failover task: %v", err)
+	}
+
+	service := models.FailoverV2Service{
+		UserID:      "user-a",
+		Name:        "edge-service",
+		Enabled:     true,
+		DNSProvider: models.FailoverDNSProviderAliyun,
+		DNSEntryID:  "dns-entry-1",
+		DNSPayload:  `{"domain_name":"example.com","rr":"@"}`,
+	}
+	if err := db.Create(&service).Error; err != nil {
+		t.Fatalf("failed to create failover v2 service: %v", err)
+	}
+
+	legacyMember := models.FailoverV2Member{
+		ServiceID:       service.ID,
+		Name:            "telecom-legacy",
+		Enabled:         true,
+		DNSLine:         "telecom",
+		Provider:        "digitalocean",
+		ProviderEntryID: "token-legacy",
+		CooldownSeconds: 1800,
+	}
+	customMember := models.FailoverV2Member{
+		ServiceID:       service.ID,
+		Name:            "telecom-custom",
+		Enabled:         true,
+		DNSLine:         "telecom2",
+		Provider:        "digitalocean",
+		ProviderEntryID: "token-custom",
+		CooldownSeconds: 900,
+	}
+	if err := db.Create(&legacyMember).Error; err != nil {
+		t.Fatalf("failed to create legacy failover v2 member: %v", err)
+	}
+	if err := db.Create(&customMember).Error; err != nil {
+		t.Fatalf("failed to create custom failover v2 member: %v", err)
+	}
+
+	applyFailoverCooldownDefaultZeroMigration(db)
+
+	var reloadedLegacyTask models.FailoverTask
+	if err := db.First(&reloadedLegacyTask, legacyTask.ID).Error; err != nil {
+		t.Fatalf("failed to reload legacy failover task: %v", err)
+	}
+	if reloadedLegacyTask.CooldownSeconds != 0 {
+		t.Fatalf("expected legacy failover task cooldown to migrate to 0, got %d", reloadedLegacyTask.CooldownSeconds)
+	}
+
+	var reloadedCustomTask models.FailoverTask
+	if err := db.First(&reloadedCustomTask, customTask.ID).Error; err != nil {
+		t.Fatalf("failed to reload custom failover task: %v", err)
+	}
+	if reloadedCustomTask.CooldownSeconds != 900 {
+		t.Fatalf("expected custom failover task cooldown to remain 900, got %d", reloadedCustomTask.CooldownSeconds)
+	}
+
+	var reloadedLegacyMember models.FailoverV2Member
+	if err := db.First(&reloadedLegacyMember, legacyMember.ID).Error; err != nil {
+		t.Fatalf("failed to reload legacy failover v2 member: %v", err)
+	}
+	if reloadedLegacyMember.CooldownSeconds != 0 {
+		t.Fatalf("expected legacy failover v2 member cooldown to migrate to 0, got %d", reloadedLegacyMember.CooldownSeconds)
+	}
+
+	var reloadedCustomMember models.FailoverV2Member
+	if err := db.First(&reloadedCustomMember, customMember.ID).Error; err != nil {
+		t.Fatalf("failed to reload custom failover v2 member: %v", err)
+	}
+	if reloadedCustomMember.CooldownSeconds != 900 {
+		t.Fatalf("expected custom failover v2 member cooldown to remain 900, got %d", reloadedCustomMember.CooldownSeconds)
+	}
+
+	var markerCount int64
+	if err := db.Model(&models.DBMigrationMarker{}).
+		Where("key = ?", migrationKeyFailoverCooldownDefaultZero).
+		Count(&markerCount).Error; err != nil {
+		t.Fatalf("failed to count migration markers: %v", err)
+	}
+	if markerCount != 1 {
+		t.Fatalf("expected one migration marker after first run, got %d", markerCount)
+	}
+
+	if err := db.Model(&models.FailoverTask{}).Where("id = ?", customTask.ID).Update("cooldown_seconds", 1800).Error; err != nil {
+		t.Fatalf("failed to seed second-run task cooldown: %v", err)
+	}
+	if err := db.Model(&models.FailoverV2Member{}).Where("id = ?", customMember.ID).Update("cooldown_seconds", 1800).Error; err != nil {
+		t.Fatalf("failed to seed second-run member cooldown: %v", err)
+	}
+
+	applyFailoverCooldownDefaultZeroMigration(db)
+
+	if err := db.First(&reloadedCustomTask, customTask.ID).Error; err != nil {
+		t.Fatalf("failed to reload custom failover task after second migration run: %v", err)
+	}
+	if reloadedCustomTask.CooldownSeconds != 1800 {
+		t.Fatalf("expected migration to be one-time and keep task cooldown at 1800 on second run, got %d", reloadedCustomTask.CooldownSeconds)
+	}
+
+	if err := db.First(&reloadedCustomMember, customMember.ID).Error; err != nil {
+		t.Fatalf("failed to reload custom failover v2 member after second migration run: %v", err)
+	}
+	if reloadedCustomMember.CooldownSeconds != 1800 {
+		t.Fatalf("expected migration to be one-time and keep member cooldown at 1800 on second run, got %d", reloadedCustomMember.CooldownSeconds)
+	}
+}
