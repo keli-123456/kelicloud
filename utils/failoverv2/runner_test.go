@@ -497,7 +497,7 @@ func TestRunMemberFailoverBackfillsIPv6FromReplacementClientBeforeAttach(t *test
 	}
 }
 
-func TestRunMemberFailoverNowForUserReturnsActiveExecutionWhenLineBusy(t *testing.T) {
+func TestRunMemberFailoverNowForUserAllowsConcurrentExecutionsOnSameLine(t *testing.T) {
 	configureFailoverV2RunnerTestDB(t)
 	useMockFailoverV2RunnerDeps(t)
 	useMockFailoverV2OwnershipConfig(t)
@@ -519,7 +519,7 @@ func TestRunMemberFailoverNowForUserReturnsActiveExecutionWhenLineBusy(t *testin
 		t.Fatalf("failed to create second member: %v", err)
 	}
 
-	detachStarted := make(chan struct{}, 1)
+	detachStarted := make(chan struct{}, 2)
 	allowDetach := make(chan struct{}, 4)
 	failoverV2DetachDNSFunc = func(ctx context.Context, userUUID string, service *models.FailoverV2Service, member *models.FailoverV2Member) (interface{}, error) {
 		select {
@@ -546,13 +546,19 @@ func TestRunMemberFailoverNowForUserReturnsActiveExecutionWhenLineBusy(t *testin
 
 	secondExecution, err := RunMemberFailoverNowForUser("user-a", service.ID, memberB.ID)
 	if err != nil {
-		t.Fatalf("expected second trigger to reuse active execution, got error: %v", err)
+		t.Fatalf("expected second trigger to create another execution, got error: %v", err)
 	}
-	if secondExecution.ID != firstExecution.ID {
-		t.Fatalf("expected second trigger to return active execution %d, got %d", firstExecution.ID, secondExecution.ID)
+	if secondExecution.ID == firstExecution.ID {
+		t.Fatalf("expected distinct executions for different members, got same id %d", secondExecution.ID)
 	}
-	if secondExecution.MemberID != memberA.ID {
-		t.Fatalf("expected active execution member %d, got %d", memberA.ID, secondExecution.MemberID)
+	if secondExecution.MemberID != memberB.ID {
+		t.Fatalf("expected second execution member %d, got %d", memberB.ID, secondExecution.MemberID)
+	}
+
+	select {
+	case <-detachStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for second execution to enter detach flow")
 	}
 
 	for i := 0; i < cap(allowDetach); i++ {
@@ -562,6 +568,7 @@ func TestRunMemberFailoverNowForUserReturnsActiveExecutionWhenLineBusy(t *testin
 		}
 	}
 	waitForFailoverV2ExecutionTerminal(t, "user-a", service.ID, firstExecution.ID)
+	waitForFailoverV2ExecutionTerminal(t, "user-a", service.ID, secondExecution.ID)
 }
 
 func TestRunScheduledWorkSkipsServiceBeforeCheckInterval(t *testing.T) {

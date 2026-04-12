@@ -451,42 +451,16 @@ func claimServiceExecutionLocks(userUUID string, service *models.FailoverV2Servi
 	if err != nil {
 		return nil, err
 	}
-
-	scopeKey := executionDNSRunScopeKey(ownership, member)
-	activeServiceID, claimed := claimDNSRun(scopeKey, service.ID)
-	if !claimed {
-		return nil, &activeDNSRunConflictError{
-			Ownership:       *ownership,
-			ServiceID:       service.ID,
-			ActiveServiceID: activeServiceID,
-		}
-	}
-	dnsRunLock, err := claimFailoverV2RunLock(
-		failoverV2DNSRunLockKey(scopeKey),
-		failoverV2ServiceRunLockTTL(service),
-		func() {
-			releaseDNSRun(scopeKey, service.ID)
-		},
-	)
-	if err != nil {
-		return nil, &activeDNSRunConflictError{
-			Ownership:       *ownership,
-			ServiceID:       service.ID,
-			ActiveServiceID: activeServiceID,
-		}
-	}
-	ownership.dnsRunLock = dnsRunLock
-
+	_ = member
 	return ownership, nil
 }
 
 func releaseServiceExecutionLocks(serviceID uint, ownership *ServiceDNSOwnership) {
+	_ = serviceID
 	if ownership != nil {
 		ownership.dnsRunLock.release()
 		ownership.serviceRunLock.release()
-		return
 	}
-	releaseServiceRun(serviceID)
 }
 
 func buildServiceDNSOwnershipKey(userUUID, provider, domainName, rr string) string {

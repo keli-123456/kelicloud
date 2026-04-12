@@ -95,6 +95,13 @@ func failoverV2ServiceRunLockKey(serviceID uint) string {
 	return fmt.Sprintf("failover_v2:service:%d", serviceID)
 }
 
+func failoverV2MemberRunLockKey(memberID uint) string {
+	if memberID == 0 {
+		return ""
+	}
+	return fmt.Sprintf("failover_v2:member:%d", memberID)
+}
+
 func failoverV2DNSRunLockKey(ownershipKey string) string {
 	sum := sha256.Sum256([]byte(strings.TrimSpace(ownershipKey)))
 	return "failover_v2:dns:" + hex.EncodeToString(sum[:])
@@ -266,6 +273,40 @@ func claimDNSProviderEntryRunLock(ctx context.Context, userUUID string, service 
 	return claimFailoverV2RunLockWithWait(ctx, lockKey, failoverV2ServiceRunLockTTL(service))
 }
 
+type activeMemberRunConflictError struct {
+	ServiceID uint
+	MemberID  uint
+}
+
+func (e *activeMemberRunConflictError) Error() string {
+	if e == nil {
+		return "failover v2 member is already running"
+	}
+	return fmt.Sprintf("failover v2 member %d is already running", e.MemberID)
+}
+
+func claimMemberExecutionRunLock(service *models.FailoverV2Service, member *models.FailoverV2Member) (*failoverV2RunLockHandle, error) {
+	if service == nil || member == nil {
+		return nil, fmt.Errorf("service and member are required")
+	}
+	lockKey := failoverV2MemberRunLockKey(member.ID)
+	if lockKey == "" {
+		return nil, nil
+	}
+
+	lock, err := claimFailoverV2RunLock(lockKey, failoverV2ServiceRunLockTTL(service), nil)
+	if err != nil {
+		if strings.Contains(err.Error(), "already held") {
+			return nil, &activeMemberRunConflictError{
+				ServiceID: service.ID,
+				MemberID:  member.ID,
+			}
+		}
+		return nil, err
+	}
+	return lock, nil
+}
+
 func buildMemberOldAddressesSnapshot(member *models.FailoverV2Member) string {
 	return string(marshalJSON(map[string]interface{}{
 		"current_address": strings.TrimSpace(member.CurrentAddress),
@@ -301,10 +342,35 @@ func queueMemberExecution(
 	if err != nil {
 		return nil, err
 	}
-	locksHeld := true
+	serviceLocksHeld := true
 	defer func() {
-		if locksHeld {
+		if serviceLocksHeld {
 			releaseServiceExecutionLocks(service.ID, ownership)
+		}
+	}()
+
+	memberRunLock, err := claimMemberExecutionRunLock(service, member)
+	if err != nil {
+		var conflictErr *activeMemberRunConflictError
+		if errors.As(err, &conflictErr) {
+			activeExecution, activeErr := failoverv2db.GetActiveExecutionForMemberForUser(userUUID, service.ID, member.ID)
+			if activeErr == nil && activeExecution != nil {
+				return activeExecution, nil
+			}
+			if activeErr != nil && !errors.Is(activeErr, gorm.ErrRecordNotFound) {
+				log.Printf(
+					"failoverv2: failed to load active execution for member %d after lock conflict: %v",
+					member.ID,
+					activeErr,
+				)
+			}
+		}
+		return nil, err
+	}
+	memberLockHeld := memberRunLock != nil
+	defer func() {
+		if memberLockHeld && memberRunLock != nil {
+			memberRunLock.release()
 		}
 	}()
 
@@ -338,8 +404,13 @@ func queueMemberExecution(
 		return nil, err
 	}
 
-	go func(serviceCopy models.FailoverV2Service, memberCopy models.FailoverV2Member, executionCopy models.FailoverV2Execution, ownershipCopy *ServiceDNSOwnership) {
-		defer releaseServiceExecutionLocks(serviceCopy.ID, ownershipCopy)
+	go func(serviceCopy models.FailoverV2Service, memberCopy models.FailoverV2Member, executionCopy models.FailoverV2Execution, ownershipCopy *ServiceDNSOwnership, memberRunLockCopy *failoverV2RunLockHandle) {
+		defer func() {
+			if memberRunLockCopy != nil {
+				memberRunLockCopy.release()
+			}
+			releaseServiceExecutionLocks(serviceCopy.ID, ownershipCopy)
+		}()
 		ctx, cancel := context.WithCancel(context.Background())
 		registerExecutionCancel(executionCopy.ID, cancel)
 		defer unregisterExecutionCancel(executionCopy.ID)
@@ -351,8 +422,9 @@ func queueMemberExecution(
 			ctx:       ctx,
 		}
 		run(runner)
-	}(*service, *member, *execution, ownership)
-	locksHeld = false
+	}(*service, *member, *execution, ownership, memberRunLock)
+	memberLockHeld = false
+	serviceLocksHeld = false
 
 	return execution, nil
 }

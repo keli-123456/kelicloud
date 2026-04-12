@@ -1123,6 +1123,10 @@ func GetActiveExecutionForServiceForUser(userUUID string, serviceID uint) (*mode
 	return getActiveExecutionForServiceForUserWithDB(dbcore.GetDBInstance(), userUUID, serviceID)
 }
 
+func GetActiveExecutionForMemberForUser(userUUID string, serviceID, memberID uint) (*models.FailoverV2Execution, error) {
+	return getActiveExecutionForMemberForUserWithDB(dbcore.GetDBInstance(), userUUID, serviceID, memberID)
+}
+
 func getActiveExecutionForServiceForUserWithDB(db *gorm.DB, userUUID string, serviceID uint) (*models.FailoverV2Execution, error) {
 	userUUID, err := normalizeFailoverV2UserID(userUUID)
 	if err != nil {
@@ -1136,6 +1140,32 @@ func getActiveExecutionForServiceForUserWithDB(db *gorm.DB, userUUID string, ser
 
 	var execution models.FailoverV2Execution
 	if err := db.Where("service_id = ?", service.ID).
+		Where("finished_at IS NULL").
+		Where("status NOT IN ?", terminalFailoverV2ExecutionStatuses).
+		Order("started_at DESC").
+		Order("id DESC").
+		First(&execution).Error; err != nil {
+		return nil, err
+	}
+	return &execution, nil
+}
+
+func getActiveExecutionForMemberForUserWithDB(db *gorm.DB, userUUID string, serviceID, memberID uint) (*models.FailoverV2Execution, error) {
+	userUUID, err := normalizeFailoverV2UserID(userUUID)
+	if err != nil {
+		return nil, err
+	}
+
+	service, err := getServiceByIDForUserWithDB(db, userUUID, serviceID)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := getMemberByIDForServiceForUserWithDB(db, userUUID, service.ID, memberID); err != nil {
+		return nil, err
+	}
+
+	var execution models.FailoverV2Execution
+	if err := db.Where("service_id = ? AND member_id = ?", service.ID, memberID).
 		Where("finished_at IS NULL").
 		Where("status NOT IN ?", terminalFailoverV2ExecutionStatuses).
 		Order("started_at DESC").
