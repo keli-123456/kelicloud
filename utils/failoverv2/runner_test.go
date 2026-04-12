@@ -84,6 +84,12 @@ func configureFailoverV2RunnerTestDB(t *testing.T) {
 	if err := config.Set(config.FailoverV2SchedulerEnabledKey, false); err != nil {
 		t.Fatalf("failed to reset failover v2 scheduler flag: %v", err)
 	}
+	if err := config.Set(config.FailoverV2ExecutionLogRetentionDaysKey, 30); err != nil {
+		t.Fatalf("failed to reset failover v2 execution log retention days: %v", err)
+	}
+	if err := config.Set(config.FailoverV2ExecutionLogCleanupLastRunAtKey, ""); err != nil {
+		t.Fatalf("failed to reset failover v2 execution log cleanup last run: %v", err)
+	}
 
 	ws.DeleteLatestReport("client-old")
 	ws.DeleteLatestReport("client-new")

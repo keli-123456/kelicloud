@@ -254,6 +254,129 @@ func TestListExecutionsByServiceForUserWithDBScopesServiceOwnership(t *testing.T
 	}
 }
 
+func TestDeleteTerminalExecutionsStartedBeforeWithDBDeletesOnlyExpiredTerminalExecutions(t *testing.T) {
+	db := openFailoverV2TestDB(t)
+	if err := db.AutoMigrate(
+		&models.FailoverV2Service{},
+		&models.FailoverV2Member{},
+		&models.FailoverV2Execution{},
+		&models.FailoverV2ExecutionStep{},
+	); err != nil {
+		t.Fatalf("failed to migrate failover v2 schema: %v", err)
+	}
+
+	service := models.FailoverV2Service{
+		UserID:      "user-a",
+		Name:        "edge-service",
+		Enabled:     true,
+		DNSProvider: models.FailoverDNSProviderAliyun,
+		DNSEntryID:  "dns-entry-1",
+		DNSPayload:  `{"domain_name":"example.com","rr":"@"}`,
+	}
+	if err := db.Create(&service).Error; err != nil {
+		t.Fatalf("failed to create service: %v", err)
+	}
+	member := models.FailoverV2Member{
+		ServiceID:       service.ID,
+		Name:            "telecom",
+		Enabled:         true,
+		Priority:        1,
+		WatchClientUUID: "client-1",
+		DNSLine:         "telecom",
+		Provider:        "digitalocean",
+		ProviderEntryID: "token-1",
+	}
+	if err := db.Create(&member).Error; err != nil {
+		t.Fatalf("failed to create member: %v", err)
+	}
+
+	now := time.Now()
+	seedExecution := func(status string, startedAt time.Time) uint {
+		execution := models.FailoverV2Execution{
+			ServiceID:     service.ID,
+			MemberID:      member.ID,
+			Status:        status,
+			TriggerReason: status,
+			StartedAt:     models.FromTime(startedAt),
+		}
+		if err := db.Create(&execution).Error; err != nil {
+			t.Fatalf("failed to create execution: %v", err)
+		}
+		step := models.FailoverV2ExecutionStep{
+			ExecutionID: execution.ID,
+			Sort:        1,
+			StepKey:     "seed",
+			StepLabel:   "Seed",
+			Status:      models.FailoverStepStatusSuccess,
+		}
+		if err := db.Create(&step).Error; err != nil {
+			t.Fatalf("failed to create execution step: %v", err)
+		}
+		return execution.ID
+	}
+
+	oldSuccessID := seedExecution(models.FailoverV2ExecutionStatusSuccess, now.Add(-45*24*time.Hour))
+	oldFailedID := seedExecution(models.FailoverV2ExecutionStatusFailed, now.Add(-35*24*time.Hour))
+	recentSuccessID := seedExecution(models.FailoverV2ExecutionStatusSuccess, now.Add(-5*24*time.Hour))
+	oldActiveID := seedExecution(models.FailoverV2ExecutionStatusWaitingAgent, now.Add(-60*24*time.Hour))
+
+	cutoff := now.Add(-30 * 24 * time.Hour)
+
+	deleted, err := deleteTerminalExecutionsStartedBeforeWithDB(db, cutoff, 1)
+	if err != nil {
+		t.Fatalf("failed to delete first execution batch: %v", err)
+	}
+	if deleted != 1 {
+		t.Fatalf("expected first batch to delete one execution, got %d", deleted)
+	}
+
+	deleted, err = deleteTerminalExecutionsStartedBeforeWithDB(db, cutoff, 10)
+	if err != nil {
+		t.Fatalf("failed to delete second execution batch: %v", err)
+	}
+	if deleted != 1 {
+		t.Fatalf("expected second batch to delete one execution, got %d", deleted)
+	}
+
+	deleted, err = deleteTerminalExecutionsStartedBeforeWithDB(db, cutoff, 10)
+	if err != nil {
+		t.Fatalf("failed to delete final execution batch: %v", err)
+	}
+	if deleted != 0 {
+		t.Fatalf("expected no more expired terminal executions, got %d", deleted)
+	}
+
+	var remainingExecutionIDs []uint
+	if err := db.Model(&models.FailoverV2Execution{}).
+		Order("id ASC").
+		Pluck("id", &remainingExecutionIDs).Error; err != nil {
+		t.Fatalf("failed to list remaining executions: %v", err)
+	}
+	if len(remainingExecutionIDs) != 2 {
+		t.Fatalf("expected two executions to remain, got %d", len(remainingExecutionIDs))
+	}
+	if remainingExecutionIDs[0] != recentSuccessID || remainingExecutionIDs[1] != oldActiveID {
+		t.Fatalf("unexpected remaining execution ids: %#v", remainingExecutionIDs)
+	}
+
+	var remainingStepExecutionIDs []uint
+	if err := db.Model(&models.FailoverV2ExecutionStep{}).
+		Order("execution_id ASC").
+		Pluck("execution_id", &remainingStepExecutionIDs).Error; err != nil {
+		t.Fatalf("failed to list remaining execution steps: %v", err)
+	}
+	if len(remainingStepExecutionIDs) != 2 {
+		t.Fatalf("expected two execution steps to remain, got %d", len(remainingStepExecutionIDs))
+	}
+	if remainingStepExecutionIDs[0] != recentSuccessID || remainingStepExecutionIDs[1] != oldActiveID {
+		t.Fatalf("unexpected remaining step execution ids: %#v", remainingStepExecutionIDs)
+	}
+
+	if oldSuccessID == 0 || oldFailedID == 0 {
+		t.Fatal("expected old terminal execution ids to be assigned")
+	}
+}
+
 func TestGetExecutionByIDForUserWithDBPreloadsOrderedSteps(t *testing.T) {
 	db := openFailoverV2TestDB(t)
 	if err := db.AutoMigrate(

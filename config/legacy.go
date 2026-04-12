@@ -49,72 +49,76 @@ type Legacy struct {
 	LoginNotification          bool    `json:"login_notification" default:"true"`          // 登录通知
 	TrafficLimitPercentage     float64 `json:"traffic_limit_percentage" default:"80.00"`   // 流量限制百分比，默认80.00%
 	// Record
-	RecordEnabled              bool   `json:"record_enabled" default:"true"`                 // 是否启用记录功能
-	RecordPreserveTime         int    `json:"record_preserve_time" default:"720"`            // 记录保留时间，单位小时，默认30天
-	PingRecordPreserveTime     int    `json:"ping_record_preserve_time" default:"24"`        // Ping 记录保留时间，单位小时，默认1天
-	OfflineCleanupEnabled      bool   `json:"offline_cleanup_enabled" default:"false"`       // 是否启用每日自动清理离线节点
-	OfflineCleanupTime         string `json:"offline_cleanup_time" default:"03:00"`          // 每日自动清理离线节点的执行时间，24小时制 HH:MM
-	OfflineCleanupGraceHours   int    `json:"offline_cleanup_grace_hours" default:"24"`      // 离线超过多少小时后才允许自动清理
-	OfflineCleanupLastRunAt    string `json:"offline_cleanup_last_run_at" default:""`        // 最近一次自动清理离线节点的执行时间（内部使用）
-	FailoverV2SchedulerEnabled bool   `json:"failover_v2_scheduler_enabled" default:"false"` // 是否启用 V2 自动故障转移调度
-	UpdatedAt                  time.Time
+	RecordEnabled                          bool   `json:"record_enabled" default:"true"`                            // 是否启用记录功能
+	RecordPreserveTime                     int    `json:"record_preserve_time" default:"720"`                       // 记录保留时间，单位小时，默认30天
+	PingRecordPreserveTime                 int    `json:"ping_record_preserve_time" default:"24"`                   // Ping 记录保留时间，单位小时，默认1天
+	OfflineCleanupEnabled                  bool   `json:"offline_cleanup_enabled" default:"false"`                  // 是否启用每日自动清理离线节点
+	OfflineCleanupTime                     string `json:"offline_cleanup_time" default:"03:00"`                     // 每日自动清理离线节点的执行时间，24小时制 HH:MM
+	OfflineCleanupGraceHours               int    `json:"offline_cleanup_grace_hours" default:"24"`                 // 离线超过多少小时后才允许自动清理
+	OfflineCleanupLastRunAt                string `json:"offline_cleanup_last_run_at" default:""`                   // 最近一次自动清理离线节点的执行时间（内部使用）
+	FailoverV2SchedulerEnabled             bool   `json:"failover_v2_scheduler_enabled" default:"false"`            // 是否启用 V2 自动故障转移调度
+	FailoverV2ExecutionLogRetentionDays    int    `json:"failover_v2_execution_log_retention_days" default:"30"`    // V2 执行日志保留天数（<=0 表示不自动清理）
+	FailoverV2ExecutionLogCleanupLastRunAt string `json:"failover_v2_execution_log_cleanup_last_run_at" default:""` // 最近一次 V2 执行日志自动清理时间（内部使用）
+	UpdatedAt                              time.Time
 }
 
 const (
-	SitenameKey                            = "sitename"
-	DescriptionKey                         = "description"
-	SiteSubtitleKey                        = "site_subtitle"
-	GithubURLKey                           = "github_url"
-	AllowCorsKey                           = "allow_cors"
-	ApiKeyKey                              = "api_key"
-	AutoDiscoveryKeyKey                    = "auto_discovery_key"
-	ScriptDomainKey                        = "script_domain"
-	CNConnectivityEnabledKey               = "cn_connectivity_enabled"
-	CNConnectivityTargetKey                = "cn_connectivity_target"
-	CNConnectivityIntervalKey              = "cn_connectivity_interval"
-	CNConnectivityRetryAttemptsKey         = "cn_connectivity_retry_attempts"
-	CNConnectivityRetryDelaySecondsKey     = "cn_connectivity_retry_delay_seconds"
-	CNConnectivityTimeoutSecondsKey        = "cn_connectivity_timeout_seconds"
-	OutboundProxyEnabledKey                = "outbound_proxy_enabled"
-	OutboundProxyProtocolKey               = "outbound_proxy_protocol"
-	OutboundProxyHostKey                   = "outbound_proxy_host"
-	OutboundProxyPortKey                   = "outbound_proxy_port"
-	OutboundProxyUsernameKey               = "outbound_proxy_username"
-	OutboundProxyPasswordKey               = "outbound_proxy_password"
-	SendIpAddrToGuestKey                   = "send_ip_addr_to_guest"
-	EulaAcceptedKey                        = "eula_accepted"
-	BaseScriptsURLKey                      = "base_scripts_url"
-	GeoIpEnabledKey                        = "geo_ip_enabled"
-	GeoIpProviderKey                       = "geo_ip_provider"
-	NezhaCompatEnabledKey                  = "nezha_compat_enabled"
-	NezhaCompatListenKey                   = "nezha_compat_listen"
-	OAuthEnabledKey                        = "o_auth_enabled"
-	OAuthProviderKey                       = "o_auth_provider"
-	DisablePasswordLoginKey                = "disable_password_login"
-	CustomHeadKey                          = "custom_head"
-	CustomBodyKey                          = "custom_body"
-	NotificationEnabledKey                 = "notification_enabled"
-	NotificationMethodKey                  = "notification_method"
-	NotificationTemplateKey                = "notification_template"
-	NotificationTelegramChatIDKey          = "notification_telegram_chat_id"
-	NotificationTelegramMessageThreadIDKey = "notification_telegram_message_thread_id"
-	NotificationBarkDeviceKeyKey           = "notification_bark_device_key"
-	NotificationWebhookURLKey              = "notification_webhook_url"
-	ExpireNotificationEnabledKey           = "expire_notification_enabled"
-	ExpireNotificationLeadDaysKey          = "expire_notification_lead_days"
-	LoginNotificationKey                   = "login_notification"
-	TrafficLimitPercentageKey              = "traffic_limit_percentage"
-	RecordEnabledKey                       = "record_enabled"
-	RecordPreserveTimeKey                  = "record_preserve_time"
-	PingRecordPreserveTimeKey              = "ping_record_preserve_time"
-	OfflineCleanupEnabledKey               = "offline_cleanup_enabled"
-	OfflineCleanupTimeKey                  = "offline_cleanup_time"
-	OfflineCleanupGraceHoursKey            = "offline_cleanup_grace_hours"
-	OfflineCleanupLastRunAtKey             = "offline_cleanup_last_run_at"
-	FailoverV2SchedulerEnabledKey          = "failover_v2_scheduler_enabled"
-	TempShareTokenKey                      = "tempory_share_token"
-	TempShareTokenExpireAtKey              = "tempory_share_token_expire_at"
-	UpdatedAtKey                           = "updated_at"
+	SitenameKey                               = "sitename"
+	DescriptionKey                            = "description"
+	SiteSubtitleKey                           = "site_subtitle"
+	GithubURLKey                              = "github_url"
+	AllowCorsKey                              = "allow_cors"
+	ApiKeyKey                                 = "api_key"
+	AutoDiscoveryKeyKey                       = "auto_discovery_key"
+	ScriptDomainKey                           = "script_domain"
+	CNConnectivityEnabledKey                  = "cn_connectivity_enabled"
+	CNConnectivityTargetKey                   = "cn_connectivity_target"
+	CNConnectivityIntervalKey                 = "cn_connectivity_interval"
+	CNConnectivityRetryAttemptsKey            = "cn_connectivity_retry_attempts"
+	CNConnectivityRetryDelaySecondsKey        = "cn_connectivity_retry_delay_seconds"
+	CNConnectivityTimeoutSecondsKey           = "cn_connectivity_timeout_seconds"
+	OutboundProxyEnabledKey                   = "outbound_proxy_enabled"
+	OutboundProxyProtocolKey                  = "outbound_proxy_protocol"
+	OutboundProxyHostKey                      = "outbound_proxy_host"
+	OutboundProxyPortKey                      = "outbound_proxy_port"
+	OutboundProxyUsernameKey                  = "outbound_proxy_username"
+	OutboundProxyPasswordKey                  = "outbound_proxy_password"
+	SendIpAddrToGuestKey                      = "send_ip_addr_to_guest"
+	EulaAcceptedKey                           = "eula_accepted"
+	BaseScriptsURLKey                         = "base_scripts_url"
+	GeoIpEnabledKey                           = "geo_ip_enabled"
+	GeoIpProviderKey                          = "geo_ip_provider"
+	NezhaCompatEnabledKey                     = "nezha_compat_enabled"
+	NezhaCompatListenKey                      = "nezha_compat_listen"
+	OAuthEnabledKey                           = "o_auth_enabled"
+	OAuthProviderKey                          = "o_auth_provider"
+	DisablePasswordLoginKey                   = "disable_password_login"
+	CustomHeadKey                             = "custom_head"
+	CustomBodyKey                             = "custom_body"
+	NotificationEnabledKey                    = "notification_enabled"
+	NotificationMethodKey                     = "notification_method"
+	NotificationTemplateKey                   = "notification_template"
+	NotificationTelegramChatIDKey             = "notification_telegram_chat_id"
+	NotificationTelegramMessageThreadIDKey    = "notification_telegram_message_thread_id"
+	NotificationBarkDeviceKeyKey              = "notification_bark_device_key"
+	NotificationWebhookURLKey                 = "notification_webhook_url"
+	ExpireNotificationEnabledKey              = "expire_notification_enabled"
+	ExpireNotificationLeadDaysKey             = "expire_notification_lead_days"
+	LoginNotificationKey                      = "login_notification"
+	TrafficLimitPercentageKey                 = "traffic_limit_percentage"
+	RecordEnabledKey                          = "record_enabled"
+	RecordPreserveTimeKey                     = "record_preserve_time"
+	PingRecordPreserveTimeKey                 = "ping_record_preserve_time"
+	OfflineCleanupEnabledKey                  = "offline_cleanup_enabled"
+	OfflineCleanupTimeKey                     = "offline_cleanup_time"
+	OfflineCleanupGraceHoursKey               = "offline_cleanup_grace_hours"
+	OfflineCleanupLastRunAtKey                = "offline_cleanup_last_run_at"
+	FailoverV2SchedulerEnabledKey             = "failover_v2_scheduler_enabled"
+	FailoverV2ExecutionLogRetentionDaysKey    = "failover_v2_execution_log_retention_days"
+	FailoverV2ExecutionLogCleanupLastRunAtKey = "failover_v2_execution_log_cleanup_last_run_at"
+	TempShareTokenKey                         = "tempory_share_token"
+	TempShareTokenExpireAtKey                 = "tempory_share_token_expire_at"
+	UpdatedAtKey                              = "updated_at"
 )
 
 func (Legacy) TableName() string {

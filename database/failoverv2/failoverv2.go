@@ -820,6 +820,55 @@ func ListExecutionsByServiceForUser(userUUID string, serviceID uint, limit int) 
 	return listExecutionsByServiceForUserWithDB(dbcore.GetDBInstance(), userUUID, serviceID, limit)
 }
 
+func DeleteTerminalExecutionsStartedBefore(cutoff time.Time, limit int) (int64, error) {
+	return deleteTerminalExecutionsStartedBeforeWithDB(dbcore.GetDBInstance(), cutoff, limit)
+}
+
+func deleteTerminalExecutionsStartedBeforeWithDB(db *gorm.DB, cutoff time.Time, limit int) (int64, error) {
+	if db == nil {
+		return 0, fmt.Errorf("db is required")
+	}
+	if cutoff.IsZero() {
+		return 0, nil
+	}
+	if limit <= 0 {
+		limit = 1000
+	}
+	if limit > 5000 {
+		limit = 5000
+	}
+
+	var executionIDs []uint
+	if err := db.Model(&models.FailoverV2Execution{}).
+		Where("status IN ?", terminalFailoverV2ExecutionStatuses).
+		Where("started_at <= ?", models.FromTime(cutoff)).
+		Order("started_at ASC").
+		Order("id ASC").
+		Limit(limit).
+		Pluck("id", &executionIDs).Error; err != nil {
+		return 0, err
+	}
+	if len(executionIDs) == 0 {
+		return 0, nil
+	}
+
+	if err := db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("execution_id IN ?", executionIDs).
+			Delete(&models.FailoverV2ExecutionStep{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("id IN ?", executionIDs).
+			Delete(&models.FailoverV2Execution{}).Error; err != nil {
+			return err
+		}
+		return nil
+	}); err != nil {
+		return 0, err
+	}
+
+	return int64(len(executionIDs)), nil
+}
+
 func CreateExecutionForUser(userUUID string, serviceID, memberID uint, execution *models.FailoverV2Execution) (*models.FailoverV2Execution, error) {
 	return createExecutionForUserWithDB(dbcore.GetDBInstance(), userUUID, serviceID, memberID, execution)
 }

@@ -14,9 +14,13 @@ import (
 )
 
 const (
-	scheduledDefaultFailureThreshold  = 2
-	scheduledDefaultStaleAfterSeconds = 300
-	scheduledDefaultCheckIntervalSec  = models.FailoverV2DefaultCheckIntervalSeconds
+	scheduledDefaultFailureThreshold          = 2
+	scheduledDefaultStaleAfterSeconds         = 300
+	scheduledDefaultCheckIntervalSec          = models.FailoverV2DefaultCheckIntervalSeconds
+	scheduledExecutionLogRetentionDefaultDays = 30
+	scheduledExecutionLogCleanupRunInterval   = 24 * time.Hour
+	scheduledExecutionLogCleanupBatchLimit    = 1000
+	scheduledExecutionLogCleanupMaxBatches    = 20
 )
 
 type scheduledTriggerCandidate struct {
@@ -26,6 +30,11 @@ type scheduledTriggerCandidate struct {
 }
 
 func RunScheduledWork() error {
+	now := time.Now()
+	if err := runScheduledExecutionLogCleanup(now); err != nil {
+		log.Printf("failoverv2: scheduled execution log cleanup failed: %v", err)
+	}
+
 	enabled, err := config.GetAs[bool](config.FailoverV2SchedulerEnabledKey, false)
 	if err != nil {
 		return err
@@ -44,7 +53,6 @@ func RunScheduledWork() error {
 	}
 
 	latestReports := ws.GetLatestReport()
-	now := time.Now()
 	for index := range services {
 		service := &services[index]
 		if !shouldRunServiceScheduledCheck(service, now) {
@@ -129,6 +137,69 @@ func RunScheduledWork() error {
 	}
 
 	return nil
+}
+
+func runScheduledExecutionLogCleanup(now time.Time) error {
+	if now.IsZero() {
+		now = time.Now()
+	}
+
+	retentionDays, err := config.GetAs[int](config.FailoverV2ExecutionLogRetentionDaysKey, scheduledExecutionLogRetentionDefaultDays)
+	if err != nil {
+		return err
+	}
+	if retentionDays <= 0 {
+		return nil
+	}
+
+	lastRunAtRaw, err := config.GetAs[string](config.FailoverV2ExecutionLogCleanupLastRunAtKey, "")
+	if err != nil {
+		return err
+	}
+	if !shouldRunScheduledExecutionLogCleanup(now, lastRunAtRaw) {
+		return nil
+	}
+
+	cutoff := now.Add(-time.Duration(retentionDays) * 24 * time.Hour)
+	var totalDeleted int64
+	for batch := 0; batch < scheduledExecutionLogCleanupMaxBatches; batch++ {
+		deleted, deleteErr := failoverv2db.DeleteTerminalExecutionsStartedBefore(cutoff, scheduledExecutionLogCleanupBatchLimit)
+		if deleteErr != nil {
+			return deleteErr
+		}
+		totalDeleted += deleted
+		if deleted == 0 {
+			break
+		}
+	}
+
+	if err := config.Set(config.FailoverV2ExecutionLogCleanupLastRunAtKey, now.Format(time.RFC3339)); err != nil {
+		log.Printf("failoverv2: failed to persist execution log cleanup last run: %v", err)
+	}
+	if totalDeleted > 0 {
+		log.Printf(
+			"failoverv2: scheduled execution log cleanup deleted=%d retention_days=%d cutoff=%s",
+			totalDeleted,
+			retentionDays,
+			cutoff.Format(time.RFC3339),
+		)
+	}
+	return nil
+}
+
+func shouldRunScheduledExecutionLogCleanup(now time.Time, lastRunAtRaw string) bool {
+	if now.IsZero() {
+		now = time.Now()
+	}
+	lastRunAtRaw = strings.TrimSpace(lastRunAtRaw)
+	if lastRunAtRaw == "" {
+		return true
+	}
+	lastRunAt, err := time.Parse(time.RFC3339, lastRunAtRaw)
+	if err != nil {
+		return true
+	}
+	return !now.Before(lastRunAt.Add(scheduledExecutionLogCleanupRunInterval))
 }
 
 func normalizedServiceCheckIntervalSeconds(service *models.FailoverV2Service) int {
