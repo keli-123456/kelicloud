@@ -215,6 +215,12 @@ func ApplyCloudflareMemberDNSAttach(ctx context.Context, userUUID string, servic
 			if _, ok := removedIDs[existingRecordID]; ok {
 				continue
 			}
+			if detachRecordReferencedByOtherMember(service, member, recordType, existingRecordID, nil) {
+				continue
+			}
+			if detachRecordBelongsToAnotherMember(service, member, recordType, existingRecord.Content, nil) {
+				continue
+			}
 			if err := operation.client.deleteRecord(contextOrBackground(ctx), operation.zoneID, existingRecordID); err != nil {
 				return nil, err
 			}
@@ -242,6 +248,12 @@ func ApplyCloudflareMemberDNSAttach(ctx context.Context, userUUID string, servic
 				continue
 			}
 			if _, ok := removedIDs[existingRecordID]; ok {
+				continue
+			}
+			if detachRecordReferencedByOtherMember(service, member, recordType, existingRecordID, nil) {
+				continue
+			}
+			if detachRecordBelongsToAnotherMember(service, member, recordType, existingRecord.Content, nil) {
 				continue
 			}
 			if err := operation.client.deleteRecord(contextOrBackground(ctx), operation.zoneID, existingRecordID); err != nil {
@@ -440,6 +452,16 @@ func VerifyCloudflareMemberDNSAttached(ctx context.Context, userUUID string, ser
 	}
 
 	sortCloudflareMemberDNSRecords(missing)
+	filteredUnexpected := make([]CloudflareMemberDNSRecord, 0, len(unexpected))
+	for _, unexpectedRecord := range unexpected {
+		recordID := strings.TrimSpace(unexpectedRecord.ID)
+		recordType := strings.ToUpper(strings.TrimSpace(unexpectedRecord.Type))
+		if recordID != "" && recordType != "" && detachRecordReferencedByOtherMember(service, member, recordType, recordID, nil) {
+			continue
+		}
+		filteredUnexpected = append(filteredUnexpected, unexpectedRecord)
+	}
+	unexpected = filteredUnexpected
 	sortCloudflareMemberDNSRecords(unexpected)
 
 	return &CloudflareMemberDNSVerification{

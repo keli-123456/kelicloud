@@ -303,6 +303,50 @@ func TestApplyCloudflareMemberDNSAttachDoesNotReuseSelectedRecordForAnotherExpec
 	}
 }
 
+func TestApplyCloudflareMemberDNSAttachPreservesOtherMemberOwnedRecordWhenAddressUnavailable(t *testing.T) {
+	service := testCloudflareService()
+	service.DNSPayload = `{"zone_name":"example.com","record_name":"app.example.com","record_type":"AAAA","ttl":600}`
+	service.Members = []models.FailoverV2Member{
+		{ID: 1, Enabled: true, DNSLine: "default", CurrentAddress: "2001:db8::8"},
+		{ID: 2, Enabled: true, DNSLine: "default", CurrentAddress: "", DNSRecordRefs: `{"AAAA":"rec-member-2-aaaa"}`},
+	}
+
+	api := newTestCloudflareAPI([]cloudflareDNSRecord{
+		{
+			ID:      "rec-member-2-aaaa",
+			Name:    "app.example.com",
+			Type:    "AAAA",
+			Content: "2600:3c15::2000:16ff:fec0:18a9",
+			TTL:     600,
+		},
+	})
+	useMockCloudflareDNSDependencies(t, api)
+
+	member := testCloudflareMember()
+	member.ID = 1
+	member.DNSLine = "default"
+	member.DNSRecordRefs = `{}`
+
+	result, err := ApplyCloudflareMemberDNSAttach(context.Background(), "user-a", service, member, "", "2001:db8::8")
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if _, ok := api.records["rec-member-2-aaaa"]; !ok {
+		t.Fatalf("expected other member owned AAAA to be preserved, got %#v", api.records)
+	}
+	targetRecordID := strings.TrimSpace(result.RecordRefs["AAAA"])
+	if targetRecordID == "" {
+		t.Fatalf("expected AAAA record ref in result, got %#v", result.RecordRefs)
+	}
+	targetRecord, ok := api.records[targetRecordID]
+	if !ok {
+		t.Fatalf("expected target record id %q to exist, got %#v", targetRecordID, api.records)
+	}
+	if targetRecord.Content != "2001:db8::8" {
+		t.Fatalf("expected target AAAA value to be created, got %#v", targetRecord)
+	}
+}
+
 func TestApplyCloudflareMemberDNSDetachFallsBackToCurrentAddressWhenRecordRefsMissing(t *testing.T) {
 	api := newTestCloudflareAPI([]cloudflareDNSRecord{
 		{ID: "rec-old-a", Name: "app.example.com", Type: "A", Content: "198.51.100.10", TTL: 120},
@@ -512,5 +556,33 @@ func TestVerifyCloudflareMemberDNSAttachedAcceptsServiceMemberSet(t *testing.T) 
 	}
 	if !verification.Success {
 		t.Fatalf("expected verification to pass for service member set, got %#v", verification)
+	}
+}
+
+func TestVerifyCloudflareMemberDNSAttachedIgnoresUnexpectedRecordOwnedByOtherMember(t *testing.T) {
+	api := newTestCloudflareAPI([]cloudflareDNSRecord{
+		{ID: "rec-member-1-aaaa", Name: "app.example.com", Type: "AAAA", Content: "2001:db8::8", TTL: 600},
+		{ID: "rec-member-2-aaaa", Name: "app.example.com", Type: "AAAA", Content: "2600:3c15::2000:16ff:fec0:18a9", TTL: 600},
+	})
+	useMockCloudflareDNSDependencies(t, api)
+
+	service := testCloudflareService()
+	service.DNSPayload = `{"zone_name":"example.com","record_name":"app.example.com","record_type":"AAAA","ttl":600}`
+	service.Members = []models.FailoverV2Member{
+		{ID: 1, Enabled: true, DNSLine: "default", CurrentAddress: "2001:db8::8", DNSRecordRefs: `{"AAAA":"rec-member-1-aaaa"}`},
+		{ID: 2, Enabled: true, DNSLine: "default", CurrentAddress: "", DNSRecordRefs: `{"AAAA":"rec-member-2-aaaa"}`},
+	}
+
+	member := testCloudflareMember()
+	member.ID = 1
+	member.DNSLine = "default"
+	member.DNSRecordRefs = `{"AAAA":"rec-member-1-aaaa"}`
+
+	verification, err := VerifyCloudflareMemberDNSAttached(context.Background(), "user-a", service, member, "", "2001:db8::8")
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if !verification.Success {
+		t.Fatalf("expected verification to pass and ignore other member owned record, got %#v", verification)
 	}
 }

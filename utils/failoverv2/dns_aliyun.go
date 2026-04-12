@@ -201,6 +201,28 @@ func ApplyAliyunMemberDNSAttach(ctx context.Context, userUUID string, service *m
 			if _, ok := removedRecordIDs[existingRecordID]; ok {
 				continue
 			}
+			if detachRecordReferencedByOtherMember(
+				service,
+				member,
+				recordType,
+				existingRecordID,
+				func(candidate *models.FailoverV2Member) bool {
+					return memberHasAliyunLine(candidate, operation.line)
+				},
+			) {
+				continue
+			}
+			if detachRecordBelongsToAnotherMember(
+				service,
+				member,
+				recordType,
+				existingRecord.Value,
+				func(candidate *models.FailoverV2Member) bool {
+					return memberHasAliyunLine(candidate, operation.line)
+				},
+			) {
+				continue
+			}
 			if err := operation.client.deleteRecord(contextOrBackground(ctx), existingRecordID); err != nil {
 				return nil, err
 			}
@@ -228,6 +250,28 @@ func ApplyAliyunMemberDNSAttach(ctx context.Context, userUUID string, service *m
 				continue
 			}
 			if _, ok := removedRecordIDs[existingRecordID]; ok {
+				continue
+			}
+			if detachRecordReferencedByOtherMember(
+				service,
+				member,
+				recordType,
+				existingRecordID,
+				func(candidate *models.FailoverV2Member) bool {
+					return memberHasAliyunLine(candidate, operation.line)
+				},
+			) {
+				continue
+			}
+			if detachRecordBelongsToAnotherMember(
+				service,
+				member,
+				recordType,
+				existingRecord.Value,
+				func(candidate *models.FailoverV2Member) bool {
+					return memberHasAliyunLine(candidate, operation.line)
+				},
+			) {
 				continue
 			}
 			if err := operation.client.deleteRecord(contextOrBackground(ctx), existingRecordID); err != nil {
@@ -404,7 +448,27 @@ func VerifyAliyunMemberDNSAttached(ctx context.Context, userUUID string, service
 		}
 	}
 
-	return evaluateAliyunMemberDNSVerification(operation.domainName, operation.rr, operation.line, expected, observed), nil
+	verification := evaluateAliyunMemberDNSVerification(operation.domainName, operation.rr, operation.line, expected, observed)
+	filteredUnexpected := make([]AliyunMemberDNSRecord, 0, len(verification.Unexpected))
+	for _, unexpectedRecord := range verification.Unexpected {
+		recordID := strings.TrimSpace(unexpectedRecord.ID)
+		recordType := strings.ToUpper(strings.TrimSpace(unexpectedRecord.Type))
+		if recordID != "" && recordType != "" && detachRecordReferencedByOtherMember(
+			service,
+			member,
+			recordType,
+			recordID,
+			func(candidate *models.FailoverV2Member) bool {
+				return memberHasAliyunLine(candidate, operation.line)
+			},
+		) {
+			continue
+		}
+		filteredUnexpected = append(filteredUnexpected, unexpectedRecord)
+	}
+	verification.Unexpected = filteredUnexpected
+	verification.Success = len(verification.Missing) == 0 && len(verification.Unexpected) == 0
+	return verification, nil
 }
 
 func VerifyAliyunMemberDNSDetached(ctx context.Context, userUUID string, service *models.FailoverV2Service, member *models.FailoverV2Member) (*AliyunMemberDNSVerification, error) {

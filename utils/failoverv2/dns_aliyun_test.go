@@ -252,6 +252,48 @@ func TestApplyAliyunMemberDNSAttachDoesNotOverwriteOtherMemberRecordWhenTargetRe
 	}
 }
 
+func TestApplyAliyunMemberDNSAttachPreservesOtherMemberOwnedRecordWhenAddressUnavailable(t *testing.T) {
+	service := testAliyunService()
+	service.DNSPayload = `{"domain_name":"example.com","rr":"@","record_type":"AAAA","ttl":600}`
+	service.Members = []models.FailoverV2Member{
+		{ID: 1, Enabled: true, DNSLine: "default", CurrentAddress: "2001:db8::8"},
+		{ID: 2, Enabled: true, DNSLine: "default", CurrentAddress: "", DNSRecordRefs: `{"AAAA":"record-member-2-aaaa"}`},
+	}
+
+	client := &mockAliyunDNSClient{
+		records: []aliyunDNSRecord{
+			{
+				RecordID: "record-member-2-aaaa",
+				RR:       "@",
+				Type:     "AAAA",
+				Value:    "2600:3c15::2000:16ff:fec0:18a9",
+				TTL:      600,
+				Line:     "default",
+			},
+		},
+	}
+	useMockAliyunDNSDependencies(t, client)
+
+	member := testAliyunMember()
+	member.ID = 1
+	member.DNSLine = "default"
+	member.DNSRecordRefs = `{}`
+
+	result, err := ApplyAliyunMemberDNSAttach(context.Background(), "user-a", service, member, "", "2001:db8::8")
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if len(client.upsertCalls) != 1 || client.upsertCalls[0].ExistingRecordID != "" {
+		t.Fatalf("expected target AAAA to be created, got %#v", client.upsertCalls)
+	}
+	if len(client.deleteCalls) != 0 {
+		t.Fatalf("expected other member owned AAAA to be preserved, got delete calls %#v", client.deleteCalls)
+	}
+	if got := result.RecordRefs["AAAA"]; got != "generated-record-id" {
+		t.Fatalf("expected target AAAA record ref to point to newly created record, got %#v", result.RecordRefs)
+	}
+}
+
 func TestApplyAliyunMemberDNSDetachRemovesOnlyManagedTargetLine(t *testing.T) {
 	service := testAliyunService()
 	service.DNSPayload = `{"domain_name":"example.com","rr":"@","record_type":"A","sync_ipv6":true,"ttl":60}`
@@ -541,6 +583,36 @@ func TestVerifyAliyunMemberDNSAttachedAcceptsServiceMemberSet(t *testing.T) {
 	}
 	if !verification.Success {
 		t.Fatalf("expected verification to pass for service member set, got %#v", verification)
+	}
+}
+
+func TestVerifyAliyunMemberDNSAttachedIgnoresUnexpectedRecordOwnedByOtherMember(t *testing.T) {
+	client := &mockAliyunDNSClient{
+		records: []aliyunDNSRecord{
+			{RecordID: "record-member-1-aaaa", RR: "@", Type: "AAAA", Value: "2001:db8::8", TTL: 600, Line: "default"},
+			{RecordID: "record-member-2-aaaa", RR: "@", Type: "AAAA", Value: "2600:3c15::2000:16ff:fec0:18a9", TTL: 600, Line: "default"},
+		},
+	}
+	useMockAliyunDNSDependencies(t, client)
+
+	service := testAliyunService()
+	service.DNSPayload = `{"domain_name":"example.com","rr":"@","record_type":"AAAA","ttl":600}`
+	service.Members = []models.FailoverV2Member{
+		{ID: 1, Enabled: true, DNSLine: "default", CurrentAddress: "2001:db8::8", DNSRecordRefs: `{"AAAA":"record-member-1-aaaa"}`},
+		{ID: 2, Enabled: true, DNSLine: "default", CurrentAddress: "", DNSRecordRefs: `{"AAAA":"record-member-2-aaaa"}`},
+	}
+
+	member := testAliyunMember()
+	member.ID = 1
+	member.DNSLine = "default"
+	member.DNSRecordRefs = `{"AAAA":"record-member-1-aaaa"}`
+
+	verification, err := VerifyAliyunMemberDNSAttached(context.Background(), "user-a", service, member, "", "2001:db8::8")
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if !verification.Success {
+		t.Fatalf("expected verification to pass and ignore other member owned record, got %#v", verification)
 	}
 }
 
