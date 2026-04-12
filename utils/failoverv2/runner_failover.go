@@ -351,7 +351,11 @@ func (r *memberExecutionRunner) mergeOutcomeAddressesFromClient(clientUUID strin
 }
 
 func (r *memberExecutionRunner) cleanupOldInstanceBeforeProvisionIfRequired() (string, map[string]interface{}, string, error) {
-	provider := strings.ToLower(strings.TrimSpace(r.member.Provider))
+	currentRef := parseJSONMap(r.member.CurrentInstanceRef)
+	provider := strings.ToLower(strings.TrimSpace(stringMapValue(currentRef, "provider")))
+	if provider == "" {
+		provider = strings.ToLower(strings.TrimSpace(r.member.Provider))
+	}
 	if provider != "digitalocean" && provider != "linode" {
 		return "", nil, "", nil
 	}
