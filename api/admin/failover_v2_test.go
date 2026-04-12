@@ -12,6 +12,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/cmd/flags"
+	"github.com/komari-monitor/komari/config"
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
 	"gorm.io/gorm"
@@ -491,5 +492,54 @@ func TestValidateFailoverV2MemberAllowsSharedDNSLineAcrossMembers(t *testing.T) 
 	}
 	if check := requireFailoverV2ValidationCheck(t, resp.Data.Checks, "member_unique"); check.Status != "pass" {
 		t.Fatalf("expected member_unique to pass for shared dns line, got %+v", check)
+	}
+}
+
+func TestValidateFailoverV2MemberRejectsProviderWithoutCloudFeature(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := setupFailoverV2APITestDB(t)
+	seedFailoverV2ValidationProviders(t, db)
+	seedFailoverV2ValidationClient(t, db)
+
+	service := models.FailoverV2Service{
+		UserID:              "user-a",
+		Name:                "v2-prod",
+		Enabled:             true,
+		DNSProvider:         models.FailoverDNSProviderCloudflare,
+		DNSEntryID:          "cf-entry",
+		DNSPayload:          `{"zone_name":"example.com","record_name":"api-v2","record_type":"A","ttl":60}`,
+		ScriptTimeoutSec:    600,
+		WaitAgentTimeoutSec: 600,
+		DeleteStrategy:      models.FailoverDeleteStrategyKeep,
+		LastStatus:          models.FailoverV2ServiceStatusHealthy,
+	}
+	if err := db.Create(&service).Error; err != nil {
+		t.Fatalf("failed to seed v2 service: %v", err)
+	}
+
+	allowedFeatures := []string{config.UserFeatureCloudFailover}
+	if err := config.SetUserPolicy("user-a", nil, &allowedFeatures); err != nil {
+		t.Fatalf("failed to set user policy: %v", err)
+	}
+
+	c, recorder := newFailoverV2ValidationTestContext(
+		t,
+		http.MethodPost,
+		"/api/admin/failover-v2/services/"+strconv.FormatUint(uint64(service.ID), 10)+"/members/validate",
+		testFailoverV2MemberValidationRequest(),
+		gin.Param{Key: "id", Value: strconv.FormatUint(uint64(service.ID), 10)},
+	)
+	ValidateFailoverV2Member(c)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", recorder.Code, recorder.Body.String())
+	}
+	resp := decodeFailoverV2ValidationTestEnvelope(t, recorder)
+	if resp.Data.OK {
+		t.Fatalf("expected provider feature validation to fail, got %+v", resp)
+	}
+	check := requireFailoverV2ValidationCheck(t, resp.Data.Checks, "member_config")
+	if check.Status != "fail" || !strings.Contains(check.Message, "cloud provider digitalocean is disabled for this user") {
+		t.Fatalf("expected member_config to report provider feature access failure, got %+v", check)
 	}
 }

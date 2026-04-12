@@ -14,6 +14,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/api"
 	"github.com/komari-monitor/komari/common"
+	"github.com/komari-monitor/komari/config"
 	clientdb "github.com/komari-monitor/komari/database/clients"
 	clipboarddb "github.com/komari-monitor/komari/database/clipboard"
 	failoverdb "github.com/komari-monitor/komari/database/failover"
@@ -679,6 +680,9 @@ func validateFailoverProviderSelectionForScope(scope ownerScope, providerName, e
 	if entryID == "" {
 		entryID = "active"
 	}
+	if err := validateFailoverProviderFeatureForScope(scope, providerName); err != nil {
+		return err
+	}
 
 	switch providerName {
 	case awsProviderName:
@@ -782,6 +786,25 @@ func validateFailoverProviderSelectionForScope(scope ownerScope, providerName, e
 	}
 
 	return fmt.Errorf("provider %s entry %s was not found", providerName, entryID)
+}
+
+func validateFailoverProviderFeatureForScope(scope ownerScope, providerName string) error {
+	requiredFeature := cloudProviderRequiredFeature(providerName)
+	if requiredFeature == "" {
+		return nil
+	}
+	if !scope.HasUser() {
+		return fmt.Errorf("user context is required")
+	}
+
+	allowed, err := config.IsUserFeatureAllowed(scope.UserUUID, requiredFeature)
+	if err != nil {
+		return err
+	}
+	if !allowed {
+		return fmt.Errorf("cloud provider %s is disabled for this user", providerName)
+	}
+	return nil
 }
 
 func findDNSProviderEntryForScope(scope ownerScope, providerName, entryID string) (*cloudProviderEntry, error) {
