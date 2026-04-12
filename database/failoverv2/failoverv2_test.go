@@ -947,6 +947,13 @@ func TestHasActiveExecutionForServiceAndRecovery(t *testing.T) {
 	if activeExecution.ID != execution.ID {
 		t.Fatalf("expected active execution id %d, got %d", execution.ID, activeExecution.ID)
 	}
+	activeMemberExecution, err := getActiveExecutionForMemberForUserWithDB(db, "user-a", service.ID, member.ID)
+	if err != nil {
+		t.Fatalf("failed to load active member execution: %v", err)
+	}
+	if activeMemberExecution.ID != execution.ID {
+		t.Fatalf("expected active member execution id %d, got %d", execution.ID, activeMemberExecution.ID)
+	}
 
 	recovered, err := recoverInterruptedExecutionsForServiceWithDB(db, "user-a", service.ID, "recovered")
 	if err != nil {
@@ -965,6 +972,9 @@ func TestHasActiveExecutionForServiceAndRecovery(t *testing.T) {
 	}
 	if _, err := getActiveExecutionForServiceForUserWithDB(db, "user-a", service.ID); !errors.Is(err, gorm.ErrRecordNotFound) {
 		t.Fatalf("expected active execution lookup to return not found after recovery, got %v", err)
+	}
+	if _, err := getActiveExecutionForMemberForUserWithDB(db, "user-a", service.ID, member.ID); !errors.Is(err, gorm.ErrRecordNotFound) {
+		t.Fatalf("expected active member execution lookup to return not found after recovery, got %v", err)
 	}
 	reloadedExecution, err := getExecutionByIDForServiceForUserWithDB(db, "user-a", service.ID, execution.ID)
 	if err != nil {

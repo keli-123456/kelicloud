@@ -570,6 +570,23 @@ func DoScheduledWork() {
 		log.Printf("failoverv2: failed to recover interrupted executions: %v", err)
 	}
 	d_notification.ReloadLoadNotificationSchedule()
+
+	// Keep failover v2 scheduling independent from the minute loop so
+	// long-running legacy scheduled jobs do not delay v2 health checks.
+	go func() {
+		if err := failoverv2.RunScheduledWork(); err != nil {
+			log.Printf("failoverv2: scheduled work failed: %v", err)
+		}
+
+		ticker := time.NewTicker(15 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			if err := failoverv2.RunScheduledWork(); err != nil {
+				log.Printf("failoverv2: scheduled work failed: %v", err)
+			}
+		}
+	}()
+
 	ticker := time.NewTicker(time.Minute * 30)
 	minute := time.NewTicker(60 * time.Second)
 	quarterMinute := time.NewTicker(15 * time.Second)
@@ -594,9 +611,6 @@ func DoScheduledWork() {
 			// 每分钟检查一次流量提醒
 			go notifier.CheckTraffic()
 			failover.RunScheduledWork()
-			if err := failoverv2.RunScheduledWork(); err != nil {
-				log.Printf("failoverv2: scheduled work failed: %v", err)
-			}
 			clientddns.RunScheduledSync()
 			offlinecleanup.RunScheduledWork()
 		case <-quarterMinute.C:

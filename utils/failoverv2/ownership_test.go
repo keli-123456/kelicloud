@@ -215,7 +215,7 @@ func TestRunMemberFailoverNowForUserRejectsOwnershipConflict(t *testing.T) {
 	}
 }
 
-func TestRunMemberFailoverNowForUserRejectsActiveDNSLock(t *testing.T) {
+func TestRunMemberFailoverNowForUserIgnoresLegacyExecutionScopeDNSSemaphore(t *testing.T) {
 	configureFailoverV2RunnerTestDB(t)
 	useMockFailoverV2RunnerDeps(t)
 	useMockFailoverV2OwnershipConfig(t)
@@ -234,10 +234,12 @@ func TestRunMemberFailoverNowForUserRejectsActiveDNSLock(t *testing.T) {
 		releaseDNSRun(scopeKey, 999)
 	})
 
-	if _, err := RunMemberFailoverNowForUser("user-a", service.ID, member.ID); err == nil {
-		t.Fatal("expected active dns lock to block failover start")
-	} else if !strings.Contains(err.Error(), "already being modified") {
-		t.Fatalf("expected active dns lock conflict error, got %v", err)
+	execution, err := RunMemberFailoverNowForUser("user-a", service.ID, member.ID)
+	if err != nil {
+		t.Fatalf("expected member failover to proceed; got error: %v", err)
+	}
+	if execution == nil || execution.ID == 0 {
+		t.Fatal("expected execution to be created")
 	}
 }
 
@@ -285,7 +287,7 @@ func TestClaimServiceExecutionLocksAllowsParallelMembersOnDifferentLines(t *test
 	releaseServiceExecutionLocks(reloaded.ID, ownershipB)
 }
 
-func TestClaimServiceExecutionLocksRejectsMembersOnSameLine(t *testing.T) {
+func TestClaimServiceExecutionLocksAllowsMembersOnSameLine(t *testing.T) {
 	configureFailoverV2RunnerTestDB(t)
 	useMockFailoverV2OwnershipConfig(t)
 
@@ -322,9 +324,9 @@ func TestClaimServiceExecutionLocksRejectsMembersOnSameLine(t *testing.T) {
 	}
 	defer releaseServiceExecutionLocks(reloaded.ID, ownershipA)
 
-	if _, err := claimServiceExecutionLocks("user-a", reloaded, memberBReloaded); err == nil {
-		t.Fatal("expected member B lock claim to fail on same line")
-	} else if !strings.Contains(err.Error(), "already being modified") {
-		t.Fatalf("expected active dns lock conflict, got %v", err)
+	ownershipB, err := claimServiceExecutionLocks("user-a", reloaded, memberBReloaded)
+	if err != nil {
+		t.Fatalf("expected member B lock claim to succeed on same line: %v", err)
 	}
+	releaseServiceExecutionLocks(reloaded.ID, ownershipB)
 }
