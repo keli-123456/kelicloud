@@ -1,6 +1,7 @@
 package failoverv2
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -939,6 +940,13 @@ func TestHasActiveExecutionForServiceAndRecovery(t *testing.T) {
 	if !active {
 		t.Fatal("expected active execution to be detected")
 	}
+	activeExecution, err := getActiveExecutionForServiceForUserWithDB(db, "user-a", service.ID)
+	if err != nil {
+		t.Fatalf("failed to load active execution: %v", err)
+	}
+	if activeExecution.ID != execution.ID {
+		t.Fatalf("expected active execution id %d, got %d", execution.ID, activeExecution.ID)
+	}
 
 	recovered, err := recoverInterruptedExecutionsForServiceWithDB(db, "user-a", service.ID, "recovered")
 	if err != nil {
@@ -954,6 +962,9 @@ func TestHasActiveExecutionForServiceAndRecovery(t *testing.T) {
 	}
 	if active {
 		t.Fatal("expected no active execution after recovery")
+	}
+	if _, err := getActiveExecutionForServiceForUserWithDB(db, "user-a", service.ID); !errors.Is(err, gorm.ErrRecordNotFound) {
+		t.Fatalf("expected active execution lookup to return not found after recovery, got %v", err)
 	}
 	reloadedExecution, err := getExecutionByIDForServiceForUserWithDB(db, "user-a", service.ID, execution.ID)
 	if err != nil {

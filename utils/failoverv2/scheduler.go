@@ -336,13 +336,9 @@ func evaluateMemberHealth(member *models.FailoverV2Member, report *common.Report
 		return false, fields, ""
 	}
 
-	if strings.TrimSpace(member.WatchClientUUID) == "" {
+	if memberUsesExistingClient(member) && strings.TrimSpace(member.WatchClientUUID) == "" {
 		fields["last_status"] = models.FailoverV2MemberStatusUnknown
-		if memberUsesExistingClient(member) {
-			fields["last_message"] = "existing_client member requires watch_client_uuid"
-		} else {
-			fields["last_message"] = "member is not initialized"
-		}
+		fields["last_message"] = "existing_client member requires watch_client_uuid"
 		fields["trigger_failure_count"] = 0
 		return false, fields, ""
 	}

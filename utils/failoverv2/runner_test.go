@@ -231,6 +231,26 @@ func waitForFailoverV2ExecutionStatus(t *testing.T, userUUID string, serviceID, 
 	return nil
 }
 
+func waitForFailoverV2ExecutionTerminal(t *testing.T, userUUID string, serviceID, executionID uint) *models.FailoverV2Execution {
+	t.Helper()
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		execution, err := failoverv2db.GetExecutionByIDForUser(userUUID, serviceID, executionID)
+		if err == nil && failoverv2db.IsFailoverV2ExecutionTerminal(execution.Status) {
+			return execution
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+
+	execution, err := failoverv2db.GetExecutionByIDForUser(userUUID, serviceID, executionID)
+	if err != nil {
+		t.Fatalf("failed to reload execution %d: %v", executionID, err)
+	}
+	t.Fatalf("expected execution %d to reach terminal status, got %q", executionID, execution.Status)
+	return nil
+}
+
 func TestEvaluateMemberHealthTriggersWhenMissingReportThresholdReached(t *testing.T) {
 	now := time.Now()
 	member := &models.FailoverV2Member{
@@ -477,6 +497,73 @@ func TestRunMemberFailoverBackfillsIPv6FromReplacementClientBeforeAttach(t *test
 	}
 }
 
+func TestRunMemberFailoverNowForUserReturnsActiveExecutionWhenLineBusy(t *testing.T) {
+	configureFailoverV2RunnerTestDB(t)
+	useMockFailoverV2RunnerDeps(t)
+	useMockFailoverV2OwnershipConfig(t)
+
+	service, memberA := createTestRunnerServiceAndMember(t)
+	memberB, err := failoverv2db.CreateMemberForUser("user-a", service.ID, &models.FailoverV2Member{
+		Name:               "telecom-b",
+		Enabled:            true,
+		WatchClientUUID:    "client-b",
+		DNSLine:            "telecom",
+		DNSRecordRefs:      `{"A":"record-old-b"}`,
+		CurrentAddress:     "198.51.100.11",
+		CurrentInstanceRef: `{"provider":"digitalocean","droplet_id":101}`,
+		Provider:           "digitalocean",
+		ProviderEntryID:    "token-1",
+		PlanPayload:        `{"region":"nyc1","size":"s-1vcpu-1gb","image":"ubuntu-24-04-x64"}`,
+	})
+	if err != nil {
+		t.Fatalf("failed to create second member: %v", err)
+	}
+
+	detachStarted := make(chan struct{}, 1)
+	allowDetach := make(chan struct{}, 4)
+	failoverV2DetachDNSFunc = func(ctx context.Context, userUUID string, service *models.FailoverV2Service, member *models.FailoverV2Member) (interface{}, error) {
+		select {
+		case detachStarted <- struct{}{}:
+		default:
+		}
+		<-allowDetach
+		return &AliyunMemberDNSResult{Line: member.DNSLine, RecordRefs: map[string]string{}}, nil
+	}
+	failoverV2VerifyDetachDNSFunc = func(ctx context.Context, userUUID string, service *models.FailoverV2Service, member *models.FailoverV2Member) (interface{}, error) {
+		return &AliyunMemberDNSVerification{Line: member.DNSLine, Success: true}, nil
+	}
+
+	firstExecution, err := RunMemberFailoverNowForUser("user-a", service.ID, memberA.ID)
+	if err != nil {
+		t.Fatalf("failed to start first member failover: %v", err)
+	}
+
+	select {
+	case <-detachStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for first execution to enter detach flow")
+	}
+
+	secondExecution, err := RunMemberFailoverNowForUser("user-a", service.ID, memberB.ID)
+	if err != nil {
+		t.Fatalf("expected second trigger to reuse active execution, got error: %v", err)
+	}
+	if secondExecution.ID != firstExecution.ID {
+		t.Fatalf("expected second trigger to return active execution %d, got %d", firstExecution.ID, secondExecution.ID)
+	}
+	if secondExecution.MemberID != memberA.ID {
+		t.Fatalf("expected active execution member %d, got %d", memberA.ID, secondExecution.MemberID)
+	}
+
+	for i := 0; i < cap(allowDetach); i++ {
+		select {
+		case allowDetach <- struct{}{}:
+		default:
+		}
+	}
+	waitForFailoverV2ExecutionTerminal(t, "user-a", service.ID, firstExecution.ID)
+}
+
 func TestRunScheduledWorkSkipsServiceBeforeCheckInterval(t *testing.T) {
 	configureFailoverV2RunnerTestDB(t)
 	useMockFailoverV2RunnerDeps(t)
@@ -683,6 +770,54 @@ func TestEvaluateMemberHealthTriggersBlockedSuspectedDuringCooldown(t *testing.T
 	}
 	if reason == "" {
 		t.Fatal("expected trigger reason for blocked_suspected threshold during cooldown")
+	}
+}
+
+func TestEvaluateMemberHealthTreatsProviderTemplateWithoutWatchAsMissingReport(t *testing.T) {
+	now := time.Now()
+	member := &models.FailoverV2Member{
+		Mode:                models.FailoverV2MemberModeProviderTemplate,
+		WatchClientUUID:     "",
+		FailureThreshold:    2,
+		TriggerFailureCount: 1,
+	}
+
+	shouldTrigger, fields, reason := evaluateMemberHealth(member, nil, now)
+	if !shouldTrigger {
+		t.Fatal("expected provider_template member without watch client to trigger on missing report threshold")
+	}
+	if got := stringMapValue(fields, "last_status"); got != models.FailoverV2MemberStatusTriggered {
+		t.Fatalf("expected triggered status, got %q", got)
+	}
+	if got := stringMapValue(fields, "last_message"); !strings.Contains(got, "cn_connectivity report is unavailable") {
+		t.Fatalf("expected missing report message, got %q", got)
+	}
+	if reason == "" {
+		t.Fatal("expected non-empty trigger reason")
+	}
+}
+
+func TestEvaluateMemberHealthRequiresWatchForExistingClientMode(t *testing.T) {
+	now := time.Now()
+	member := &models.FailoverV2Member{
+		Mode:                models.FailoverV2MemberModeExistingClient,
+		WatchClientUUID:     "",
+		FailureThreshold:    2,
+		TriggerFailureCount: 1,
+	}
+
+	shouldTrigger, fields, reason := evaluateMemberHealth(member, nil, now)
+	if shouldTrigger {
+		t.Fatal("expected existing_client member without watch client to stay non-triggered")
+	}
+	if reason != "" {
+		t.Fatalf("expected empty trigger reason, got %q", reason)
+	}
+	if got := stringMapValue(fields, "last_message"); !strings.Contains(got, "existing_client member requires watch_client_uuid") {
+		t.Fatalf("expected existing_client initialization message, got %q", got)
+	}
+	if got := intMapValue(fields, "trigger_failure_count"); got != 0 {
+		t.Fatalf("expected trigger_failure_count reset to 0, got %d", got)
 	}
 }
 
@@ -1324,6 +1459,86 @@ func TestMemberExecutionRunnerRunFailoverDeletesOldLinodeBeforeProvisionWhenProv
 	}
 	if !strings.Contains(storedExecution.CleanupResult, "instance_deleted_before_provision") {
 		t.Fatalf("expected cleanup result to note pre-provision deletion, got %q", storedExecution.CleanupResult)
+	}
+}
+
+func TestMemberExecutionRunnerRunFailoverSkipsPreProvisionCleanupWhenNoCurrentInstanceRef(t *testing.T) {
+	configureFailoverV2RunnerTestDB(t)
+	useMockFailoverV2RunnerDeps(t)
+
+	service, member, execution := createTestRunnerState(t)
+	service.DeleteStrategy = models.FailoverDeleteStrategyKeep
+	member.Provider = "digitalocean"
+	member.ProviderEntryID = "token-1"
+	member.CurrentInstanceRef = ""
+	execution.OldInstanceRef = ""
+
+	cleanupResolveCalls := 0
+	provisionCalled := false
+
+	failoverV2DetachDNSFunc = func(ctx context.Context, userUUID string, service *models.FailoverV2Service, member *models.FailoverV2Member) (interface{}, error) {
+		return &AliyunMemberDNSResult{Line: "telecom", RecordRefs: map[string]string{}}, nil
+	}
+	failoverV2VerifyDetachDNSFunc = func(ctx context.Context, userUUID string, service *models.FailoverV2Service, member *models.FailoverV2Member) (interface{}, error) {
+		return &AliyunMemberDNSVerification{Line: "telecom", Success: true}, nil
+	}
+	failoverV2ResolveOldInstanceCleanupFunc = func(userUUID string, member *models.FailoverV2Member) (*oldInstanceCleanup, error) {
+		cleanupResolveCalls++
+		return nil, nil
+	}
+	failoverV2ProvisionFunc = func(ctx context.Context, userUUID string, service *models.FailoverV2Service, member *models.FailoverV2Member) (*memberProvisionOutcome, error) {
+		provisionCalled = true
+		return &memberProvisionOutcome{
+			IPv4:             "203.0.113.45",
+			AutoConnectGroup: "failover-v2/1/1",
+			NewInstanceRef:   map[string]interface{}{"provider": "digitalocean", "provider_entry_id": "token-1", "droplet_id": 4455},
+			NewAddresses:     map[string]interface{}{"ipv4": "203.0.113.45"},
+		}, nil
+	}
+	failoverV2WaitClientFunc = func(ctx context.Context, userUUID, group, excludeUUID string, startedAt time.Time, timeoutSeconds int, expectedAddresses map[string]struct{}) (string, error) {
+		return "client-new", nil
+	}
+	failoverV2ValidateOutletFunc = func(ctx context.Context, userUUID, clientUUID string, startedAt time.Time) (*common.Report, error) {
+		return &common.Report{CNConnectivity: &common.CNConnectivityReport{Status: "ok"}}, nil
+	}
+	failoverV2RunScriptsFunc = func(ctx context.Context, userUUID, clientUUID string, service *models.FailoverV2Service) (interface{}, error) {
+		return map[string]interface{}{"count": 0}, nil
+	}
+	failoverV2AttachDNSFunc = func(ctx context.Context, userUUID string, service *models.FailoverV2Service, member *models.FailoverV2Member, ipv4, ipv6 string) (interface{}, error) {
+		return &AliyunMemberDNSResult{Line: member.DNSLine, RecordRefs: map[string]string{"A": "record-new"}}, nil
+	}
+	failoverV2VerifyAttachDNSFunc = func(ctx context.Context, userUUID string, service *models.FailoverV2Service, member *models.FailoverV2Member, ipv4, ipv6 string) (interface{}, error) {
+		return &AliyunMemberDNSVerification{Line: member.DNSLine, Success: true}, nil
+	}
+
+	runner := &memberExecutionRunner{
+		userUUID:  "user-a",
+		service:   service,
+		member:    member,
+		execution: execution,
+		ctx:       context.Background(),
+	}
+	runner.runFailover()
+
+	if cleanupResolveCalls != 0 {
+		t.Fatalf("expected no cleanup resolver call when current instance ref is empty, got %d", cleanupResolveCalls)
+	}
+	if !provisionCalled {
+		t.Fatal("expected provisioning to continue when no current instance ref is available")
+	}
+
+	storedExecution, err := failoverv2db.GetExecutionByIDForUser("user-a", service.ID, execution.ID)
+	if err != nil {
+		t.Fatalf("failed to reload execution: %v", err)
+	}
+	if storedExecution.Status != models.FailoverV2ExecutionStatusSuccess {
+		t.Fatalf("expected execution success, got %q", storedExecution.Status)
+	}
+	if storedExecution.CleanupStatus != models.FailoverCleanupStatusSkipped {
+		t.Fatalf("expected cleanup status skipped, got %q", storedExecution.CleanupStatus)
+	}
+	if !strings.Contains(storedExecution.CleanupResult, "cleanup_not_required_before_provision") {
+		t.Fatalf("expected cleanup result to note skipped pre-provision cleanup, got %q", storedExecution.CleanupResult)
 	}
 }
 

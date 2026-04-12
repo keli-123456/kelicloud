@@ -482,6 +482,32 @@ func TestApplyCloudflareMemberDNSDetachAllowsStaleAddressWhenNotAnotherMember(t 
 	}
 }
 
+func TestApplyCloudflareMemberDNSDetachFallsBackWhenStoredRefNoLongerMatchesIdentity(t *testing.T) {
+	api := newTestCloudflareAPI([]cloudflareDNSRecord{
+		{ID: "rec-stale-ref", Name: "legacy.example.com", Type: "A", Content: "203.0.113.250", TTL: 120},
+		{ID: "rec-target-a", Name: "app.example.com", Type: "A", Content: "198.51.100.10", TTL: 120},
+	})
+	useMockCloudflareDNSDependencies(t, api)
+
+	member := testCloudflareMember()
+	member.DNSRecordRefs = `{"A":"rec-stale-ref"}`
+	member.CurrentAddress = "198.51.100.10"
+
+	result, err := ApplyCloudflareMemberDNSDetach(context.Background(), "user-a", testCloudflareService(), member)
+	if err != nil {
+		t.Fatalf("expected stale ref detach to continue, got %v", err)
+	}
+	if len(result.Removed) != 1 || result.Removed[0].ID != "rec-target-a" {
+		t.Fatalf("expected stale ref fallback to remove target record, got %#v", result.Removed)
+	}
+	if _, ok := api.records["rec-target-a"]; ok {
+		t.Fatalf("expected target record to be deleted, got %#v", api.records)
+	}
+	if _, ok := api.records["rec-stale-ref"]; !ok {
+		t.Fatalf("expected mismatched stale ref record to be preserved, got %#v", api.records)
+	}
+}
+
 func TestApplyCloudflareMemberDNSDetachSkipsAAAAWhenRefBelongsToAnotherMember(t *testing.T) {
 	service := testCloudflareService()
 	service.DNSPayload = `{"zone_name":"example.com","record_name":"app.example.com","record_type":"A","sync_ipv6":true,"ttl":120}`

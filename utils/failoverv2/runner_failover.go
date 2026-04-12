@@ -72,6 +72,29 @@ func (e *blockedOutletError) Error() string {
 	return "new outlet connectivity validation failed: " + strings.Join(parts, ", ")
 }
 
+func isActiveExecutionRunConflict(err error) bool {
+	if err == nil {
+		return false
+	}
+	var conflictErr *activeDNSRunConflictError
+	return errors.As(err, &conflictErr)
+}
+
+func resolveActiveExecutionForConflict(userUUID string, serviceID uint, runErr error) (*models.FailoverV2Execution, bool) {
+	if !isActiveExecutionRunConflict(runErr) {
+		return nil, false
+	}
+
+	activeExecution, err := failoverv2db.GetActiveExecutionForServiceForUser(userUUID, serviceID)
+	if err == nil && activeExecution != nil {
+		return activeExecution, true
+	}
+	if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+		log.Printf("failoverv2: failed to load active execution for service %d after lock conflict: %v", serviceID, err)
+	}
+	return nil, false
+}
+
 func RunMemberFailoverNowForUser(userUUID string, serviceID, memberID uint) (*models.FailoverV2Execution, error) {
 	if err := runPendingFailoverV2CleanupRetries(); err != nil {
 		log.Printf("failoverv2: pending cleanup retry failed before manual failover: %v", err)
@@ -87,7 +110,7 @@ func RunMemberFailoverNowForUser(userUUID string, serviceID, memberID uint) (*mo
 	}
 
 	if memberUsesExistingClient(member) {
-		return queueMemberDetachExecution(
+		execution, runErr := queueMemberDetachExecution(
 			userUUID,
 			service,
 			member,
@@ -95,9 +118,13 @@ func RunMemberFailoverNowForUser(userUUID string, serviceID, memberID uint) (*mo
 			"",
 			fmt.Sprintf("manual protection started for member %s", memberDisplayLabel(member)),
 		)
+		if activeExecution, handled := resolveActiveExecutionForConflict(userUUID, service.ID, runErr); handled {
+			return activeExecution, nil
+		}
+		return execution, runErr
 	}
 
-	return queueMemberProvisioningFailoverExecution(
+	execution, runErr := queueMemberProvisioningFailoverExecution(
 		userUUID,
 		service,
 		member,
@@ -105,6 +132,10 @@ func RunMemberFailoverNowForUser(userUUID string, serviceID, memberID uint) (*mo
 		"",
 		fmt.Sprintf("manual failover started for member %s", memberDisplayLabel(member)),
 	)
+	if activeExecution, handled := resolveActiveExecutionForConflict(userUUID, service.ID, runErr); handled {
+		return activeExecution, nil
+	}
+	return execution, runErr
 }
 
 func queueMemberFailoverExecution(userUUID string, service *models.FailoverV2Service, member *models.FailoverV2Member, triggerReason, triggerSnapshot, startMessage string) (*models.FailoverV2Execution, error) {
@@ -359,13 +390,24 @@ func (r *memberExecutionRunner) cleanupOldInstanceBeforeProvisionIfRequired() (s
 	if provider != "digitalocean" && provider != "linode" {
 		return "", nil, "", nil
 	}
+	if len(currentRef) == 0 {
+		return models.FailoverCleanupStatusSkipped, map[string]interface{}{
+			"classification": "cleanup_not_required_before_provision",
+			"summary":        "old instance cleanup skipped before provisioning because no current instance reference is available",
+			"provider":       provider,
+		}, "", nil
+	}
 
 	cleanup, err := failoverV2ResolveOldInstanceCleanupFunc(r.userUUID, r.member)
 	if err != nil {
 		return "", nil, "", normalizeExecutionStopError(err)
 	}
 	if cleanup == nil {
-		return "", nil, "", errors.New("old instance cleanup requires a resolvable current instance reference")
+		return models.FailoverCleanupStatusWarning, map[string]interface{}{
+			"classification": "cleanup_unavailable_before_provision",
+			"summary":        "old instance cleanup could not be prepared before provisioning replacement",
+			"provider":       provider,
+		}, "old instance cleanup requires manual review", nil
 	}
 
 	step := r.startStep("cleanup_old_before_provision", "Cleanup Old Instance Before Provision", map[string]interface{}{
