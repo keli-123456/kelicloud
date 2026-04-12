@@ -316,6 +316,11 @@ func ApplyCloudflareMemberDNSDetach(ctx context.Context, userUUID string, servic
 		}
 		recordID := strings.TrimSpace(recordRefs[recordType])
 		record := findCloudflareDNSRecordByID(existingRecords, recordID)
+		if strings.TrimSpace(record.ID) != "" && !sameCloudflareRecordIdentity(record, operation.recordName, recordType) {
+			// The stored ref may become stale after zone/record_name changes.
+			// Fallback to current-address lookup and avoid deleting the mismatched referenced record.
+			record = cloudflareDNSRecord{}
+		}
 		if strings.TrimSpace(record.ID) == "" {
 			if currentAddress == "" {
 				continue
@@ -328,8 +333,6 @@ func ApplyCloudflareMemberDNSDetach(ctx context.Context, userUUID string, servic
 			if strings.TrimSpace(record.ID) == "" {
 				continue
 			}
-		} else if !sameCloudflareRecordIdentity(record, operation.recordName, recordType) {
-			return nil, fmt.Errorf("cloudflare dns record ref for %s no longer matches target: %s", recordType, recordID)
 		}
 
 		typedCurrentAddress, hasTypedCurrentAddress := normalizeMemberAddressForRecordType(recordType, currentAddress)
@@ -523,6 +526,11 @@ func VerifyCloudflareMemberDNSDetached(ctx context.Context, userUUID string, ser
 		}
 		recordID := strings.TrimSpace(recordRefs[recordType])
 		record := findCloudflareDNSRecordByID(existingRecords, recordID)
+		if strings.TrimSpace(record.ID) != "" && !sameCloudflareRecordIdentity(record, operation.recordName, recordType) {
+			// The stored ref may become stale after zone/record_name changes.
+			// Fallback to current-address lookup and avoid treating stale refs as fatal errors.
+			record = cloudflareDNSRecord{}
+		}
 		if strings.TrimSpace(record.ID) == "" {
 			if currentAddress == "" {
 				continue
@@ -535,8 +543,6 @@ func VerifyCloudflareMemberDNSDetached(ctx context.Context, userUUID string, ser
 			if strings.TrimSpace(record.ID) == "" {
 				continue
 			}
-		} else if !sameCloudflareRecordIdentity(record, operation.recordName, recordType) {
-			return nil, fmt.Errorf("cloudflare dns record ref for %s no longer matches target: %s", recordType, recordID)
 		}
 
 		typedCurrentAddress, hasTypedCurrentAddress := normalizeMemberAddressForRecordType(recordType, currentAddress)

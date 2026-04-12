@@ -336,6 +336,12 @@ func ApplyAliyunMemberDNSDetach(ctx context.Context, userUUID string, service *m
 		}
 		recordID := strings.TrimSpace(recordRefs[recordType])
 		record := findAliyunDNSRecordByID(existingRecords, recordID)
+		if strings.TrimSpace(record.RecordID) != "" &&
+			(!sameAliyunRecordIdentity(record, operation.rr, recordType) || !sameAliyunRecordLine(record.Line, operation.line)) {
+			// The stored ref may become stale after service domain/RR/line changes.
+			// Fallback to current-address lookup and avoid deleting the mismatched referenced record.
+			record = aliyunDNSRecord{}
+		}
 		if strings.TrimSpace(record.RecordID) == "" {
 			if currentAddress == "" {
 				continue
@@ -348,8 +354,6 @@ func ApplyAliyunMemberDNSDetach(ctx context.Context, userUUID string, service *m
 			if strings.TrimSpace(record.RecordID) == "" {
 				continue
 			}
-		} else if !sameAliyunRecordIdentity(record, operation.rr, recordType) || !sameAliyunRecordLine(record.Line, operation.line) {
-			return nil, fmt.Errorf("aliyun dns record ref for %s no longer matches target: %s", recordType, recordID)
 		}
 
 		typedCurrentAddress, hasTypedCurrentAddress := normalizeMemberAddressForRecordType(recordType, currentAddress)
@@ -520,6 +524,12 @@ func VerifyAliyunMemberDNSDetached(ctx context.Context, userUUID string, service
 		}
 		recordID := strings.TrimSpace(recordRefs[recordType])
 		record := findAliyunDNSRecordByID(existingRecords, recordID)
+		if strings.TrimSpace(record.RecordID) != "" &&
+			(!sameAliyunRecordIdentity(record, operation.rr, recordType) || !sameAliyunRecordLine(record.Line, operation.line)) {
+			// The stored ref may become stale after service domain/RR/line changes.
+			// Fallback to current-address lookup and avoid treating stale refs as fatal errors.
+			record = aliyunDNSRecord{}
+		}
 		if strings.TrimSpace(record.RecordID) == "" {
 			if currentAddress == "" {
 				continue
@@ -532,8 +542,6 @@ func VerifyAliyunMemberDNSDetached(ctx context.Context, userUUID string, service
 			if strings.TrimSpace(record.RecordID) == "" {
 				continue
 			}
-		} else if !sameAliyunRecordIdentity(record, operation.rr, recordType) || !sameAliyunRecordLine(record.Line, operation.line) {
-			return nil, fmt.Errorf("aliyun dns record ref for %s no longer matches target: %s", recordType, recordID)
 		}
 
 		typedCurrentAddress, hasTypedCurrentAddress := normalizeMemberAddressForRecordType(recordType, currentAddress)

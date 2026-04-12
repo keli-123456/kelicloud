@@ -536,12 +536,8 @@ func buildFailoverV2ProbeView(member *models.FailoverV2Member, report *common.Re
 		Status: "unavailable",
 		Stale:  true,
 	}
-	if member != nil && strings.TrimSpace(member.WatchClientUUID) == "" {
-		if strings.TrimSpace(member.Mode) == models.FailoverV2MemberModeExistingClient {
-			view.Message = "existing_client member requires watch_client_uuid"
-		} else {
-			view.Message = "member is not initialized"
-		}
+	if member != nil && strings.TrimSpace(member.Mode) == models.FailoverV2MemberModeExistingClient && strings.TrimSpace(member.WatchClientUUID) == "" {
+		view.Message = "existing_client member requires watch_client_uuid"
 		return view
 	}
 	if member == nil || report == nil || report.CNConnectivity == nil {
@@ -1853,6 +1849,16 @@ func UpdateFailoverV2Service(c *gin.Context) {
 		return
 	}
 
+	existing, err := failoverv2db.GetServiceByIDForUser(scope.UserUUID, serviceID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			api.RespondError(c, http.StatusNotFound, "Failover v2 service not found")
+			return
+		}
+		api.RespondError(c, http.StatusInternalServerError, "Failed to load failover v2 service: "+err.Error())
+		return
+	}
+
 	var req failoverV2ServiceRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		api.RespondError(c, http.StatusBadRequest, "Invalid request body: "+err.Error())
@@ -1869,7 +1875,8 @@ func UpdateFailoverV2Service(c *gin.Context) {
 		return
 	}
 
-	if _, err := failoverv2db.UpdateServiceForUser(scope.UserUUID, serviceID, service); err != nil {
+	updated, err := failoverv2db.UpdateServiceForUser(scope.UserUUID, serviceID, service)
+	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			api.RespondError(c, http.StatusNotFound, "Failover v2 service not found")
 			return
@@ -1880,6 +1887,13 @@ func UpdateFailoverV2Service(c *gin.Context) {
 		}
 		api.RespondError(c, http.StatusInternalServerError, "Failed to update failover v2 service: "+err.Error())
 		return
+	}
+
+	if failoverv2svc.ShouldRebuildServiceMemberDNSRecordRefs(existing, updated) {
+		if err := failoverv2svc.RebuildServiceMemberDNSRecordRefs(scope.UserUUID, serviceID); err != nil {
+			api.RespondError(c, http.StatusInternalServerError, "Failed to rebuild failover v2 member dns refs: "+err.Error())
+			return
+		}
 	}
 
 	view, err := loadFailoverV2ServiceView(scope, serviceID)

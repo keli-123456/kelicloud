@@ -479,6 +479,31 @@ func TestApplyAliyunMemberDNSDetachAllowsStaleAddressWhenNotAnotherMember(t *tes
 	}
 }
 
+func TestApplyAliyunMemberDNSDetachFallsBackWhenStoredRefNoLongerMatchesIdentity(t *testing.T) {
+	client := &mockAliyunDNSClient{
+		records: []aliyunDNSRecord{
+			{RecordID: "record-stale-ref", RR: "legacy", Type: "A", Value: "203.0.113.250", TTL: 60, Line: "telecom"},
+			{RecordID: "record-target-a", RR: "@", Type: "A", Value: "198.51.100.10", TTL: 60, Line: "telecom"},
+		},
+	}
+	useMockAliyunDNSDependencies(t, client)
+
+	member := testAliyunMember()
+	member.DNSRecordRefs = `{"A":"record-stale-ref"}`
+	member.CurrentAddress = "198.51.100.10"
+
+	result, err := ApplyAliyunMemberDNSDetach(context.Background(), "user-a", testAliyunService(), member)
+	if err != nil {
+		t.Fatalf("expected stale ref detach to continue, got %v", err)
+	}
+	if len(client.deleteCalls) != 1 || client.deleteCalls[0] != "record-target-a" {
+		t.Fatalf("expected detach to remove only current-address target record, got %#v", client.deleteCalls)
+	}
+	if len(result.Removed) != 1 || result.Removed[0].ID != "record-target-a" {
+		t.Fatalf("expected stale ref fallback to remove target record, got %#v", result.Removed)
+	}
+}
+
 func TestApplyAliyunMemberDNSDetachSkipsAAAAWhenRefBelongsToAnotherMember(t *testing.T) {
 	service := testAliyunService()
 	service.DNSPayload = `{"domain_name":"example.com","rr":"@","record_type":"A","sync_ipv6":true,"ttl":60}`
