@@ -3,6 +3,7 @@ package failoverv2
 import (
 	"fmt"
 	"log"
+	"slices"
 	"strings"
 	"sync"
 
@@ -410,21 +411,50 @@ func releaseDNSRun(key string, serviceID uint) {
 	}
 }
 
-func claimServiceExecutionLocks(userUUID string, service *models.FailoverV2Service) (*ServiceDNSOwnership, error) {
+func executionDNSRunScopeKey(ownership *ServiceDNSOwnership, member *models.FailoverV2Member) string {
+	baseKey := ""
+	if ownership != nil {
+		baseKey = strings.TrimSpace(ownership.Key)
+	}
+	if baseKey == "" {
+		return ""
+	}
+
+	lines := memberLineCodes(member)
+	if len(lines) == 0 {
+		return baseKey + "|line:*"
+	}
+
+	seen := make(map[string]struct{}, len(lines))
+	normalized := make([]string, 0, len(lines))
+	for _, line := range lines {
+		line = strings.ToLower(strings.TrimSpace(line))
+		if line == "" {
+			continue
+		}
+		if _, exists := seen[line]; exists {
+			continue
+		}
+		seen[line] = struct{}{}
+		normalized = append(normalized, line)
+	}
+	if len(normalized) == 0 {
+		return baseKey + "|line:*"
+	}
+	// Keep deterministic ordering regardless of member line payload ordering.
+	slices.Sort(normalized)
+	return baseKey + "|line:" + strings.Join(normalized, ",")
+}
+
+func claimServiceExecutionLocks(userUUID string, service *models.FailoverV2Service, member *models.FailoverV2Member) (*ServiceDNSOwnership, error) {
 	ownership, err := EnsureServiceDNSOwnershipAvailable(userUUID, service.ID, service)
 	if err != nil {
 		return nil, err
 	}
 
-	serviceRunLock, err := claimServiceRunLock(service.ID, failoverV2ServiceRunLockTTL(service))
-	if err != nil {
-		return nil, err
-	}
-	ownership.serviceRunLock = serviceRunLock
-
-	activeServiceID, claimed := claimDNSRun(ownership.Key, service.ID)
+	scopeKey := executionDNSRunScopeKey(ownership, member)
+	activeServiceID, claimed := claimDNSRun(scopeKey, service.ID)
 	if !claimed {
-		serviceRunLock.release()
 		return nil, &activeDNSRunConflictError{
 			Ownership:       *ownership,
 			ServiceID:       service.ID,
@@ -432,14 +462,13 @@ func claimServiceExecutionLocks(userUUID string, service *models.FailoverV2Servi
 		}
 	}
 	dnsRunLock, err := claimFailoverV2RunLock(
-		failoverV2DNSRunLockKey(ownership.Key),
+		failoverV2DNSRunLockKey(scopeKey),
 		failoverV2ServiceRunLockTTL(service),
 		func() {
-			releaseDNSRun(ownership.Key, service.ID)
+			releaseDNSRun(scopeKey, service.ID)
 		},
 	)
 	if err != nil {
-		serviceRunLock.release()
 		return nil, &activeDNSRunConflictError{
 			Ownership:       *ownership,
 			ServiceID:       service.ID,

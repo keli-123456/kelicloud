@@ -37,16 +37,17 @@ func RetryAttachDNSForUser(userUUID string, serviceID, executionID uint) (*model
 		return nil, err
 	}
 
-	ownership, err := claimServiceExecutionLocks(userUUID, service)
+	ctx, err := loadRetryExecutionContext(userUUID, serviceID, executionID)
+	if err != nil {
+		return nil, err
+	}
+
+	ownership, err := claimServiceExecutionLocks(userUUID, service, ctx.member)
 	if err != nil {
 		return nil, err
 	}
 	defer releaseServiceExecutionLocks(service.ID, ownership)
 
-	ctx, err := loadRetryExecutionContext(userUUID, serviceID, executionID)
-	if err != nil {
-		return nil, err
-	}
 	availableActions := DescribeExecutionAvailableActions(ctx.service, ctx.member, ctx.execution)
 	if !availableActions.RetryAttachDNS.Available {
 		return nil, errors.New(firstNonEmpty(availableActions.RetryAttachDNS.Reason, "attach dns retry is not available for this execution"))

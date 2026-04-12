@@ -243,7 +243,7 @@ func queueMemberExecution(
 	if err := ensureMemberTargetAvailableFromLegacyFailover(userUUID, member); err != nil {
 		return nil, err
 	}
-	ownership, err := claimServiceExecutionLocks(userUUID, service)
+	ownership, err := claimServiceExecutionLocks(userUUID, service, member)
 	if err != nil {
 		return nil, err
 	}

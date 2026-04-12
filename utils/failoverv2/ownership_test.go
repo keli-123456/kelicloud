@@ -225,17 +225,106 @@ func TestRunMemberFailoverNowForUserRejectsActiveDNSLock(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to resolve ownership: %v", err)
 	}
+	scopeKey := executionDNSRunScopeKey(ownership, member)
 
-	if _, claimed := claimDNSRun(ownership.Key, 999); !claimed {
+	if _, claimed := claimDNSRun(scopeKey, 999); !claimed {
 		t.Fatal("expected to claim dns run lock for test")
 	}
 	t.Cleanup(func() {
-		releaseDNSRun(ownership.Key, 999)
+		releaseDNSRun(scopeKey, 999)
 	})
 
 	if _, err := RunMemberFailoverNowForUser("user-a", service.ID, member.ID); err == nil {
 		t.Fatal("expected active dns lock to block failover start")
 	} else if !strings.Contains(err.Error(), "already being modified") {
 		t.Fatalf("expected active dns lock conflict error, got %v", err)
+	}
+}
+
+func TestClaimServiceExecutionLocksAllowsParallelMembersOnDifferentLines(t *testing.T) {
+	configureFailoverV2RunnerTestDB(t)
+	useMockFailoverV2OwnershipConfig(t)
+
+	service, memberA := createTestRunnerServiceAndMember(t)
+	memberB, err := failoverv2db.CreateMemberForUser("user-a", service.ID, &models.FailoverV2Member{
+		Name:            "unicom-b",
+		Enabled:         true,
+		WatchClientUUID: "client-b",
+		DNSLine:         "unicom",
+		Provider:        "digitalocean",
+		ProviderEntryID: "token-1",
+		PlanPayload:     `{"region":"nyc1","size":"s-1vcpu-1gb","image":"ubuntu-24-04-x64"}`,
+	})
+	if err != nil {
+		t.Fatalf("failed to create second member: %v", err)
+	}
+
+	reloaded, err := failoverv2db.GetServiceByIDForUser("user-a", service.ID)
+	if err != nil {
+		t.Fatalf("failed to reload service: %v", err)
+	}
+	memberAReloaded, err := findMemberOnService(reloaded, memberA.ID)
+	if err != nil {
+		t.Fatalf("failed to load member A: %v", err)
+	}
+	memberBReloaded, err := findMemberOnService(reloaded, memberB.ID)
+	if err != nil {
+		t.Fatalf("failed to load member B: %v", err)
+	}
+
+	ownershipA, err := claimServiceExecutionLocks("user-a", reloaded, memberAReloaded)
+	if err != nil {
+		t.Fatalf("expected member A lock claim to succeed: %v", err)
+	}
+	defer releaseServiceExecutionLocks(reloaded.ID, ownershipA)
+
+	ownershipB, err := claimServiceExecutionLocks("user-a", reloaded, memberBReloaded)
+	if err != nil {
+		t.Fatalf("expected member B lock claim to succeed on different line: %v", err)
+	}
+	releaseServiceExecutionLocks(reloaded.ID, ownershipB)
+}
+
+func TestClaimServiceExecutionLocksRejectsMembersOnSameLine(t *testing.T) {
+	configureFailoverV2RunnerTestDB(t)
+	useMockFailoverV2OwnershipConfig(t)
+
+	service, memberA := createTestRunnerServiceAndMember(t)
+	memberB, err := failoverv2db.CreateMemberForUser("user-a", service.ID, &models.FailoverV2Member{
+		Name:            "telecom-b",
+		Enabled:         true,
+		WatchClientUUID: "client-b",
+		DNSLine:         "telecom",
+		Provider:        "digitalocean",
+		ProviderEntryID: "token-1",
+		PlanPayload:     `{"region":"nyc1","size":"s-1vcpu-1gb","image":"ubuntu-24-04-x64"}`,
+	})
+	if err != nil {
+		t.Fatalf("failed to create second member on same line: %v", err)
+	}
+
+	reloaded, err := failoverv2db.GetServiceByIDForUser("user-a", service.ID)
+	if err != nil {
+		t.Fatalf("failed to reload service: %v", err)
+	}
+	memberAReloaded, err := findMemberOnService(reloaded, memberA.ID)
+	if err != nil {
+		t.Fatalf("failed to load member A: %v", err)
+	}
+	memberBReloaded, err := findMemberOnService(reloaded, memberB.ID)
+	if err != nil {
+		t.Fatalf("failed to load member B: %v", err)
+	}
+
+	ownershipA, err := claimServiceExecutionLocks("user-a", reloaded, memberAReloaded)
+	if err != nil {
+		t.Fatalf("expected member A lock claim to succeed: %v", err)
+	}
+	defer releaseServiceExecutionLocks(reloaded.ID, ownershipA)
+
+	if _, err := claimServiceExecutionLocks("user-a", reloaded, memberBReloaded); err == nil {
+		t.Fatal("expected member B lock claim to fail on same line")
+	} else if !strings.Contains(err.Error(), "already being modified") {
+		t.Fatalf("expected active dns lock conflict, got %v", err)
 	}
 }
