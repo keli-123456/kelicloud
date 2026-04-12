@@ -25,6 +25,7 @@ const (
 	failoverV2MinRunLockTTL            = 30 * time.Minute
 	failoverV2MaxRunLockTTL            = 12 * time.Hour
 	failoverV2PendingCleanupRunLockTTL = 5 * time.Minute
+	failoverV2RunLockWaitTick          = 200 * time.Millisecond
 )
 
 var (
@@ -122,6 +123,27 @@ func failoverV2ProvisionRunLockKey(userUUID string, member *models.FailoverV2Mem
 	return "failover_v2:provision:" + hex.EncodeToString(sum[:])
 }
 
+func failoverV2DNSProviderEntryRunLockKey(userUUID string, service *models.FailoverV2Service) string {
+	if service == nil {
+		return ""
+	}
+	provider := strings.ToLower(strings.TrimSpace(service.DNSProvider))
+	if provider == "" {
+		return ""
+	}
+	entryID := strings.TrimSpace(service.DNSEntryID)
+	if entryID == "" {
+		entryID = activeProviderEntryID
+	}
+	payload := strings.Join([]string{
+		strings.ToLower(strings.TrimSpace(userUUID)),
+		provider,
+		strings.ToLower(entryID),
+	}, "|")
+	sum := sha256.Sum256([]byte(payload))
+	return "failover_v2:dns_api:" + hex.EncodeToString(sum[:])
+}
+
 func newFailoverV2RunLockOwner() string {
 	var random [16]byte
 	if _, err := rand.Read(random[:]); err == nil {
@@ -188,7 +210,43 @@ func claimServiceRunLock(serviceID uint, ttl time.Duration) (*failoverV2RunLockH
 	)
 }
 
-func claimMemberProvisionRunLock(userUUID string, service *models.FailoverV2Service, member *models.FailoverV2Member) (*failoverV2RunLockHandle, error) {
+func claimFailoverV2RunLockWithWait(ctx context.Context, lockKey string, ttl time.Duration) (*failoverV2RunLockHandle, error) {
+	lockKey = strings.TrimSpace(lockKey)
+	if lockKey == "" {
+		return nil, fmt.Errorf("failover v2 run lock key is required")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	owner := newFailoverV2RunLockOwner()
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+
+		claimed, err := failoverv2db.ClaimRunLock(lockKey, owner, ttl)
+		if err != nil {
+			return nil, err
+		}
+		if claimed {
+			return &failoverV2RunLockHandle{
+				lockKey: lockKey,
+				owner:   owner,
+			}, nil
+		}
+
+		timer := time.NewTimer(failoverV2RunLockWaitTick)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+func claimMemberProvisionRunLock(ctx context.Context, userUUID string, service *models.FailoverV2Service, member *models.FailoverV2Member) (*failoverV2RunLockHandle, error) {
 	if member == nil || memberUsesExistingClient(member) {
 		return nil, nil
 	}
@@ -197,19 +255,15 @@ func claimMemberProvisionRunLock(userUUID string, service *models.FailoverV2Serv
 		return nil, nil
 	}
 
-	owner := newFailoverV2RunLockOwner()
-	claimed, err := failoverv2db.ClaimRunLock(lockKey, owner, failoverV2ServiceRunLockTTL(service))
-	if err != nil {
-		return nil, err
-	}
-	if !claimed {
-		return nil, fmt.Errorf("provider credential is busy provisioning another member")
-	}
+	return claimFailoverV2RunLockWithWait(ctx, lockKey, failoverV2ServiceRunLockTTL(service))
+}
 
-	return &failoverV2RunLockHandle{
-		lockKey: lockKey,
-		owner:   owner,
-	}, nil
+func claimDNSProviderEntryRunLock(ctx context.Context, userUUID string, service *models.FailoverV2Service) (*failoverV2RunLockHandle, error) {
+	lockKey := failoverV2DNSProviderEntryRunLockKey(userUUID, service)
+	if lockKey == "" {
+		return nil, nil
+	}
+	return claimFailoverV2RunLockWithWait(ctx, lockKey, failoverV2ServiceRunLockTTL(service))
 }
 
 func buildMemberOldAddressesSnapshot(member *models.FailoverV2Member) string {

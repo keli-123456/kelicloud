@@ -506,7 +506,7 @@ func (r *memberExecutionRunner) provisionReplacementInstance() (*memberProvision
 		"status": models.FailoverV2ExecutionStatusProvisioning,
 	})
 
-	provisionLock, lockErr := claimMemberProvisionRunLock(r.userUUID, r.service, r.member)
+	provisionLock, lockErr := claimMemberProvisionRunLock(r.ctx, r.userUUID, r.service, r.member)
 	if lockErr != nil {
 		lockErr = normalizeExecutionStopError(lockErr)
 		r.finishStep(step, models.FailoverStepStatusFailed, lockErr.Error(), map[string]interface{}{"error": lockErr.Error()})

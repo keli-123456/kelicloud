@@ -154,6 +154,14 @@ func verifyMemberDNSAttached(ctx context.Context, userUUID string, service *mode
 }
 
 func applyMemberDNSDetachSingleLine(ctx context.Context, userUUID string, service *models.FailoverV2Service, member *models.FailoverV2Member) (interface{}, error) {
+	dnsLock, err := claimDNSProviderEntryRunLock(ctx, userUUID, service)
+	if err != nil {
+		return nil, err
+	}
+	if dnsLock != nil {
+		defer dnsLock.release()
+	}
+
 	switch strings.ToLower(strings.TrimSpace(service.DNSProvider)) {
 	case models.FailoverDNSProviderAliyun:
 		return ApplyAliyunMemberDNSDetach(ctx, userUUID, service, member)
@@ -165,6 +173,14 @@ func applyMemberDNSDetachSingleLine(ctx context.Context, userUUID string, servic
 }
 
 func verifyMemberDNSDetachedSingleLine(ctx context.Context, userUUID string, service *models.FailoverV2Service, member *models.FailoverV2Member) (interface{}, error) {
+	dnsLock, err := claimDNSProviderEntryRunLock(ctx, userUUID, service)
+	if err != nil {
+		return nil, err
+	}
+	if dnsLock != nil {
+		defer dnsLock.release()
+	}
+
 	switch strings.ToLower(strings.TrimSpace(service.DNSProvider)) {
 	case models.FailoverDNSProviderAliyun:
 		return VerifyAliyunMemberDNSDetached(ctx, userUUID, service, member)
@@ -176,6 +192,14 @@ func verifyMemberDNSDetachedSingleLine(ctx context.Context, userUUID string, ser
 }
 
 func applyMemberDNSAttachSingleLine(ctx context.Context, userUUID string, service *models.FailoverV2Service, member *models.FailoverV2Member, ipv4, ipv6 string) (interface{}, error) {
+	dnsLock, err := claimDNSProviderEntryRunLock(ctx, userUUID, service)
+	if err != nil {
+		return nil, err
+	}
+	if dnsLock != nil {
+		defer dnsLock.release()
+	}
+
 	switch strings.ToLower(strings.TrimSpace(service.DNSProvider)) {
 	case models.FailoverDNSProviderAliyun:
 		return ApplyAliyunMemberDNSAttach(ctx, userUUID, service, member, ipv4, ipv6)
@@ -187,6 +211,14 @@ func applyMemberDNSAttachSingleLine(ctx context.Context, userUUID string, servic
 }
 
 func verifyMemberDNSAttachedSingleLine(ctx context.Context, userUUID string, service *models.FailoverV2Service, member *models.FailoverV2Member, ipv4, ipv6 string) (interface{}, error) {
+	dnsLock, err := claimDNSProviderEntryRunLock(ctx, userUUID, service)
+	if err != nil {
+		return nil, err
+	}
+	if dnsLock != nil {
+		defer dnsLock.release()
+	}
+
 	switch strings.ToLower(strings.TrimSpace(service.DNSProvider)) {
 	case models.FailoverDNSProviderAliyun:
 		return VerifyAliyunMemberDNSAttached(ctx, userUUID, service, member, ipv4, ipv6)
