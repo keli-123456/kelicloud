@@ -124,6 +124,18 @@ func ApplyAliyunMemberDNSAttach(ctx context.Context, userUUID string, service *m
 		if err != nil {
 			return nil, err
 		}
+		expectedValues = augmentExpectedRecordValuesWithMemberRefs(
+			expectedValues,
+			service,
+			member,
+			recordType,
+			func(candidate *models.FailoverV2Member) bool {
+				return memberHasAliyunLine(candidate, operation.line)
+			},
+			func(candidate *models.FailoverV2Member, resolvedType string) (string, bool) {
+				return resolveAliyunMemberExpectedRecordValueFromRefs(candidate, resolvedType, operation.rr, operation.line, existingRecords)
+			},
+		)
 
 		selectedRecordIDs := map[string]struct{}{}
 		targetRecordID := ""
@@ -427,6 +439,18 @@ func VerifyAliyunMemberDNSAttached(ctx context.Context, userUUID string, service
 		if err != nil {
 			return nil, err
 		}
+		expectedValues = augmentExpectedRecordValuesWithMemberRefs(
+			expectedValues,
+			service,
+			member,
+			recordType,
+			func(candidate *models.FailoverV2Member) bool {
+				return memberHasAliyunLine(candidate, operation.line)
+			},
+			func(candidate *models.FailoverV2Member, resolvedType string) (string, bool) {
+				return resolveAliyunMemberExpectedRecordValueFromRefs(candidate, resolvedType, operation.rr, operation.line, existingRecords)
+			},
+		)
 		for _, expectedValue := range expectedValues {
 			expected = append(expected, buildAliyunMemberDNSRecord(operation.domainName, operation.rr, operation.line, recordType, expectedValue, ""))
 		}
@@ -1043,6 +1067,44 @@ func findAliyunDNSRecordByID(records []aliyunDNSRecord, recordID string) aliyunD
 		}
 	}
 	return aliyunDNSRecord{}
+}
+
+func resolveAliyunMemberExpectedRecordValueFromRefs(
+	member *models.FailoverV2Member,
+	recordType string,
+	rr string,
+	line string,
+	records []aliyunDNSRecord,
+) (string, bool) {
+	recordType = strings.ToUpper(strings.TrimSpace(recordType))
+	if member == nil || recordType == "" {
+		return "", false
+	}
+
+	for _, memberLine := range effectiveMemberLines(member) {
+		if !sameAliyunRecordLine(memberLine.LineCode, line) {
+			continue
+		}
+		recordRefs := decodeMemberDNSRecordRefs(memberLine.DNSRecordRefs)
+		recordID := strings.TrimSpace(recordRefs[recordType])
+		if recordID == "" {
+			continue
+		}
+		record := findAliyunDNSRecordByID(records, recordID)
+		if strings.TrimSpace(record.RecordID) == "" {
+			continue
+		}
+		if !sameAliyunRecordIdentity(record, rr, recordType) || !sameAliyunRecordLine(record.Line, line) {
+			continue
+		}
+		normalized, err := normalizeDNSRecordIPValue("record_value", recordType, record.Value, recordType == "A")
+		if err != nil {
+			continue
+		}
+		return normalized, true
+	}
+
+	return "", false
 }
 
 func joinAliyunRecordName(domainName, rr string) string {

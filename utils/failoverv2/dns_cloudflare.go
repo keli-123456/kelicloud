@@ -165,6 +165,16 @@ func ApplyCloudflareMemberDNSAttach(ctx context.Context, userUUID string, servic
 		if err != nil {
 			return nil, err
 		}
+		expectedValues = augmentExpectedRecordValuesWithMemberRefs(
+			expectedValues,
+			service,
+			member,
+			recordType,
+			nil,
+			func(candidate *models.FailoverV2Member, resolvedType string) (string, bool) {
+				return resolveCloudflareMemberExpectedRecordValueFromRefs(candidate, resolvedType, operation.recordName, existingRecords)
+			},
+		)
 
 		selectedRecordIDs := map[string]struct{}{}
 		targetRecordID := ""
@@ -392,6 +402,16 @@ func VerifyCloudflareMemberDNSAttached(ctx context.Context, userUUID string, ser
 		if err != nil {
 			return nil, err
 		}
+		expectedValues = augmentExpectedRecordValuesWithMemberRefs(
+			expectedValues,
+			service,
+			member,
+			recordType,
+			nil,
+			func(candidate *models.FailoverV2Member, resolvedType string) (string, bool) {
+				return resolveCloudflareMemberExpectedRecordValueFromRefs(candidate, resolvedType, operation.recordName, existingRecords)
+			},
+		)
 		for _, expectedValue := range expectedValues {
 			expected = append(expected, CloudflareMemberDNSRecord{
 				Provider: models.FailoverDNSProviderCloudflare,
@@ -765,6 +785,40 @@ func findCloudflareDNSRecordByID(records []cloudflareDNSRecord, recordID string)
 		}
 	}
 	return cloudflareDNSRecord{}
+}
+
+func resolveCloudflareMemberExpectedRecordValueFromRefs(
+	member *models.FailoverV2Member,
+	recordType string,
+	recordName string,
+	records []cloudflareDNSRecord,
+) (string, bool) {
+	recordType = strings.ToUpper(strings.TrimSpace(recordType))
+	if member == nil || recordType == "" {
+		return "", false
+	}
+
+	for _, memberLine := range effectiveMemberLines(member) {
+		recordRefs := decodeMemberDNSRecordRefs(memberLine.DNSRecordRefs)
+		recordID := strings.TrimSpace(recordRefs[recordType])
+		if recordID == "" {
+			continue
+		}
+		record := findCloudflareDNSRecordByID(records, recordID)
+		if strings.TrimSpace(record.ID) == "" {
+			continue
+		}
+		if !sameCloudflareRecordIdentity(record, recordName, recordType) {
+			continue
+		}
+		normalized, err := normalizeDNSRecordIPValue("record_value", recordType, record.Content, recordType == "A")
+		if err != nil {
+			continue
+		}
+		return normalized, true
+	}
+
+	return "", false
 }
 
 func findCloudflareMatchingRecord(records []cloudflareDNSRecord, name, recordType, content string) cloudflareDNSRecord {
