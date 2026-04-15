@@ -157,6 +157,13 @@ type InstanceDetail struct {
 	DataDisks         []Disk             `json:"data_disks"`
 }
 
+type PublicIPReplacementResult struct {
+	OldPublicIPID string `json:"old_public_ip_id,omitempty"`
+	OldPublicIP   string `json:"old_public_ip,omitempty"`
+	NewPublicIPID string `json:"new_public_ip_id,omitempty"`
+	NewPublicIP   string `json:"new_public_ip,omitempty"`
+}
+
 type virtualMachineResource struct {
 	ID         string            `json:"id"`
 	Name       string            `json:"name"`
@@ -681,6 +688,136 @@ func (c *Client) DeleteVirtualMachine(ctx context.Context, resourceGroup, name s
 	return c.do(ctx, http.MethodDelete, c.vmPath(resourceGroup, name), url.Values{
 		"api-version": {computeAPIVersion},
 	}, nil, nil)
+}
+
+func (c *Client) ReplaceVirtualMachinePublicIPv4(ctx context.Context, resourceGroup, name string) (*PublicIPReplacementResult, error) {
+	resourceGroup = strings.TrimSpace(resourceGroup)
+	name = strings.TrimSpace(name)
+	if resourceGroup == "" || name == "" {
+		return nil, errors.New("azure vm resource group and name are required")
+	}
+
+	var vmResource virtualMachineResource
+	if err := c.do(ctx, http.MethodGet, c.vmPath(resourceGroup, name), url.Values{
+		"api-version": {computeAPIVersion},
+	}, nil, &vmResource); err != nil {
+		return nil, err
+	}
+
+	primaryNICID := ""
+	for _, nicRef := range vmResource.Properties.NetworkProfile.NetworkInterfaces {
+		if nicRef.Properties.Primary {
+			primaryNICID = strings.TrimSpace(nicRef.ID)
+			break
+		}
+	}
+	if primaryNICID == "" && len(vmResource.Properties.NetworkProfile.NetworkInterfaces) > 0 {
+		primaryNICID = strings.TrimSpace(vmResource.Properties.NetworkProfile.NetworkInterfaces[0].ID)
+	}
+	if primaryNICID == "" {
+		return nil, errors.New("azure vm has no network interface attached")
+	}
+
+	nicPath, err := toManagementPath(primaryNICID)
+	if err != nil {
+		return nil, err
+	}
+
+	var nicResource map[string]any
+	if err := c.do(ctx, http.MethodGet, nicPath, url.Values{
+		"api-version": {networkAPIVersion},
+	}, nil, &nicResource); err != nil {
+		return nil, err
+	}
+
+	properties := mapFromAny(nicResource["properties"])
+	if properties == nil {
+		return nil, errors.New("azure network interface properties are missing")
+	}
+	ipConfigurations := sliceFromAny(properties["ipConfigurations"])
+	if len(ipConfigurations) == 0 {
+		return nil, errors.New("azure network interface has no ip configurations")
+	}
+
+	targetIndex := 0
+	for index, rawConfig := range ipConfigurations {
+		configMap := mapFromAny(rawConfig)
+		configProperties := mapFromAny(configMap["properties"])
+		if configProperties == nil {
+			continue
+		}
+		if boolFromAny(configProperties["primary"]) {
+			targetIndex = index
+			break
+		}
+	}
+
+	targetConfig := mapFromAny(ipConfigurations[targetIndex])
+	if targetConfig == nil {
+		return nil, errors.New("azure network interface ip configuration is invalid")
+	}
+	targetConfigProperties := mapFromAny(targetConfig["properties"])
+	if targetConfigProperties == nil {
+		return nil, errors.New("azure network interface ip configuration properties are missing")
+	}
+
+	oldPublicIPID := ""
+	oldPublicIP := ""
+	if oldPublicIPRaw := mapFromAny(targetConfigProperties["publicIPAddress"]); oldPublicIPRaw != nil {
+		oldPublicIPID = strings.TrimSpace(stringFromAny(oldPublicIPRaw["id"]))
+		if oldPublicIPID != "" {
+			oldPublicIP, _ = c.getPublicIPAddress(ctx, oldPublicIPID)
+		}
+	}
+
+	location := normalizeLocation(firstNonEmpty(stringFromAny(nicResource["location"]), vmResource.Location, c.credential.DefaultLocation, DefaultLocation))
+	if location == "" {
+		location = DefaultLocation
+	}
+	tags := normalizeTags(anyMapString(nicResource["tags"]))
+	newPublicIPName := normalizeAzureResourceName(fmt.Sprintf("%s-rip-%d", name, time.Now().Unix()), 80, fmt.Sprintf("komari-%d", time.Now().Unix()))
+	if err := c.ensurePublicIPAddress(ctx, resourceGroup, location, newPublicIPName, "IPv4", tags); err != nil {
+		return nil, err
+	}
+	newPublicIPID := c.publicIPAddressPath(resourceGroup, newPublicIPName)
+
+	targetConfigProperties["publicIPAddress"] = map[string]any{
+		"id": newPublicIPID,
+	}
+	targetConfig["properties"] = targetConfigProperties
+	ipConfigurations[targetIndex] = targetConfig
+	properties["ipConfigurations"] = ipConfigurations
+
+	payload := map[string]any{
+		"location":   location,
+		"properties": properties,
+	}
+	if tagsRaw := nicResource["tags"]; tagsRaw != nil {
+		payload["tags"] = tagsRaw
+	}
+
+	if err := c.doAsync(ctx, http.MethodPut, nicPath, url.Values{
+		"api-version": {networkAPIVersion},
+	}, payload); err != nil {
+		return nil, err
+	}
+
+	if oldPublicIPID != "" {
+		if oldPath, pathErr := toManagementPath(oldPublicIPID); pathErr == nil {
+			_ = c.doAsync(ctx, http.MethodDelete, oldPath, url.Values{
+				"api-version": {networkAPIVersion},
+			}, nil)
+		}
+	}
+
+	newPublicIP, _ := c.getPublicIPAddress(ctx, newPublicIPID)
+
+	return &PublicIPReplacementResult{
+		OldPublicIPID: oldPublicIPID,
+		OldPublicIP:   strings.TrimSpace(oldPublicIP),
+		NewPublicIPID: newPublicIPID,
+		NewPublicIP:   strings.TrimSpace(newPublicIP),
+	}, nil
 }
 
 func EncodeInstanceID(resourceGroup, name string) string {
@@ -1446,6 +1583,69 @@ func toManagementPath(resourceID string) (string, error) {
 		return "", errors.New("azure resource id is invalid")
 	}
 	return resourceID, nil
+}
+
+func mapFromAny(value any) map[string]any {
+	if value == nil {
+		return nil
+	}
+	switch typed := value.(type) {
+	case map[string]any:
+		return typed
+	default:
+		return nil
+	}
+}
+
+func sliceFromAny(value any) []any {
+	switch typed := value.(type) {
+	case []any:
+		return typed
+	default:
+		return nil
+	}
+}
+
+func stringFromAny(value any) string {
+	if value == nil {
+		return ""
+	}
+	switch typed := value.(type) {
+	case string:
+		return typed
+	case fmt.Stringer:
+		return typed.String()
+	default:
+		return strings.TrimSpace(fmt.Sprintf("%v", value))
+	}
+}
+
+func boolFromAny(value any) bool {
+	switch typed := value.(type) {
+	case bool:
+		return typed
+	case string:
+		parsed, err := strconv.ParseBool(strings.TrimSpace(typed))
+		return err == nil && parsed
+	default:
+		return false
+	}
+}
+
+func anyMapString(value any) map[string]string {
+	rawMap := mapFromAny(value)
+	if rawMap == nil {
+		return nil
+	}
+	result := make(map[string]string, len(rawMap))
+	for key, raw := range rawMap {
+		normalizedKey := strings.TrimSpace(key)
+		if normalizedKey == "" {
+			continue
+		}
+		result[normalizedKey] = strings.TrimSpace(stringFromAny(raw))
+	}
+	return result
 }
 
 func canRetryVirtualMachineListWithoutExpand(err error) bool {

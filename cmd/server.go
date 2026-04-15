@@ -323,6 +323,7 @@ func RunServer() {
 				azureGroup.GET("/account", admin.GetAzureAccount)
 				azureGroup.GET("/catalog", admin.GetAzureCatalog)
 				azureGroup.GET("/instances", admin.ListAzureInstances)
+				azureGroup.GET("/instances/:id/password", admin.GetAzureInstancePassword)
 				azureGroup.GET("/instances/:id", admin.GetAzureInstanceDetail)
 				azureGroup.POST("/instances", admin.CreateAzureInstance)
 				azureGroup.DELETE("/instances/:id", admin.DeleteAzureInstance)
