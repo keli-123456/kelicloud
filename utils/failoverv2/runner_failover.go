@@ -400,7 +400,16 @@ func (r *memberExecutionRunner) cleanupOldInstanceBeforeProvisionIfRequired() (s
 
 	cleanup, err := failoverV2ResolveOldInstanceCleanupFunc(r.userUUID, r.member)
 	if err != nil {
-		return "", nil, "", normalizeExecutionStopError(err)
+		err = normalizeExecutionStopError(err)
+		if errors.Is(err, errExecutionStopped) {
+			return "", nil, "", err
+		}
+		return models.FailoverCleanupStatusWarning, map[string]interface{}{
+			"classification": "cleanup_unavailable_before_provision",
+			"summary":        "old instance cleanup could not be prepared before provisioning replacement",
+			"provider":       provider,
+			"error":          err.Error(),
+		}, "old instance cleanup requires manual review", nil
 	}
 	if cleanup == nil {
 		return models.FailoverCleanupStatusWarning, map[string]interface{}{
@@ -420,6 +429,17 @@ func (r *memberExecutionRunner) cleanupOldInstanceBeforeProvisionIfRequired() (s
 	})
 
 	if err := normalizeExecutionStopError(cleanup.Cleanup(r.ctx)); err != nil {
+		if errors.Is(err, errExecutionStopped) {
+			r.finishStep(step, models.FailoverStepStatusFailed, err.Error(), map[string]interface{}{
+				"classification": "cleanup_interrupted_before_provision",
+				"summary":        "old instance cleanup was interrupted before replacement provisioning",
+				"provider":       provider,
+				"ref":            cleanup.Ref,
+				"cleanup_label":  cleanup.Label,
+				"error":          err.Error(),
+			})
+			return "", nil, "", err
+		}
 		detail := map[string]interface{}{
 			"classification": "cleanup_delete_failed_before_provision",
 			"summary":        "old instance cleanup failed before replacement provisioning",
@@ -428,8 +448,14 @@ func (r *memberExecutionRunner) cleanupOldInstanceBeforeProvisionIfRequired() (s
 			"cleanup_label":  cleanup.Label,
 			"error":          err.Error(),
 		}
+		pendingCleanup, queueErr := queueFailoverV2PendingCleanup(r.userUUID, r.service.ID, r.member.ID, r.execution.ID, cleanup, err)
+		if queueErr != nil {
+			detail["pending_cleanup_error"] = queueErr.Error()
+		} else if pendingCleanup != nil {
+			detail["pending_cleanup_id"] = pendingCleanup.ID
+		}
 		r.finishStep(step, models.FailoverStepStatusFailed, err.Error(), detail)
-		return "", nil, "", err
+		return models.FailoverCleanupStatusFailed, detail, "old instance cleanup failed before provisioning replacement", nil
 	}
 
 	result := map[string]interface{}{
