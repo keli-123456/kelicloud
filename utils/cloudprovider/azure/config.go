@@ -13,6 +13,8 @@ const (
 	CredentialStatusHealthy = "healthy"
 	CredentialStatusError   = "error"
 	DefaultLocation         = "eastus"
+
+	missingInstanceCredentialRetention = 24 * time.Hour
 )
 
 type Addition struct {
@@ -27,18 +29,19 @@ type Addition struct {
 }
 
 type CredentialRecord struct {
-	ID                      string `json:"id"`
-	Name                    string `json:"name"`
-	TenantID                string `json:"tenant_id"`
-	ClientID                string `json:"client_id"`
-	ClientSecret            string `json:"client_secret"`
-	SubscriptionID          string `json:"subscription_id"`
-	DefaultLocation         string `json:"default_location,omitempty"`
-	SubscriptionDisplayName string `json:"subscription_display_name,omitempty"`
-	SubscriptionState       string `json:"subscription_state,omitempty"`
-	LastStatus              string `json:"last_status,omitempty"`
-	LastError               string `json:"last_error,omitempty"`
-	LastCheckedAt           string `json:"last_checked_at,omitempty"`
+	ID                      string                     `json:"id"`
+	Name                    string                     `json:"name"`
+	TenantID                string                     `json:"tenant_id"`
+	ClientID                string                     `json:"client_id"`
+	ClientSecret            string                     `json:"client_secret"`
+	SubscriptionID          string                     `json:"subscription_id"`
+	DefaultLocation         string                     `json:"default_location,omitempty"`
+	SubscriptionDisplayName string                     `json:"subscription_display_name,omitempty"`
+	SubscriptionState       string                     `json:"subscription_state,omitempty"`
+	LastStatus              string                     `json:"last_status,omitempty"`
+	LastError               string                     `json:"last_error,omitempty"`
+	LastCheckedAt           string                     `json:"last_checked_at,omitempty"`
+	InstanceCredentials     []InstanceCredentialRecord `json:"instance_credentials,omitempty"`
 }
 
 type CredentialImport struct {
@@ -49,6 +52,11 @@ type CredentialImport struct {
 	ClientSecret    string `json:"client_secret"`
 	SubscriptionID  string `json:"subscription_id"`
 	DefaultLocation string `json:"default_location,omitempty"`
+	Tenant          string `json:"tenant,omitempty"`
+	AppID           string `json:"appId,omitempty"`
+	Password        string `json:"password,omitempty"`
+	LoginUser       string `json:"login_user,omitempty"`
+	LoginPasswd     string `json:"login_passwd,omitempty"`
 }
 
 type CredentialView struct {
@@ -67,9 +75,10 @@ type CredentialView struct {
 }
 
 type CredentialPoolView struct {
-	ActiveCredentialID string           `json:"active_credential_id,omitempty"`
-	ActiveLocation     string           `json:"active_location"`
-	Credentials        []CredentialView `json:"credentials"`
+	ActiveCredentialID     string           `json:"active_credential_id,omitempty"`
+	ActiveLocation         string           `json:"active_location"`
+	PasswordStorageEnabled bool             `json:"password_storage_enabled"`
+	Credentials            []CredentialView `json:"credentials"`
 }
 
 type CredentialSecretView struct {
@@ -83,6 +92,26 @@ type CredentialSecretView struct {
 	DefaultLocation         string `json:"default_location"`
 	SubscriptionDisplayName string `json:"subscription_display_name,omitempty"`
 	SubscriptionState       string `json:"subscription_state,omitempty"`
+}
+
+type InstanceCredentialRecord struct {
+	InstanceID         string `json:"instance_id"`
+	InstanceName       string `json:"instance_name,omitempty"`
+	Username           string `json:"username,omitempty"`
+	PasswordMode       string `json:"password_mode,omitempty"`
+	PasswordCiphertext string `json:"password_ciphertext,omitempty"`
+	UpdatedAt          string `json:"updated_at,omitempty"`
+}
+
+type InstancePasswordView struct {
+	InstanceID    string `json:"instance_id"`
+	InstanceName  string `json:"instance_name,omitempty"`
+	Username      string `json:"username,omitempty"`
+	PasswordMode  string `json:"password_mode,omitempty"`
+	RootPassword  string `json:"root_password"`
+	UpdatedAt     string `json:"updated_at,omitempty"`
+	CredentialID  string `json:"credential_id,omitempty"`
+	CredentialKey string `json:"credential_key,omitempty"`
 }
 
 func (a *Addition) Normalize() {
@@ -134,6 +163,7 @@ func (a *Addition) Normalize() {
 		credential.LastStatus = normalizeCredentialStatus(credential.LastStatus)
 		credential.LastError = strings.TrimSpace(credential.LastError)
 		credential.LastCheckedAt = strings.TrimSpace(credential.LastCheckedAt)
+		credential.InstanceCredentials = normalizeInstanceCredentials(credential.InstanceCredentials)
 
 		if credential.TenantID == "" || credential.ClientID == "" || credential.ClientSecret == "" || credential.SubscriptionID == "" {
 			continue
@@ -172,6 +202,7 @@ func (a *Addition) Normalize() {
 				merged.LastStatus = credential.LastStatus
 				merged.LastError = credential.LastError
 			}
+			merged.InstanceCredentials = mergeInstanceCredentials(merged.InstanceCredentials, credential.InstanceCredentials)
 			normalized[existingIndex] = merged
 			if a.ActiveCredentialID == credential.ID {
 				a.ActiveCredentialID = merged.ID
@@ -266,6 +297,107 @@ func (a *Addition) SetActiveLocation(location string) {
 	}
 }
 
+func (a *Addition) MergePersistentStateFrom(previous *Addition) {
+	if a == nil || previous == nil {
+		return
+	}
+
+	a.Normalize()
+	previous.Normalize()
+
+	for index := range a.Credentials {
+		previousCredential := previous.findCredentialForPersistentStateMerge(
+			a.Credentials[index].ID,
+			a.Credentials[index].TenantID,
+			a.Credentials[index].ClientID,
+			a.Credentials[index].SubscriptionID,
+		)
+		if previousCredential == nil {
+			continue
+		}
+
+		a.Credentials[index].InstanceCredentials = mergeInstanceCredentials(
+			previousCredential.InstanceCredentials,
+			a.Credentials[index].InstanceCredentials,
+		)
+	}
+
+	a.Normalize()
+}
+
+func (a *Addition) findCredentialForPersistentStateMerge(id, tenantID, clientID, subscriptionID string) *CredentialRecord {
+	if a == nil {
+		return nil
+	}
+
+	id = strings.TrimSpace(id)
+	if id != "" {
+		if credential := a.FindCredential(id); credential != nil {
+			return credential
+		}
+	}
+
+	tenantID = strings.TrimSpace(tenantID)
+	clientID = strings.TrimSpace(clientID)
+	subscriptionID = strings.TrimSpace(subscriptionID)
+	if tenantID == "" || clientID == "" || subscriptionID == "" {
+		return nil
+	}
+
+	for index := range a.Credentials {
+		if strings.TrimSpace(a.Credentials[index].TenantID) == tenantID &&
+			strings.TrimSpace(a.Credentials[index].ClientID) == clientID &&
+			strings.TrimSpace(a.Credentials[index].SubscriptionID) == subscriptionID {
+			return &a.Credentials[index]
+		}
+	}
+
+	return nil
+}
+
+func (a *Addition) FindCredentialWithSavedInstancePassword(instanceID string) *CredentialRecord {
+	if a == nil {
+		return nil
+	}
+	instanceID = strings.TrimSpace(instanceID)
+	if instanceID == "" {
+		return nil
+	}
+	a.Normalize()
+	for index := range a.Credentials {
+		if a.Credentials[index].HasSavedInstancePassword(instanceID) {
+			return &a.Credentials[index]
+		}
+	}
+	return nil
+}
+
+func (a *Addition) HasSavedInstancePassword(instanceID string) bool {
+	return a.FindCredentialWithSavedInstancePassword(instanceID) != nil
+}
+
+func (a *Addition) SavedInstancePasswordUpdatedAt(instanceID string) string {
+	credential := a.FindCredentialWithSavedInstancePassword(instanceID)
+	if credential == nil {
+		return ""
+	}
+	return credential.SavedInstancePasswordUpdatedAt(instanceID)
+}
+
+func (a *Addition) RevealInstancePassword(instanceID string) (*InstancePasswordView, error) {
+	credential := a.FindCredentialWithSavedInstancePassword(instanceID)
+	if credential == nil {
+		return nil, ErrSavedRootPasswordNotFound
+	}
+	view, err := credential.RevealInstancePassword(instanceID)
+	if err != nil {
+		return nil, err
+	}
+	view.CredentialID = credential.ID
+	view.CredentialKey = strings.TrimSpace(credential.Name)
+	return view, nil
+}
+
 func (a *Addition) UpsertCredentials(inputs []CredentialImport) int {
 	if a == nil {
 		return 0
@@ -274,15 +406,15 @@ func (a *Addition) UpsertCredentials(inputs []CredentialImport) int {
 
 	count := 0
 	for _, input := range inputs {
-		tenantID := strings.TrimSpace(input.TenantID)
-		clientID := strings.TrimSpace(input.ClientID)
-		clientSecret := strings.TrimSpace(input.ClientSecret)
+		tenantID := firstNonEmpty(input.TenantID, input.Tenant)
+		clientID := firstNonEmpty(input.ClientID, input.AppID)
+		clientSecret := firstNonEmpty(input.ClientSecret, input.Password)
 		subscriptionID := strings.TrimSpace(input.SubscriptionID)
 		if tenantID == "" || clientID == "" || clientSecret == "" || subscriptionID == "" {
 			continue
 		}
 
-		name := strings.TrimSpace(input.Name)
+		name := firstNonEmpty(input.Name, input.LoginUser)
 		inputID := strings.TrimSpace(input.ID)
 		defaultLocation := normalizeLocation(input.DefaultLocation)
 
@@ -373,9 +505,10 @@ func (a *Addition) ToPoolView() CredentialPoolView {
 	a.Normalize()
 
 	view := CredentialPoolView{
-		ActiveCredentialID: a.ActiveCredentialID,
-		ActiveLocation:     a.ActiveLocation,
-		Credentials:        make([]CredentialView, 0, len(a.Credentials)),
+		ActiveCredentialID:     a.ActiveCredentialID,
+		ActiveLocation:         a.ActiveLocation,
+		PasswordStorageEnabled: IsRootPasswordVaultEnabled(),
+		Credentials:            make([]CredentialView, 0, len(a.Credentials)),
 	}
 	for _, credential := range a.Credentials {
 		view.Credentials = append(view.Credentials, CredentialView{
@@ -440,6 +573,130 @@ func (c *CredentialRecord) SetCheckResult(checkedAt time.Time, subscription *Sub
 	}
 }
 
+func (c *CredentialRecord) HasSavedInstancePassword(instanceID string) bool {
+	if c == nil {
+		return false
+	}
+	return c.findInstanceCredential(instanceID) != nil
+}
+
+func (c *CredentialRecord) SavedInstancePasswordUpdatedAt(instanceID string) string {
+	credential := c.findInstanceCredential(instanceID)
+	if credential == nil {
+		return ""
+	}
+	return credential.UpdatedAt
+}
+
+func (c *CredentialRecord) SaveInstancePassword(instanceID, instanceName, username, passwordMode, rootPassword string, updatedAt time.Time) error {
+	if c == nil {
+		return ErrSavedRootPasswordNotFound
+	}
+
+	instanceID = strings.TrimSpace(instanceID)
+	rootPassword = strings.TrimSpace(rootPassword)
+	if instanceID == "" || rootPassword == "" {
+		return ErrSavedRootPasswordNotFound
+	}
+
+	ciphertext, err := encryptRootPassword(rootPassword)
+	if err != nil {
+		return err
+	}
+
+	record := InstanceCredentialRecord{
+		InstanceID:         instanceID,
+		InstanceName:       strings.TrimSpace(instanceName),
+		Username:           firstNonEmpty(username, "root"),
+		PasswordMode:       strings.TrimSpace(strings.ToLower(passwordMode)),
+		PasswordCiphertext: ciphertext,
+		UpdatedAt:          updatedAt.UTC().Format(time.RFC3339),
+	}
+
+	if existing := c.findInstanceCredential(instanceID); existing != nil {
+		*existing = record
+	} else {
+		c.InstanceCredentials = append(c.InstanceCredentials, record)
+	}
+	c.InstanceCredentials = normalizeInstanceCredentials(c.InstanceCredentials)
+	return nil
+}
+
+func (c *CredentialRecord) RevealInstancePassword(instanceID string) (*InstancePasswordView, error) {
+	credential := c.findInstanceCredential(instanceID)
+	if credential == nil {
+		return nil, ErrSavedRootPasswordNotFound
+	}
+
+	rootPassword, err := decryptRootPassword(credential.PasswordCiphertext)
+	if err != nil {
+		return nil, err
+	}
+
+	username := firstNonEmpty(credential.Username, "root")
+	return &InstancePasswordView{
+		InstanceID:   credential.InstanceID,
+		InstanceName: credential.InstanceName,
+		Username:     username,
+		PasswordMode: credential.PasswordMode,
+		RootPassword: rootPassword,
+		UpdatedAt:    credential.UpdatedAt,
+	}, nil
+}
+
+func (c *CredentialRecord) RemoveSavedInstancePassword(instanceID string) bool {
+	if c == nil || len(c.InstanceCredentials) == 0 {
+		return false
+	}
+
+	instanceID = strings.TrimSpace(instanceID)
+	if instanceID == "" {
+		return false
+	}
+
+	next := make([]InstanceCredentialRecord, 0, len(c.InstanceCredentials))
+	removed := false
+	for _, credential := range c.InstanceCredentials {
+		if strings.TrimSpace(credential.InstanceID) == instanceID {
+			removed = true
+			continue
+		}
+		next = append(next, credential)
+	}
+	if !removed {
+		return false
+	}
+	c.InstanceCredentials = next
+	return true
+}
+
+func (c *CredentialRecord) PruneInstanceCredentials(validInstanceIDs map[string]struct{}) bool {
+	if c == nil || len(c.InstanceCredentials) == 0 {
+		return false
+	}
+
+	cutoff := time.Now().UTC().Add(-missingInstanceCredentialRetention)
+	next := make([]InstanceCredentialRecord, 0, len(c.InstanceCredentials))
+	changed := false
+	for _, credential := range c.InstanceCredentials {
+		instanceID := strings.TrimSpace(credential.InstanceID)
+		if _, exists := validInstanceIDs[instanceID]; exists {
+			next = append(next, credential)
+			continue
+		}
+		if shouldRetainMissingInstanceCredential(credential, cutoff) {
+			next = append(next, credential)
+			continue
+		}
+		changed = true
+	}
+
+	if changed {
+		c.InstanceCredentials = next
+	}
+	return changed
+}
+
 func nextGeneratedCredentialName(credentials []CredentialRecord) string {
 	used := make(map[string]struct{}, len(credentials))
 	for _, credential := range credentials {
@@ -496,4 +753,82 @@ func maskValue(value string) string {
 		return strings.Repeat("*", len(value))
 	}
 	return value[:4] + strings.Repeat("*", len(value)-8) + value[len(value)-4:]
+}
+
+func (c *CredentialRecord) findInstanceCredential(instanceID string) *InstanceCredentialRecord {
+	if c == nil {
+		return nil
+	}
+
+	instanceID = strings.TrimSpace(instanceID)
+	if instanceID == "" {
+		return nil
+	}
+
+	for index := range c.InstanceCredentials {
+		if strings.TrimSpace(c.InstanceCredentials[index].InstanceID) == instanceID {
+			return &c.InstanceCredentials[index]
+		}
+	}
+	return nil
+}
+
+func mergeInstanceCredentials(left, right []InstanceCredentialRecord) []InstanceCredentialRecord {
+	if len(left) == 0 {
+		return normalizeInstanceCredentials(right)
+	}
+	if len(right) == 0 {
+		return normalizeInstanceCredentials(left)
+	}
+
+	merged := append(append(make([]InstanceCredentialRecord, 0, len(left)+len(right)), left...), right...)
+	return normalizeInstanceCredentials(merged)
+}
+
+func normalizeInstanceCredentials(records []InstanceCredentialRecord) []InstanceCredentialRecord {
+	if len(records) == 0 {
+		return nil
+	}
+
+	normalized := make([]InstanceCredentialRecord, 0, len(records))
+	seen := make(map[string]int, len(records))
+	for _, record := range records {
+		record.InstanceID = strings.TrimSpace(record.InstanceID)
+		record.InstanceName = strings.TrimSpace(record.InstanceName)
+		record.Username = strings.TrimSpace(record.Username)
+		record.PasswordMode = strings.TrimSpace(strings.ToLower(record.PasswordMode))
+		record.PasswordCiphertext = strings.TrimSpace(record.PasswordCiphertext)
+		record.UpdatedAt = strings.TrimSpace(record.UpdatedAt)
+
+		if record.InstanceID == "" || record.PasswordCiphertext == "" {
+			continue
+		}
+
+		if existingIndex, exists := seen[record.InstanceID]; exists {
+			normalized[existingIndex] = record
+			continue
+		}
+
+		seen[record.InstanceID] = len(normalized)
+		normalized = append(normalized, record)
+	}
+
+	if len(normalized) == 0 {
+		return nil
+	}
+	return normalized
+}
+
+func shouldRetainMissingInstanceCredential(record InstanceCredentialRecord, cutoff time.Time) bool {
+	updatedAt := strings.TrimSpace(record.UpdatedAt)
+	if updatedAt == "" {
+		return false
+	}
+
+	parsed, err := time.Parse(time.RFC3339, updatedAt)
+	if err != nil {
+		return false
+	}
+
+	return parsed.After(cutoff)
 }

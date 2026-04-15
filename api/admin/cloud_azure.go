@@ -44,6 +44,22 @@ type createAzureInstancePayload struct {
 	AutoConnectGroup string                    `json:"auto_connect_group,omitempty"`
 }
 
+type azureInstanceView struct {
+	azurecloud.Instance
+	SavedRootPassword          bool   `json:"saved_root_password"`
+	SavedRootPasswordUpdatedAt string `json:"saved_root_password_updated_at,omitempty"`
+}
+
+type azureInstanceDetailView struct {
+	Instance          *azureInstanceView            `json:"instance"`
+	VMID              string                        `json:"vm_id"`
+	Zones             []string                      `json:"zones"`
+	LicenseType       string                        `json:"license_type"`
+	NetworkInterfaces []azurecloud.NetworkInterface `json:"network_interfaces"`
+	OSDisk            *azurecloud.Disk              `json:"os_disk,omitempty"`
+	DataDisks         []azurecloud.Disk             `json:"data_disks"`
+}
+
 func GetAzureCredentials(c *gin.Context) {
 	scope, ok := requireCurrentOwnerScope(c)
 	if !ok {
@@ -102,7 +118,7 @@ func SaveAzureCredentials(c *gin.Context) {
 		addition.SetActiveLocation(payload.ActiveLocation)
 	}
 
-	if err := saveAzureAddition(scope, addition); err != nil {
+	if err := saveAzureAdditionPreservingSecrets(scope, addition); err != nil {
 		api.RespondError(c, http.StatusInternalServerError, "Failed to save Azure credentials: "+err.Error())
 		return
 	}
@@ -136,7 +152,7 @@ func SetAzureActiveCredential(c *gin.Context) {
 		return
 	}
 
-	if err := saveAzureAddition(scope, addition); err != nil {
+	if err := saveAzureAdditionPreservingSecrets(scope, addition); err != nil {
 		api.RespondError(c, http.StatusInternalServerError, "Failed to update active credential: "+err.Error())
 		return
 	}
@@ -166,7 +182,7 @@ func SetAzureActiveLocation(c *gin.Context) {
 	}
 
 	addition.SetActiveLocation(payload.Location)
-	if err := saveAzureAddition(scope, addition); err != nil {
+	if err := saveAzureAdditionPreservingSecrets(scope, addition); err != nil {
 		api.RespondError(c, http.StatusInternalServerError, "Failed to update active location: "+err.Error())
 		return
 	}
@@ -249,7 +265,7 @@ func CheckAzureCredentials(c *gin.Context) {
 
 	wg.Wait()
 
-	if err := saveAzureAddition(scope, addition); err != nil {
+	if err := saveAzureAdditionPreservingSecrets(scope, addition); err != nil {
 		api.RespondError(c, http.StatusInternalServerError, "Failed to save Azure credential health: "+err.Error())
 		return
 	}
@@ -281,7 +297,7 @@ func DeleteAzureCredential(c *gin.Context) {
 		return
 	}
 
-	if err := saveAzureAddition(scope, addition); err != nil {
+	if err := saveAzureAdditionPreservingSecrets(scope, addition); err != nil {
 		api.RespondError(c, http.StatusInternalServerError, "Failed to delete Azure credential: "+err.Error())
 		return
 	}
@@ -315,6 +331,46 @@ func GetAzureCredentialSecret(c *gin.Context) {
 	}
 
 	api.RespondSuccess(c, credential.CredentialSecretView())
+}
+
+func GetAzureInstancePassword(c *gin.Context) {
+	scope, ok := requireCurrentOwnerScope(c)
+	if !ok {
+		return
+	}
+
+	instanceID := strings.TrimSpace(c.Param("id"))
+	if instanceID == "" {
+		api.RespondError(c, http.StatusBadRequest, "Invalid instance id")
+		return
+	}
+
+	_, addition, err := loadAzureAddition(scope, false)
+	if err != nil {
+		api.RespondError(c, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	activeCredential := addition.ActiveCredential()
+	if activeCredential == nil {
+		api.RespondError(c, http.StatusBadRequest, "Azure credential is not configured")
+		return
+	}
+
+	passwordView, err := activeCredential.RevealInstancePassword(instanceID)
+	if err != nil {
+		switch {
+		case errors.Is(err, azurecloud.ErrSavedRootPasswordNotFound):
+			api.RespondError(c, http.StatusNotFound, err.Error())
+		case errors.Is(err, azurecloud.ErrRootPasswordVaultDisabled), errors.Is(err, azurecloud.ErrRootPasswordDecryptFailed):
+			api.RespondError(c, http.StatusBadRequest, err.Error())
+		default:
+			api.RespondError(c, http.StatusInternalServerError, "Failed to load saved root password: "+err.Error())
+		}
+		return
+	}
+
+	api.RespondSuccess(c, passwordView)
 }
 
 func GetAzureAccount(c *gin.Context) {
@@ -399,7 +455,7 @@ func ListAzureInstances(c *gin.Context) {
 		return
 	}
 
-	_, credential, _, ctx, cancel, err := getAzureActiveCredential(c, scope)
+	addition, credential, _, ctx, cancel, err := getAzureActiveCredential(c, scope)
 	if err != nil {
 		respondAzureError(c, err)
 		return
@@ -421,7 +477,27 @@ func ListAzureInstances(c *gin.Context) {
 		instances = make([]azurecloud.Instance, 0)
 	}
 
-	api.RespondSuccess(c, instances)
+	if credential != nil {
+		validInstanceIDs := make(map[string]struct{}, len(instances))
+		for _, instance := range instances {
+			instanceID := strings.TrimSpace(instance.InstanceID)
+			if instanceID != "" {
+				validInstanceIDs[instanceID] = struct{}{}
+			}
+		}
+		if credential.PruneInstanceCredentials(validInstanceIDs) {
+			_ = saveAzureAddition(scope, addition)
+		}
+	}
+
+	views := make([]azureInstanceView, 0, len(instances))
+	for _, instance := range instances {
+		if view := buildAzureInstanceView(&instance, addition); view != nil {
+			views = append(views, *view)
+		}
+	}
+
+	api.RespondSuccess(c, views)
 }
 
 func GetAzureInstanceDetail(c *gin.Context) {
@@ -430,7 +506,7 @@ func GetAzureInstanceDetail(c *gin.Context) {
 		return
 	}
 
-	_, credential, _, ctx, cancel, err := getAzureActiveCredential(c, scope)
+	addition, credential, _, ctx, cancel, err := getAzureActiveCredential(c, scope)
 	if err != nil {
 		respondAzureError(c, err)
 		return
@@ -455,7 +531,7 @@ func GetAzureInstanceDetail(c *gin.Context) {
 		return
 	}
 
-	api.RespondSuccess(c, detail)
+	api.RespondSuccess(c, buildAzureInstanceDetailView(detail, addition))
 }
 
 func CreateAzureInstance(c *gin.Context) {
@@ -464,7 +540,7 @@ func CreateAzureInstance(c *gin.Context) {
 		return
 	}
 
-	_, credential, location, _, _, err := getAzureActiveCredential(c, scope)
+	addition, credential, location, _, _, err := getAzureActiveCredential(c, scope)
 	if err != nil {
 		respondAzureError(c, err)
 		return
@@ -534,15 +610,58 @@ func CreateAzureInstance(c *gin.Context) {
 		return
 	}
 
+	passwordSaved := false
+	passwordSaveError := ""
+	if credential != nil && strings.TrimSpace(payload.AdminPassword) != "" {
+		passwordMode := "custom"
+		instanceName := ""
+		if detail != nil {
+			instanceName = detail.Instance.Name
+		}
+		if persistedAddition, saveErr := persistAzureInstancePassword(
+			scope,
+			addition,
+			credential,
+			detail.Instance.InstanceID,
+			instanceName,
+			firstNonEmpty(payload.AdminUsername, "azureuser"),
+			passwordMode,
+			payload.AdminPassword,
+		); saveErr != nil {
+			passwordSaveError = saveErr.Error()
+		} else {
+			passwordSaved = true
+			addition = persistedAddition
+		}
+	}
+
 	logMessage := fmt.Sprintf("create azure vm: %s (%s/%s/%s", detail.Instance.Name, detail.Instance.Location, detail.Instance.Size, detail.Instance.Image)
 	if autoConnectGroup != "" {
 		logMessage += ", auto_connect_group=" + autoConnectGroup
 	}
 	logMessage += ")"
 	logCloudAudit(c, logMessage)
+
+	detailView := buildAzureInstanceDetailView(detail, addition)
+	instanceView := buildAzureInstanceView(&detail.Instance, addition)
+	if detailView != nil && detailView.Instance != nil {
+		instanceView = detailView.Instance
+	}
+	if instanceView != nil && passwordSaved {
+		instanceView.SavedRootPassword = true
+		if instanceView.SavedRootPasswordUpdatedAt == "" {
+			instanceView.SavedRootPasswordUpdatedAt = time.Now().UTC().Format(time.RFC3339)
+		}
+	}
+	if detailView != nil {
+		detailView.Instance = instanceView
+	}
+
 	api.RespondSuccess(c, gin.H{
-		"instance": detail.Instance,
-		"detail":   detail,
+		"instance":            instanceView,
+		"detail":              detailView,
+		"password_saved":      passwordSaved,
+		"password_save_error": passwordSaveError,
 	})
 }
 
@@ -552,7 +671,7 @@ func DeleteAzureInstance(c *gin.Context) {
 		return
 	}
 
-	_, credential, _, ctx, cancel, err := getAzureActiveCredential(c, scope)
+	addition, credential, _, ctx, cancel, err := getAzureActiveCredential(c, scope)
 	if err != nil {
 		respondAzureError(c, err)
 		return
@@ -574,6 +693,10 @@ func DeleteAzureInstance(c *gin.Context) {
 	if err := client.DeleteVirtualMachine(ctx, resourceGroup, name); err != nil {
 		respondAzureError(c, err)
 		return
+	}
+	instanceID := strings.TrimSpace(c.Param("id"))
+	if credential != nil && credential.RemoveSavedInstancePassword(instanceID) {
+		_ = saveAzureAddition(scope, addition)
 	}
 
 	logCloudAudit(c, fmt.Sprintf("delete azure vm: %s/%s", resourceGroup, name))
@@ -614,6 +737,10 @@ func PostAzureInstanceAction(c *gin.Context) {
 	}
 
 	actionType := strings.ToLower(strings.TrimSpace(payload.Type))
+	response := gin.H{
+		"type":   actionType,
+		"status": "submitted",
+	}
 	switch actionType {
 	case "start":
 		err = client.StartVirtualMachine(ctx, resourceGroup, name)
@@ -621,7 +748,19 @@ func PostAzureInstanceAction(c *gin.Context) {
 		err = client.RestartVirtualMachine(ctx, resourceGroup, name)
 	case "deallocate", "stop":
 		actionType = "deallocate"
+		response["type"] = actionType
 		err = client.DeallocateVirtualMachine(ctx, resourceGroup, name)
+	case "replace_ip", "replace_public_ip":
+		actionType = "replace_public_ip"
+		response["type"] = actionType
+		var replacement *azurecloud.PublicIPReplacementResult
+		replacement, err = client.ReplaceVirtualMachinePublicIPv4(ctx, resourceGroup, name)
+		if replacement != nil {
+			response["old_public_ip"] = replacement.OldPublicIP
+			response["old_public_ip_id"] = replacement.OldPublicIPID
+			response["new_public_ip"] = replacement.NewPublicIP
+			response["new_public_ip_id"] = replacement.NewPublicIPID
+		}
 	default:
 		api.RespondError(c, http.StatusBadRequest, "Unsupported Azure VM action")
 		return
@@ -632,10 +771,7 @@ func PostAzureInstanceAction(c *gin.Context) {
 	}
 
 	logCloudAudit(c, fmt.Sprintf("azure vm action: %s (%s/%s)", actionType, resourceGroup, name))
-	api.RespondSuccess(c, gin.H{
-		"type":   actionType,
-		"status": "submitted",
-	})
+	api.RespondSuccess(c, response)
 }
 
 func getAzureActiveCredential(c *gin.Context, scope ownerScope) (*azurecloud.Addition, *azurecloud.CredentialRecord, string, context.Context, context.CancelFunc, error) {
@@ -712,4 +848,143 @@ func saveAzureAddition(scope ownerScope, addition *azurecloud.Addition) error {
 	}
 
 	return saveCloudProviderConfigForScope(scope, azureProviderName, string(payload))
+}
+
+func saveAzureAdditionPreservingSecrets(scope ownerScope, addition *azurecloud.Addition) error {
+	if addition == nil {
+		addition = &azurecloud.Addition{}
+	}
+
+	if _, current, err := loadAzureAddition(scope, true); err == nil {
+		addition.MergePersistentStateFrom(current)
+	}
+
+	return saveAzureAddition(scope, addition)
+}
+
+func buildAzureInstanceView(instance *azurecloud.Instance, addition *azurecloud.Addition) *azureInstanceView {
+	if instance == nil {
+		return nil
+	}
+
+	view := &azureInstanceView{
+		Instance: *instance,
+	}
+	if addition != nil && addition.HasSavedInstancePassword(instance.InstanceID) {
+		view.SavedRootPassword = true
+		view.SavedRootPasswordUpdatedAt = addition.SavedInstancePasswordUpdatedAt(instance.InstanceID)
+	}
+	return view
+}
+
+func buildAzureInstanceDetailView(detail *azurecloud.InstanceDetail, addition *azurecloud.Addition) *azureInstanceDetailView {
+	if detail == nil {
+		return nil
+	}
+
+	return &azureInstanceDetailView{
+		Instance:          buildAzureInstanceView(&detail.Instance, addition),
+		VMID:              detail.VMID,
+		Zones:             append([]string(nil), detail.Zones...),
+		LicenseType:       detail.LicenseType,
+		NetworkInterfaces: append([]azurecloud.NetworkInterface(nil), detail.NetworkInterfaces...),
+		OSDisk:            detail.OSDisk,
+		DataDisks:         append([]azurecloud.Disk(nil), detail.DataDisks...),
+	}
+}
+
+func persistAzureInstancePassword(
+	scope ownerScope,
+	addition *azurecloud.Addition,
+	credential *azurecloud.CredentialRecord,
+	instanceID string,
+	instanceName string,
+	username string,
+	passwordMode string,
+	rootPassword string,
+) (*azurecloud.Addition, error) {
+	instanceID = strings.TrimSpace(instanceID)
+	rootPassword = strings.TrimSpace(rootPassword)
+	if addition == nil || credential == nil || instanceID == "" || rootPassword == "" {
+		return nil, errors.New("root password persistence requires an active credential and resource")
+	}
+
+	if err := credential.SaveInstancePassword(instanceID, instanceName, username, passwordMode, rootPassword, time.Now()); err != nil {
+		return nil, err
+	}
+
+	verifyPersistedPassword := func() (*azurecloud.Addition, error) {
+		_, persistedAddition, err := loadAzureAddition(scope, false)
+		if err != nil {
+			return nil, err
+		}
+		persistedCredential := findAzureCredentialForPersistenceVerification(
+			persistedAddition,
+			credential.ID,
+			credential.TenantID,
+			credential.ClientID,
+			credential.SubscriptionID,
+		)
+		if persistedCredential == nil || !persistedCredential.HasSavedInstancePassword(instanceID) {
+			return nil, errors.New("saved root password was not found after persistence")
+		}
+		return persistedAddition, nil
+	}
+
+	if err := saveAzureAdditionPreservingSecrets(scope, addition); err != nil {
+		credential.RemoveSavedInstancePassword(instanceID)
+		return nil, fmt.Errorf("Failed to save root password: %w", err)
+	}
+
+	if persistedAddition, err := verifyPersistedPassword(); err == nil {
+		return persistedAddition, nil
+	}
+
+	if err := saveAzureAddition(scope, addition); err != nil {
+		credential.RemoveSavedInstancePassword(instanceID)
+		return nil, fmt.Errorf("Failed to save root password: %w", err)
+	}
+
+	persistedAddition, err := verifyPersistedPassword()
+	if err != nil {
+		credential.RemoveSavedInstancePassword(instanceID)
+		return nil, fmt.Errorf("Failed to verify saved root password: %w", err)
+	}
+	return persistedAddition, nil
+}
+
+func findAzureCredentialForPersistenceVerification(
+	addition *azurecloud.Addition,
+	credentialID string,
+	tenantID string,
+	clientID string,
+	subscriptionID string,
+) *azurecloud.CredentialRecord {
+	if addition == nil {
+		return nil
+	}
+
+	credentialID = strings.TrimSpace(credentialID)
+	if credentialID != "" {
+		if credential := addition.FindCredential(credentialID); credential != nil {
+			return credential
+		}
+	}
+
+	tenantID = strings.TrimSpace(tenantID)
+	clientID = strings.TrimSpace(clientID)
+	subscriptionID = strings.TrimSpace(subscriptionID)
+	if tenantID == "" || clientID == "" || subscriptionID == "" {
+		return nil
+	}
+
+	for index := range addition.Credentials {
+		credential := &addition.Credentials[index]
+		if strings.TrimSpace(credential.TenantID) == tenantID &&
+			strings.TrimSpace(credential.ClientID) == clientID &&
+			strings.TrimSpace(credential.SubscriptionID) == subscriptionID {
+			return credential
+		}
+	}
+	return nil
 }
