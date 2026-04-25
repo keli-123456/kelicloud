@@ -3,6 +3,7 @@ package linode
 import (
 	"errors"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -111,7 +112,9 @@ func TestAdditionRemoveTokenClearsLegacyTokenWhenLastEntryDeleted(t *testing.T) 
 }
 
 func TestTokenRecordSaveInstancePasswordAutoCreatesVaultSecret(t *testing.T) {
-	t.Chdir(t.TempDir())
+	secretPath := filepath.Join(t.TempDir(), "data", "cloud_secret.key")
+	t.Setenv(RootPasswordVaultKeyEnv, "")
+	t.Setenv(RootPasswordVaultFileEnv, secretPath)
 
 	token := &TokenRecord{
 		ID:    "token-1",
@@ -126,7 +129,7 @@ func TestTokenRecordSaveInstancePasswordAutoCreatesVaultSecret(t *testing.T) {
 	require.NoError(t, revealErr)
 	require.Equal(t, "Secret!123", passwordView.RootPassword)
 
-	_, statErr := os.Stat("./data/cloud_secret.key")
+	_, statErr := os.Stat(secretPath)
 	require.NoError(t, statErr)
 }
 

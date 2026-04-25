@@ -19,7 +19,7 @@ func BindingExternalAccount(c *gin.Context) {
 		return
 	}
 
-	c.SetCookie("binding_external_account", user.UUID, 3600, "/", "", false, true)
+	api.SetSecureCookie(c, "binding_external_account", user.UUID, 3600)
 	c.Redirect(302, "/api/oauth")
 }
 func UnbindExternalAccount(c *gin.Context) {

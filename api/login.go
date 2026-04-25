@@ -64,14 +64,14 @@ func Login(c *gin.Context) {
 		RespondError(c, http.StatusInternalServerError, "Failed to create session: "+err.Error())
 		return
 	}
-	c.SetCookie("session_token", session, 2592000, "/", "", false, true)
+	SetSecureCookie(c, "session_token", session, 2592000)
 	auditlog.Log(c.ClientIP(), uuid, "logged in (password)", "login")
 	RespondSuccess(c, gin.H{"set-cookie": gin.H{"session_token": session}})
 }
 func Logout(c *gin.Context) {
 	session, _ := c.Cookie("session_token")
 	accounts.DeleteSession(session)
-	c.SetCookie("session_token", "", -1, "/", "", false, true)
+	ClearSecureCookie(c, "session_token")
 	auditlog.Log(c.ClientIP(), "", "logged out", "logout")
 	c.Redirect(302, "/")
 }

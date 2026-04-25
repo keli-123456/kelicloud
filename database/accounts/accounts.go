@@ -1,11 +1,14 @@
 package accounts
 
 import (
+	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/base64"
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -14,10 +17,19 @@ import (
 	"github.com/komari-monitor/komari/utils"
 
 	"github.com/google/uuid"
+	"golang.org/x/crypto/argon2"
 	"gorm.io/gorm"
 )
 
-const constantSalt = "06Wm4Jv1Hkxx"
+const (
+	constantSalt       = "06Wm4Jv1Hkxx"
+	passwordHashPrefix = "$argon2id$"
+	passwordSaltBytes  = 16
+	passwordKeyBytes   = 32
+	passwordTime       = uint32(3)
+	passwordMemory     = uint32(64 * 1024)
+	passwordThreads    = uint8(2)
+)
 
 var ErrCannotDeleteLastAdmin = errors.New("cannot delete the last admin")
 
@@ -32,8 +44,14 @@ func CheckPassword(username, passwd string) (uuid string, success bool) {
 		// 静默处理错误，不显示日志
 		return "", false
 	}
-	if hashPasswd(passwd) != user.Passwd {
+	valid, needsRehash := verifyPasswd(user.Passwd, passwd)
+	if !valid {
 		return "", false
+	}
+	if needsRehash {
+		if hashedPassword, err := hashPasswd(passwd); err == nil {
+			_ = db.Model(&models.User{}).Where("uuid = ?", user.UUID).Update("passwd", hashedPassword).Error
+		}
 	}
 	return user.UUID, true
 }
@@ -41,7 +59,11 @@ func CheckPassword(username, passwd string) (uuid string, success bool) {
 // ForceResetPassword 强制重置用户密码
 func ForceResetPassword(username, passwd string) (err error) {
 	db := dbcore.GetDBInstance()
-	result := db.Model(&models.User{}).Where("username = ?", username).Update("passwd", hashPasswd(passwd))
+	hashedPassword, err := hashPasswd(passwd)
+	if err != nil {
+		return err
+	}
+	result := db.Model(&models.User{}).Where("username = ?", username).Update("passwd", hashedPassword)
 	if result.Error != nil {
 		return result.Error
 	}
@@ -51,13 +73,84 @@ func ForceResetPassword(username, passwd string) (err error) {
 	return nil
 }
 
-// hashPasswd 对密码进行加盐哈希
-func hashPasswd(passwd string) string {
+// hashPasswd returns an Argon2id password hash in PHC string format.
+func hashPasswd(passwd string) (string, error) {
+	salt := make([]byte, passwordSaltBytes)
+	if _, err := rand.Read(salt); err != nil {
+		return "", err
+	}
+	key := argon2.IDKey([]byte(passwd), salt, passwordTime, passwordMemory, passwordThreads, passwordKeyBytes)
+	return fmt.Sprintf(
+		"$argon2id$v=%d$m=%d,t=%d,p=%d$%s$%s",
+		argon2.Version,
+		passwordMemory,
+		passwordTime,
+		passwordThreads,
+		base64.RawStdEncoding.EncodeToString(salt),
+		base64.RawStdEncoding.EncodeToString(key),
+	), nil
+}
+
+func verifyPasswd(storedHash, passwd string) (valid bool, needsRehash bool) {
+	if strings.HasPrefix(storedHash, passwordHashPrefix) {
+		return verifyArgon2idHash(storedHash, passwd), false
+	}
+	return legacyHashPasswd(passwd) == storedHash, true
+}
+
+func verifyArgon2idHash(storedHash, passwd string) bool {
+	parts := strings.Split(storedHash, "$")
+	if len(parts) != 6 || parts[1] != "argon2id" || parts[2] != fmt.Sprintf("v=%d", argon2.Version) {
+		return false
+	}
+
+	var memory, timeCost uint32
+	var threads uint8
+	for _, item := range strings.Split(parts[3], ",") {
+		key, value, ok := strings.Cut(item, "=")
+		if !ok {
+			return false
+		}
+		parsed, err := strconv.ParseUint(value, 10, 32)
+		if err != nil {
+			return false
+		}
+		switch key {
+		case "m":
+			memory = uint32(parsed)
+		case "t":
+			timeCost = uint32(parsed)
+		case "p":
+			if parsed == 0 || parsed > 255 {
+				return false
+			}
+			threads = uint8(parsed)
+		default:
+			return false
+		}
+	}
+	if memory == 0 || memory > 1024*1024 || timeCost == 0 || timeCost > 10 || threads == 0 || threads > 16 {
+		return false
+	}
+
+	salt, err := base64.RawStdEncoding.DecodeString(parts[4])
+	if err != nil || len(salt) == 0 {
+		return false
+	}
+	expectedKey, err := base64.RawStdEncoding.DecodeString(parts[5])
+	if err != nil || len(expectedKey) == 0 || len(expectedKey) > 128 {
+		return false
+	}
+
+	actualKey := argon2.IDKey([]byte(passwd), salt, timeCost, memory, threads, uint32(len(expectedKey)))
+	return subtle.ConstantTimeCompare(actualKey, expectedKey) == 1
+}
+
+func legacyHashPasswd(passwd string) string {
 	saltedPassword := passwd + constantSalt
 	hash := sha256.New()
 	hash.Write([]byte(saltedPassword))
-	hashedPassword := base64.StdEncoding.EncodeToString(hash.Sum(nil))
-	return hashedPassword
+	return base64.StdEncoding.EncodeToString(hash.Sum(nil))
 }
 
 func CreateAccount(username, passwd string) (user models.User, err error) {
@@ -66,7 +159,10 @@ func CreateAccount(username, passwd string) (user models.User, err error) {
 
 func CreateAccountWithRole(username, passwd, role string) (user models.User, err error) {
 	db := dbcore.GetDBInstance()
-	hashedPassword := hashPasswd(passwd)
+	hashedPassword, err := hashPasswd(passwd)
+	if err != nil {
+		return models.User{}, err
+	}
 	normalizedRole := RoleUser
 	if parsedRole, ok := ParseUserRole(role); ok {
 		normalizedRole = parsedRole
@@ -109,7 +205,10 @@ func CreateDefaultAdminAccount() (username, passwd string, err error) {
 		passwd = utils.GeneratePassword()
 	}
 
-	hashedPassword := hashPasswd(passwd)
+	hashedPassword, err := hashPasswd(passwd)
+	if err != nil {
+		return "", "", err
+	}
 
 	user := models.User{
 		UUID:      uuid.New().String(),
@@ -182,6 +281,16 @@ func UnbindExternalAccount(uuid string) error {
 	return nil
 }
 
+func HasAnySSOBoundUser() (bool, error) {
+	db := dbcore.GetDBInstance()
+	var total int64
+	err := db.Model(&models.User{}).Where("sso_id <> ''").Count(&total).Error
+	if err != nil {
+		return false, err
+	}
+	return total > 0, nil
+}
+
 func ListUsers() ([]models.User, error) {
 	db := dbcore.GetDBInstance()
 	var users []models.User
@@ -237,7 +346,11 @@ func UpdateUser(uuid string, name, password, ssoType, role *string) error {
 			updates["username"] = *name
 		}
 		if password != nil {
-			updates["passwd"] = hashPasswd(*password)
+			hashedPassword, err := hashPasswd(*password)
+			if err != nil {
+				return err
+			}
+			updates["passwd"] = hashedPassword
 		}
 		if ssoType != nil {
 			updates["sso_type"] = *ssoType

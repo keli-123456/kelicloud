@@ -41,17 +41,22 @@ sudo ./install-komari.sh
 
 ### 2. Docker Deployment
 
-#### Option A: Single container with SQLite
+#### Option A: Single container with an external MySQL server
 
 1. Create a data directory:
    ```bash
    mkdir -p ./data
    ```
-2. Run the Docker container:
+2. Run the Docker container with your MySQL connection details:
    ```bash
    docker run -d \
      -p 25774:25774 \
      -v $(pwd)/data:/app/data \
+     -e KOMARI_DB_HOST=your-mysql-host \
+     -e KOMARI_DB_PORT=3306 \
+     -e KOMARI_DB_NAME=komari \
+     -e KOMARI_DB_USER=komari \
+     -e KOMARI_DB_PASS=your-password \
      --name komari \
      ghcr.io/komari-monitor/komari:latest
    ```
@@ -62,7 +67,7 @@ sudo ./install-komari.sh
 4. Access `http://<your_server_ip>:25774` in your browser.
 
 > [!NOTE]
-> You can also customize the initial username and password through the environment variables `ADMIN_USERNAME` and `ADMIN_PASSWORD`.
+> Komari currently requires MySQL for normal Docker and binary deployments. You can also customize the initial username and password through the environment variables `ADMIN_USERNAME` and `ADMIN_PASSWORD`.
 
 #### Option B: Docker Compose with a remote MySQL server
 
@@ -110,7 +115,7 @@ sudo ./install-komari.sh
 
 #### Dependencies
 
-- Go 1.18+ and Node.js 20+ (for manual build)
+- Go 1.24.11 and Node.js 22+ (for manual build)
 
 1. Clone the backend:
    ```bash

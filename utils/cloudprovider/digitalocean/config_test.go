@@ -3,6 +3,7 @@ package digitalocean
 import (
 	"errors"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -254,7 +255,9 @@ func TestTokenRecordSaveAndRevealDropletPassword(t *testing.T) {
 }
 
 func TestTokenRecordSaveDropletPasswordAutoCreatesVaultSecret(t *testing.T) {
-	t.Chdir(t.TempDir())
+	secretPath := filepath.Join(t.TempDir(), "data", "cloud_secret.key")
+	t.Setenv(DropletPasswordVaultKeyEnv, "")
+	t.Setenv(DropletPasswordVaultFileEnv, secretPath)
 
 	token := &TokenRecord{
 		ID:    "token-1",
@@ -269,7 +272,7 @@ func TestTokenRecordSaveDropletPasswordAutoCreatesVaultSecret(t *testing.T) {
 	require.NoError(t, revealErr)
 	require.Equal(t, "Secret!123", passwordView.RootPassword)
 
-	_, statErr := os.Stat("./data/cloud_secret.key")
+	_, statErr := os.Stat(secretPath)
 	require.NoError(t, statErr)
 }
 

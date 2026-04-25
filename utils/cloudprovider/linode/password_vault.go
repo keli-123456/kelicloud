@@ -14,7 +14,10 @@ import (
 	"github.com/komari-monitor/komari/utils/cloudprovider/passwordvault"
 )
 
-const RootPasswordVaultKeyEnv = passwordvault.SecretKeyEnv
+const (
+	RootPasswordVaultKeyEnv  = passwordvault.SecretKeyEnv
+	RootPasswordVaultFileEnv = passwordvault.SecretKeyFileEnv
+)
 
 var (
 	ErrRootPasswordVaultDisabled = errors.New("saved root password storage is unavailable; allow Komari to write ./data/cloud_secret.key or set KOMARI_CLOUD_SECRET_KEY")
