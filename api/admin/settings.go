@@ -457,6 +457,9 @@ func validateSystemSettingUpdates(values map[string]any) error {
 			return fmt.Errorf("%s must be a boolean", config.FailoverV2SchedulerEnabledKey)
 		}
 	}
+	if err := validateLoginMethodSettings(values); err != nil {
+		return err
+	}
 
 	for _, integerKey := range []string{
 		config.CNConnectivityIntervalKey,
@@ -500,6 +503,60 @@ func validateSystemSettingUpdates(values map[string]any) error {
 	}
 
 	return nil
+}
+
+func validateLoginMethodSettings(values map[string]any) error {
+	_, touchesPasswordLogin := values[config.DisablePasswordLoginKey]
+	_, touchesOAuth := values[config.OAuthEnabledKey]
+	if !touchesPasswordLogin && !touchesOAuth {
+		return nil
+	}
+
+	currentDisablePasswordLogin, err := config.GetAs[bool](config.DisablePasswordLoginKey, false)
+	if err != nil {
+		return fmt.Errorf("failed to read current %s: %w", config.DisablePasswordLoginKey, err)
+	}
+	currentOAuthEnabled, err := config.GetAs[bool](config.OAuthEnabledKey, false)
+	if err != nil {
+		return fmt.Errorf("failed to read current %s: %w", config.OAuthEnabledKey, err)
+	}
+
+	disablePasswordLogin, err := boolSettingValue(values, config.DisablePasswordLoginKey, currentDisablePasswordLogin)
+	if err != nil {
+		return err
+	}
+	oauthEnabled, err := boolSettingValue(values, config.OAuthEnabledKey, currentOAuthEnabled)
+	if err != nil {
+		return err
+	}
+
+	if !disablePasswordLogin {
+		return nil
+	}
+	if !oauthEnabled {
+		return errors.New("at least one login method must be enabled (password/oauth)")
+	}
+
+	hasBoundUser, err := accounts.HasAnySSOBoundUser()
+	if err != nil {
+		return fmt.Errorf("failed to verify SSO-bound accounts: %w", err)
+	}
+	if !hasBoundUser {
+		return errors.New("cannot disable password login when no SSO-bound account exists")
+	}
+	return nil
+}
+
+func boolSettingValue(values map[string]any, key string, fallback bool) (bool, error) {
+	rawValue, exists := values[key]
+	if !exists {
+		return fallback, nil
+	}
+	value, ok := rawValue.(bool)
+	if !ok {
+		return false, fmt.Errorf("%s must be a boolean", key)
+	}
+	return value, nil
 }
 
 func ClearAllRecords(c *gin.Context) {

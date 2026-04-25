@@ -72,11 +72,11 @@ func defaultSecretKeyFilePath() string {
 }
 
 func secretReadPaths() []string {
-	return uniqueSecretPaths(
-		strings.TrimSpace(os.Getenv(SecretKeyFileEnv)),
-		secretKeyPath,
-		defaultSecretKeyFilePath(),
-	)
+	envPath := strings.TrimSpace(os.Getenv(SecretKeyFileEnv))
+	if envPath != "" {
+		return uniqueSecretPaths(envPath)
+	}
+	return uniqueSecretPaths(secretKeyPath, defaultSecretKeyFilePath())
 }
 
 func secretWritePaths() []string {
