@@ -9,6 +9,7 @@ import (
 	"time"
 
 	awscloud "github.com/komari-monitor/komari/utils/cloudprovider/aws"
+	azurecloud "github.com/komari-monitor/komari/utils/cloudprovider/azure"
 	"github.com/komari-monitor/komari/utils/cloudprovider/digitalocean"
 	linodecloud "github.com/komari-monitor/komari/utils/cloudprovider/linode"
 )
@@ -32,6 +33,18 @@ func isAWSResourceNotFoundError(service string, err error) bool {
 		return strings.Contains(message, "lightsail instance not found")
 	}
 	return strings.Contains(message, "instance not found") || strings.Contains(message, "invalidinstanceid.notfound")
+}
+
+func isAzureNotFoundError(err error) bool {
+	var apiErr *azurecloud.APIError
+	if !errors.As(err, &apiErr) || apiErr == nil {
+		return false
+	}
+	if apiErr.StatusCode == 404 {
+		return true
+	}
+	code := strings.ToLower(strings.TrimSpace(apiErr.Code))
+	return code == "resourcenotfound" || code == "notfound" || code == "resourcegroupnotfound"
 }
 
 func runAWSProvisionFollowUp(ctx context.Context, action func(context.Context) error) error {

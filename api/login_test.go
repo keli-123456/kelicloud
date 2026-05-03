@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -103,4 +104,24 @@ func TestLogin(t *testing.T) {
 	// 清除测试数据
 	accounts.DeleteAccountByUsername("testuser")
 	accounts.DeleteAllSessions()
+}
+
+func TestLoginRejectsOversizedBody(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	configureAPITestDB()
+
+	router := gin.New()
+	router.POST("/login", Login)
+
+	req, _ := http.NewRequest(
+		http.MethodPost,
+		"/login",
+		strings.NewReader(strings.Repeat("a", maxLoginRequestBodyBytes+1)),
+	)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	router.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusRequestEntityTooLarge, w.Code)
 }

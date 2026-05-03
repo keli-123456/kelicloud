@@ -5,13 +5,10 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"testing"
 
 	"github.com/gin-gonic/gin"
-	"github.com/komari-monitor/komari/cmd/flags"
 	"github.com/komari-monitor/komari/config"
-	"github.com/komari-monitor/komari/database/dbcore"
 )
 
 type settingsTestEnvelope struct {
@@ -21,10 +18,8 @@ type settingsTestEnvelope struct {
 
 func setupAdminSettingsTestDB(t *testing.T) {
 	t.Helper()
-	flags.DatabaseType = "sqlite"
-	flags.DatabaseFile = filepath.Join(t.TempDir(), "komari-admin-settings.db")
 
-	db := dbcore.GetDBInstance()
+	db := configureAdminTestDB()
 	for _, table := range []string{"user_configs", "configs"} {
 		if err := db.Exec("DELETE FROM " + table).Error; err != nil {
 			t.Fatalf("failed to clear %s: %v", table, err)

@@ -31,6 +31,7 @@ type Addition struct {
 type CredentialRecord struct {
 	ID                      string                     `json:"id"`
 	Name                    string                     `json:"name"`
+	Group                   string                     `json:"group,omitempty"`
 	TenantID                string                     `json:"tenant_id"`
 	ClientID                string                     `json:"client_id"`
 	ClientSecret            string                     `json:"client_secret"`
@@ -47,6 +48,7 @@ type CredentialRecord struct {
 type CredentialImport struct {
 	ID              string `json:"id,omitempty"`
 	Name            string `json:"name"`
+	Group           string `json:"group,omitempty"`
 	TenantID        string `json:"tenant_id"`
 	ClientID        string `json:"client_id"`
 	ClientSecret    string `json:"client_secret"`
@@ -62,6 +64,7 @@ type CredentialImport struct {
 type CredentialView struct {
 	ID                      string `json:"id"`
 	Name                    string `json:"name"`
+	Group                   string `json:"group,omitempty"`
 	TenantID                string `json:"tenant_id"`
 	MaskedClientID          string `json:"masked_client_id"`
 	SubscriptionID          string `json:"subscription_id"`
@@ -84,6 +87,7 @@ type CredentialPoolView struct {
 type CredentialSecretView struct {
 	CredentialID            string `json:"credential_id"`
 	CredentialName          string `json:"credential_name"`
+	Group                   string `json:"group,omitempty"`
 	TenantID                string `json:"tenant_id"`
 	ClientID                string `json:"client_id"`
 	ClientSecret            string `json:"client_secret"`
@@ -136,6 +140,7 @@ func (a *Addition) Normalize() {
 			{
 				ID:              uuid.NewString(),
 				Name:            "Default Credential",
+				Group:           "",
 				TenantID:        a.TenantID,
 				ClientID:        a.ClientID,
 				ClientSecret:    a.ClientSecret,
@@ -153,6 +158,7 @@ func (a *Addition) Normalize() {
 	for _, credential := range a.Credentials {
 		credential.ID = strings.TrimSpace(credential.ID)
 		credential.Name = strings.TrimSpace(credential.Name)
+		credential.Group = normalizeCredentialGroup(credential.Group)
 		credential.TenantID = strings.TrimSpace(credential.TenantID)
 		credential.ClientID = strings.TrimSpace(credential.ClientID)
 		credential.ClientSecret = strings.TrimSpace(credential.ClientSecret)
@@ -184,6 +190,9 @@ func (a *Addition) Normalize() {
 			merged := normalized[existingIndex]
 			if credential.Name != "" {
 				merged.Name = credential.Name
+			}
+			if credential.Group != "" {
+				merged.Group = credential.Group
 			}
 			if credential.ClientSecret != "" {
 				merged.ClientSecret = credential.ClientSecret
@@ -410,12 +419,14 @@ func (a *Addition) UpsertCredentials(inputs []CredentialImport) int {
 		clientID := firstNonEmpty(input.ClientID, input.AppID)
 		clientSecret := firstNonEmpty(input.ClientSecret, input.Password)
 		subscriptionID := strings.TrimSpace(input.SubscriptionID)
-		if tenantID == "" || clientID == "" || clientSecret == "" || subscriptionID == "" {
+		inputID := strings.TrimSpace(input.ID)
+		hasCredentialValue := tenantID != "" && clientID != "" && clientSecret != "" && subscriptionID != ""
+		if !hasCredentialValue && inputID == "" {
 			continue
 		}
 
 		name := firstNonEmpty(input.Name, input.LoginUser)
-		inputID := strings.TrimSpace(input.ID)
+		group := normalizeCredentialGroup(input.Group)
 		defaultLocation := normalizeLocation(input.DefaultLocation)
 
 		var matched *CredentialRecord
@@ -424,7 +435,8 @@ func (a *Addition) UpsertCredentials(inputs []CredentialImport) int {
 				matched = &a.Credentials[index]
 				break
 			}
-			if a.Credentials[index].TenantID == tenantID &&
+			if hasCredentialValue &&
+				a.Credentials[index].TenantID == tenantID &&
 				a.Credentials[index].ClientID == clientID &&
 				a.Credentials[index].SubscriptionID == subscriptionID {
 				matched = &a.Credentials[index]
@@ -436,20 +448,27 @@ func (a *Addition) UpsertCredentials(inputs []CredentialImport) int {
 			if name != "" {
 				matched.Name = name
 			}
-			matched.TenantID = tenantID
-			matched.ClientID = clientID
-			matched.ClientSecret = clientSecret
-			matched.SubscriptionID = subscriptionID
+			matched.Group = group
+			if hasCredentialValue {
+				matched.TenantID = tenantID
+				matched.ClientID = clientID
+				matched.ClientSecret = clientSecret
+				matched.SubscriptionID = subscriptionID
+			}
 			if defaultLocation != "" {
 				matched.DefaultLocation = defaultLocation
 			}
 		} else {
+			if !hasCredentialValue {
+				continue
+			}
 			if name == "" {
 				name = nextGeneratedCredentialName(a.Credentials)
 			}
 			a.Credentials = append(a.Credentials, CredentialRecord{
 				ID:              uuid.NewString(),
 				Name:            name,
+				Group:           group,
 				TenantID:        tenantID,
 				ClientID:        clientID,
 				ClientSecret:    clientSecret,
@@ -514,6 +533,7 @@ func (a *Addition) ToPoolView() CredentialPoolView {
 		view.Credentials = append(view.Credentials, CredentialView{
 			ID:                      credential.ID,
 			Name:                    credential.Name,
+			Group:                   credential.Group,
 			TenantID:                credential.TenantID,
 			MaskedClientID:          maskValue(credential.ClientID),
 			SubscriptionID:          credential.SubscriptionID,
@@ -536,6 +556,7 @@ func (c *CredentialRecord) CredentialSecretView() *CredentialSecretView {
 	return &CredentialSecretView{
 		CredentialID:            c.ID,
 		CredentialName:          c.Name,
+		Group:                   c.Group,
 		TenantID:                c.TenantID,
 		ClientID:                c.ClientID,
 		ClientSecret:            c.ClientSecret,
@@ -723,6 +744,14 @@ func normalizeCredentialStatus(status string) string {
 	default:
 		return CredentialStatusUnknown
 	}
+}
+
+func normalizeCredentialGroup(group string) string {
+	group = strings.TrimSpace(group)
+	if len(group) > 100 {
+		group = group[:100]
+	}
+	return group
 }
 
 func normalizeLocation(location string) string {

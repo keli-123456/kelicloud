@@ -24,6 +24,7 @@ import (
 	"github.com/komari-monitor/komari/database/tasks"
 	"github.com/komari-monitor/komari/utils"
 	awscloud "github.com/komari-monitor/komari/utils/cloudprovider/aws"
+	azurecloud "github.com/komari-monitor/komari/utils/cloudprovider/azure"
 	"github.com/komari-monitor/komari/utils/cloudprovider/digitalocean"
 	linodecloud "github.com/komari-monitor/komari/utils/cloudprovider/linode"
 	"github.com/komari-monitor/komari/ws"
@@ -197,6 +198,18 @@ func isLinodeNotFoundError(err error) bool {
 	return errors.As(err, &apiErr) && apiErr != nil && apiErr.StatusCode == 404
 }
 
+func isAzureNotFoundError(err error) bool {
+	var apiErr *azurecloud.APIError
+	if !errors.As(err, &apiErr) || apiErr == nil {
+		return false
+	}
+	if apiErr.StatusCode == 404 {
+		return true
+	}
+	code := strings.ToLower(strings.TrimSpace(apiErr.Code))
+	return code == "resourcenotfound" || code == "notfound" || code == "resourcegroupnotfound"
+}
+
 func isAWSResourceNotFoundError(service string, err error) bool {
 	return isAWSRebindTargetMissingError(service, err)
 }
@@ -326,6 +339,26 @@ type digitalOceanProvisionPayload struct {
 	RootPasswordMode string   `json:"root_password_mode,omitempty"`
 	RootPassword     string   `json:"root_password,omitempty"`
 	CleanupDropletID int      `json:"cleanup_droplet_id,omitempty"`
+}
+
+type azureProvisionPayload struct {
+	Name                 string                    `json:"name,omitempty"`
+	ResourceGroup        string                    `json:"resource_group,omitempty"`
+	Region               string                    `json:"region,omitempty"`
+	Location             string                    `json:"location,omitempty"`
+	Size                 string                    `json:"size,omitempty"`
+	AdminUsername        string                    `json:"admin_username,omitempty"`
+	AdminPassword        string                    `json:"admin_password,omitempty"`
+	SSHPublicKey         string                    `json:"ssh_public_key,omitempty"`
+	UserData             string                    `json:"user_data,omitempty"`
+	PublicIP             bool                      `json:"public_ip"`
+	AssignIPv6           bool                      `json:"assign_ipv6"`
+	Image                azurecloud.ImageReference `json:"image"`
+	RootPasswordMode     string                    `json:"root_password_mode,omitempty"`
+	RootPassword         string                    `json:"root_password,omitempty"`
+	CleanupInstanceID    string                    `json:"cleanup_instance_id,omitempty"`
+	CleanupResourceGroup string                    `json:"cleanup_resource_group,omitempty"`
+	CleanupName          string                    `json:"cleanup_name,omitempty"`
 }
 
 type linodeProvisionPayload struct {
@@ -985,6 +1018,9 @@ func queueExecution(task *models.FailoverTask, report *common.Report, reason str
 	if task == nil {
 		return nil, errors.New("task is required")
 	}
+	if !task.Enabled {
+		return nil, fmt.Errorf("failover task %d is disabled", task.ID)
+	}
 
 	if !claimTaskRun(task.ID) {
 		return nil, fmt.Errorf("failover task %d is already running", task.ID)
@@ -1049,6 +1085,7 @@ func queueExecution(task *models.FailoverTask, report *common.Report, reason str
 		"last_message":      strings.TrimSpace(reason),
 		"last_triggered_at": models.FromTime(now),
 	}); err != nil {
+		markQueuedExecutionFailed(execution.ID, fmt.Sprintf("failed to mark task running: %v", err))
 		releaseTargetRun(targetRunKey, task.ID)
 		releaseTaskRun(task.ID)
 		return nil, err
@@ -1070,6 +1107,19 @@ func queueExecution(task *models.FailoverTask, report *common.Report, reason str
 	}(*task, *execution, cloneReport(report), targetRunKey)
 
 	return execution, nil
+}
+
+func markQueuedExecutionFailed(executionID uint, message string) {
+	if executionID == 0 {
+		return
+	}
+	if err := failoverdb.UpdateExecutionFields(executionID, map[string]interface{}{
+		"status":        models.FailoverExecutionStatusFailed,
+		"error_message": strings.TrimSpace(message),
+		"finished_at":   models.FromTime(time.Now()),
+	}); err != nil {
+		log.Printf("failover: failed to mark queued execution %d failed after queue error: %v", executionID, err)
+	}
 }
 
 func (r *executionRunner) run(report *common.Report) {
@@ -2170,6 +2220,50 @@ func removeSavedLinodeRootPassword(userUUID string, addition *linodecloud.Additi
 	}
 }
 
+func persistAzureRootPassword(userUUID string, addition *azurecloud.Addition, credential *azurecloud.CredentialRecord, instanceID, instanceName, username, passwordMode, rootPassword string) error {
+	if addition == nil || credential == nil || strings.TrimSpace(instanceID) == "" || strings.TrimSpace(rootPassword) == "" {
+		return nil
+	}
+
+	latestAddition, latestCredential, err := reloadAzureAdditionCredentialState(userUUID, credential)
+	if err != nil {
+		log.Printf("failover: failed to reload Azure credential state for instance %s: %v", instanceID, err)
+		return err
+	}
+	if err := latestCredential.SaveInstancePassword(instanceID, instanceName, username, passwordMode, rootPassword, time.Now()); err != nil {
+		log.Printf("failover: failed to save Azure root password for instance %s: %v", instanceID, err)
+		return err
+	}
+	if err := saveAzureAddition(userUUID, latestAddition); err != nil {
+		latestCredential.RemoveSavedInstancePassword(instanceID)
+		log.Printf("failover: failed to persist Azure root password for instance %s: %v", instanceID, err)
+		return err
+	}
+	return nil
+}
+
+func removeSavedAzureRootPassword(userUUID string, addition *azurecloud.Addition, credential *azurecloud.CredentialRecord, instanceID string) {
+	if addition == nil || credential == nil || strings.TrimSpace(instanceID) == "" {
+		return
+	}
+
+	targetAddition := addition
+	targetCredential := credential
+	if latestAddition, latestCredential, err := reloadAzureAdditionCredentialState(userUUID, credential); err == nil {
+		targetAddition = latestAddition
+		targetCredential = latestCredential
+	} else {
+		log.Printf("failover: failed to reload Azure credential state for instance %s cleanup, falling back to in-memory state: %v", instanceID, err)
+	}
+
+	if !targetCredential.RemoveSavedInstancePassword(instanceID) {
+		return
+	}
+	if err := saveAzureAddition(userUUID, targetAddition); err != nil {
+		log.Printf("failover: failed to remove saved Azure root password for instance %s: %v", instanceID, err)
+	}
+}
+
 func buildAWSResourceCredentialID(region, resourceID string) string {
 	resourceID = strings.TrimSpace(resourceID)
 	if resourceID == "" {
@@ -2406,6 +2500,8 @@ func (r *executionRunner) executeProvisionPlan(plan models.FailoverPlan) (*actio
 	switch plan.Provider {
 	case "aws":
 		outcome, err = provisionAWSInstance(r.ctx, r.task.UserID, plan)
+	case "azure":
+		outcome, err = provisionAzureInstance(r.ctx, r.task.UserID, plan)
 	case "digitalocean":
 		outcome, err = provisionDigitalOceanDroplet(r.ctx, r.task.UserID, plan)
 	case "linode":
@@ -3041,6 +3137,14 @@ func currentInstanceCleanupLabelFromRef(ref map[string]interface{}, address stri
 			return "delete linode instance at " + address
 		}
 		return "delete linode instance"
+	case "azure":
+		if instanceName := strings.TrimSpace(firstNonEmpty(stringMapValue(ref, "name"), stringMapValue(ref, "instance_name"))); instanceName != "" {
+			return "delete azure vm " + instanceName
+		}
+		if address != "" {
+			return "delete azure vm at " + address
+		}
+		return "delete azure vm"
 	case "aws":
 		service := strings.ToLower(strings.TrimSpace(firstNonEmpty(stringMapValue(ref, "service"), "ec2")))
 		if service == "lightsail" {
@@ -3101,6 +3205,9 @@ func isCurrentInstanceCredentialMissingError(provider string, err error) bool {
 	case "aws":
 		return strings.Contains(message, "aws provider is not configured") ||
 			strings.Contains(message, "aws credential is not configured")
+	case "azure":
+		return strings.Contains(message, "azure provider is not configured") ||
+			strings.Contains(message, "azure credential is not configured")
 	default:
 		return false
 	}
@@ -3475,6 +3582,61 @@ func (r *executionRunner) resolveCurrentInstanceCleanupByAddress(ctx context.Con
 			return cleanup, nil
 		}
 		return nil, nil
+	case "azure":
+		addition, credential, err := loadAzureCredential(r.task.UserID, candidate.EntryID)
+		if err != nil {
+			return nil, err
+		}
+		client, err := azurecloud.NewClientFromCredential(credential)
+		if err != nil {
+			return nil, err
+		}
+		instances, err := client.ListVirtualMachines(contextOrBackground(ctx))
+		if err != nil {
+			return nil, normalizeExecutionStopError(err)
+		}
+		for _, instance := range instances {
+			found := false
+			for _, publicIP := range instance.PublicIPs {
+				if sameAddress(address, publicIP) {
+					found = true
+					break
+				}
+			}
+			if !found {
+				continue
+			}
+			ref := map[string]interface{}{
+				"provider":            "azure",
+				"provider_entry_id":   candidate.EntryID,
+				"provider_entry_name": candidate.EntryName,
+				"region":              instance.Location,
+				"location":            instance.Location,
+				"resource_group":      instance.ResourceGroup,
+				"instance_id":         instance.InstanceID,
+				"name":                instance.Name,
+			}
+			return &currentInstanceCleanup{
+				Ref: ref,
+				Addresses: map[string]interface{}{
+					"public_ips":  instance.PublicIPs,
+					"private_ips": instance.PrivateIPs,
+				},
+				Label: "delete azure vm " + instance.Name,
+				Cleanup: func(ctx context.Context) error {
+					if _, err := client.DeleteVirtualMachine(contextOrBackground(ctx), instance.ResourceGroup, instance.Name); err != nil {
+						if isAzureNotFoundError(err) {
+							removeSavedAzureRootPassword(r.task.UserID, addition, credential, instance.InstanceID)
+							return nil
+						}
+						return normalizeExecutionStopError(err)
+					}
+					removeSavedAzureRootPassword(r.task.UserID, addition, credential, instance.InstanceID)
+					return nil
+				},
+			}, nil
+		}
+		return nil, nil
 	case "aws":
 		addition, credential, err := loadAWSCredential(r.task.UserID, candidate.EntryID)
 		if err != nil {
@@ -3670,6 +3832,62 @@ func resolveCurrentInstanceCleanupFromRef(ctx context.Context, userUUID string, 
 				return nil
 			},
 		}, nil
+	case "azure":
+		instanceID := strings.TrimSpace(stringMapValue(ref, "instance_id"))
+		resourceGroup := strings.TrimSpace(stringMapValue(ref, "resource_group"))
+		instanceName := strings.TrimSpace(firstNonEmpty(stringMapValue(ref, "name"), stringMapValue(ref, "instance_name")))
+		if instanceID != "" && (resourceGroup == "" || instanceName == "") {
+			if decodedGroup, decodedName, decodeErr := azurecloud.DecodeInstanceID(instanceID); decodeErr == nil {
+				resourceGroup = firstNonEmpty(resourceGroup, decodedGroup)
+				instanceName = firstNonEmpty(instanceName, decodedName)
+			}
+		}
+		if resourceGroup == "" || instanceName == "" {
+			return nil, nil
+		}
+		if instanceID == "" {
+			instanceID = azurecloud.EncodeInstanceID(resourceGroup, instanceName)
+		}
+		resolvedRef := resolvedCurrentInstanceRef(ref, "azure", entryID)
+		resolvedRef["resource_group"] = resourceGroup
+		resolvedRef["name"] = instanceName
+		resolvedRef["instance_id"] = instanceID
+		addition, credential, err := loadAzureCredential(userUUID, entryID)
+		if err != nil {
+			if isCurrentInstanceCredentialMissingError("azure", err) {
+				return providerEntryMissingCurrentInstanceCleanup(ref, "azure", entryID, "delete azure vm "+instanceName), nil
+			}
+			return nil, err
+		}
+		client, err := azurecloud.NewClientFromCredential(credential)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := client.GetVirtualMachineDetail(contextOrBackground(ctx), resourceGroup, instanceName); err != nil {
+			if isAzureNotFoundError(err) {
+				return instanceMissingCurrentInstanceCleanup(ref, "azure", entryID, "delete azure vm "+instanceName), nil
+			}
+			err = normalizeExecutionStopError(err)
+			if errors.Is(err, errExecutionStopped) {
+				return nil, err
+			}
+			return providerEntryQueryCurrentInstanceCleanup(ref, "azure", entryID, "delete azure vm "+instanceName, err), nil
+		}
+		return &currentInstanceCleanup{
+			Ref:   resolvedRef,
+			Label: "delete azure vm " + instanceName,
+			Cleanup: func(ctx context.Context) error {
+				if _, err := client.DeleteVirtualMachine(contextOrBackground(ctx), resourceGroup, instanceName); err != nil {
+					if isAzureNotFoundError(err) {
+						removeSavedAzureRootPassword(userUUID, addition, credential, instanceID)
+						return nil
+					}
+					return normalizeExecutionStopError(err)
+				}
+				removeSavedAzureRootPassword(userUUID, addition, credential, instanceID)
+				return nil
+			},
+		}, nil
 	case "aws":
 		service := strings.ToLower(strings.TrimSpace(firstNonEmpty(stringMapValue(ref, "service"), "ec2")))
 		region := strings.TrimSpace(stringMapValue(ref, "region"))
@@ -3834,6 +4052,64 @@ func resolveCurrentInstanceCleanupByRefAddress(ctx context.Context, userUUID str
 			return cleanup, nil
 		}
 		return instanceMissingCurrentInstanceCleanup(ref, "linode", entryID, label), nil
+	case "azure":
+		addition, credential, err := loadAzureCredential(userUUID, entryID)
+		if err != nil {
+			if isCurrentInstanceCredentialMissingError("azure", err) {
+				return providerEntryMissingCurrentInstanceCleanup(ref, "azure", entryID, label), nil
+			}
+			return nil, err
+		}
+		client, err := azurecloud.NewClientFromCredential(credential)
+		if err != nil {
+			return nil, err
+		}
+		instances, err := client.ListVirtualMachines(contextOrBackground(ctx))
+		if err != nil {
+			err = normalizeExecutionStopError(err)
+			if errors.Is(err, errExecutionStopped) {
+				return nil, err
+			}
+			return providerEntryQueryCurrentInstanceCleanup(ref, "azure", entryID, label, err), nil
+		}
+		for _, instance := range instances {
+			found := false
+			for _, publicIP := range instance.PublicIPs {
+				if sameAddress(address, publicIP) {
+					found = true
+					break
+				}
+			}
+			if !found {
+				continue
+			}
+			resolvedRef := resolvedCurrentInstanceRef(ref, "azure", entryID)
+			resolvedRef["region"] = instance.Location
+			resolvedRef["location"] = instance.Location
+			resolvedRef["resource_group"] = instance.ResourceGroup
+			resolvedRef["instance_id"] = instance.InstanceID
+			resolvedRef["name"] = instance.Name
+			return &currentInstanceCleanup{
+				Ref: resolvedRef,
+				Addresses: map[string]interface{}{
+					"public_ips":  instance.PublicIPs,
+					"private_ips": instance.PrivateIPs,
+				},
+				Label: "delete azure vm " + instance.Name,
+				Cleanup: func(ctx context.Context) error {
+					if _, err := client.DeleteVirtualMachine(contextOrBackground(ctx), instance.ResourceGroup, instance.Name); err != nil {
+						if isAzureNotFoundError(err) {
+							removeSavedAzureRootPassword(userUUID, addition, credential, instance.InstanceID)
+							return nil
+						}
+						return normalizeExecutionStopError(err)
+					}
+					removeSavedAzureRootPassword(userUUID, addition, credential, instance.InstanceID)
+					return nil
+				},
+			}, nil
+		}
+		return instanceMissingCurrentInstanceCleanup(ref, "azure", entryID, label), nil
 	case "aws":
 		service := strings.ToLower(strings.TrimSpace(firstNonEmpty(stringMapValue(ref, "service"), "ec2")))
 		region := strings.TrimSpace(stringMapValue(ref, "region"))
@@ -4351,6 +4627,18 @@ func currentInstanceRunKey(ref map[string]interface{}) string {
 	case "linode":
 		if instanceID := intMapValue(ref, "instance_id"); instanceID > 0 {
 			return fmt.Sprintf("linode|%s|instance|%d", entryID, instanceID)
+		}
+	case "azure":
+		instanceID := strings.TrimSpace(stringMapValue(ref, "instance_id"))
+		if instanceID == "" {
+			resourceGroup := strings.TrimSpace(stringMapValue(ref, "resource_group"))
+			instanceName := strings.TrimSpace(firstNonEmpty(stringMapValue(ref, "name"), stringMapValue(ref, "instance_name")))
+			if resourceGroup != "" && instanceName != "" {
+				instanceID = azurecloud.EncodeInstanceID(resourceGroup, instanceName)
+			}
+		}
+		if instanceID != "" {
+			return fmt.Sprintf("azure|%s|vm|%s", entryID, instanceID)
 		}
 	case "aws":
 		service := strings.ToLower(strings.TrimSpace(firstNonEmpty(stringMapValue(ref, "service"), "ec2")))
@@ -5143,6 +5431,198 @@ func provisionDigitalOceanDroplet(ctx context.Context, userUUID string, plan mod
 	return outcome, nil
 }
 
+func provisionAzureInstance(ctx context.Context, userUUID string, plan models.FailoverPlan) (*actionOutcome, error) {
+	var payload azureProvisionPayload
+	if err := json.Unmarshal([]byte(plan.Payload), &payload); err != nil {
+		return nil, fmt.Errorf("invalid azure provision payload: %w", err)
+	}
+
+	addition, credential, err := loadAzureCredential(userUUID, plan.ProviderEntryID)
+	if err != nil {
+		return nil, err
+	}
+	client, err := azurecloud.NewClientFromCredential(credential)
+	if err != nil {
+		return nil, err
+	}
+
+	location := firstNonEmpty(payload.Location, payload.Region, credential.DefaultLocation, azurecloud.DefaultLocation)
+	name := strings.TrimSpace(payload.Name)
+	if name == "" {
+		name = "failover-azure-" + strconv.FormatInt(time.Now().Unix(), 10)
+	}
+	username := strings.TrimSpace(payload.AdminUsername)
+	if username == "" {
+		username = "azureuser"
+	}
+
+	userData := strings.TrimSpace(payload.UserData)
+	autoConnectGroup := ""
+	if plan.AutoConnectGroup != "" || planHasScripts(plan) {
+		userData, autoConnectGroup, err = buildAutoConnectUserData(autoConnectOptions{
+			UserUUID:          userUUID,
+			UserData:          userData,
+			Provider:          "azure",
+			CredentialName:    credential.Name,
+			Group:             plan.AutoConnectGroup,
+			WrapInShellScript: true,
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	rootPassword := firstNonEmpty(payload.RootPassword, payload.AdminPassword)
+	passwordMode := strings.ToLower(strings.TrimSpace(payload.RootPasswordMode))
+	switch passwordMode {
+	case "", "random":
+		passwordMode = "random"
+		rootPassword, err = linodecloud.GenerateRandomPassword(20)
+		if err != nil {
+			return nil, err
+		}
+	case "custom":
+		if strings.TrimSpace(rootPassword) == "" {
+			return nil, errors.New("azure root_password cannot be empty when root_password_mode=custom")
+		}
+	case "none":
+		rootPassword = ""
+		if strings.TrimSpace(payload.SSHPublicKey) == "" {
+			return nil, errors.New("azure ssh_public_key is required when root_password_mode=none")
+		}
+	default:
+		return nil, fmt.Errorf("unsupported azure root_password_mode: %s", payload.RootPasswordMode)
+	}
+
+	detail, err := client.CreateVirtualMachine(ctx, azurecloud.CreateVirtualMachineRequest{
+		Name:          name,
+		ResourceGroup: strings.TrimSpace(payload.ResourceGroup),
+		Location:      location,
+		Size:          strings.TrimSpace(payload.Size),
+		AdminUsername: username,
+		AdminPassword: rootPassword,
+		SSHPublicKey:  strings.TrimSpace(payload.SSHPublicKey),
+		UserData:      userData,
+		PublicIP:      payload.PublicIP,
+		AssignIPv6:    payload.AssignIPv6,
+		Image:         payload.Image,
+		Tags: map[string]string{
+			"managed-by": "komari",
+			"provider":   "failover",
+		},
+	})
+	if err != nil {
+		return nil, normalizeExecutionStopError(err)
+	}
+	instance := detail.Instance
+	passwordSaveErr := persistAzureRootPassword(
+		userUUID,
+		addition,
+		credential,
+		instance.InstanceID,
+		instance.Name,
+		username,
+		passwordMode,
+		rootPassword,
+	)
+	cleanupLabel := "delete failed azure vm " + instance.Name
+	cleanupProvisionedInstance := func(runCtx context.Context) error {
+		if _, cleanupErr := client.DeleteVirtualMachine(contextOrBackground(runCtx), instance.ResourceGroup, instance.Name); cleanupErr != nil {
+			if isAzureNotFoundError(cleanupErr) {
+				removeSavedAzureRootPassword(userUUID, addition, credential, instance.InstanceID)
+				return nil
+			}
+			return normalizeExecutionStopError(cleanupErr)
+		}
+		removeSavedAzureRootPassword(userUUID, addition, credential, instance.InstanceID)
+		return nil
+	}
+	if rootPassword != "" && passwordSaveErr != nil {
+		cleanupErr := cleanupProvisionedInstance(contextOrBackground(ctx))
+		if cleanupErr != nil {
+			return nil, &provisionCleanupError{
+				Provider:     "azure",
+				ResourceType: "vm",
+				ResourceID:   instance.InstanceID,
+				CleanupLabel: cleanupLabel,
+				CleanupError: cleanupErr,
+				Cause:        passwordSaveErr,
+			}
+		}
+		return nil, &provisionCleanupError{
+			Provider:     "azure",
+			ResourceType: "vm",
+			ResourceID:   instance.InstanceID,
+			CleanupLabel: cleanupLabel,
+			Cause:        passwordSaveErr,
+		}
+	}
+
+	newInstanceRef := map[string]interface{}{
+		"provider":            "azure",
+		"provider_entry_id":   credential.ID,
+		"provider_entry_name": credential.Name,
+		"region":              instance.Location,
+		"location":            instance.Location,
+		"resource_group":      instance.ResourceGroup,
+		"instance_id":         instance.InstanceID,
+		"name":                instance.Name,
+	}
+	if rootPassword != "" {
+		newInstanceRef["root_password_mode"] = passwordMode
+		newInstanceRef["root_password_saved"] = passwordSaveErr == nil
+		if passwordSaveErr != nil {
+			newInstanceRef["root_password_save_error"] = passwordSaveErr.Error()
+		}
+	}
+	outcome := &actionOutcome{
+		IPv4:             firstAzurePublicIPByVersion(instance.PublicIPs, false),
+		IPv6:             firstAzurePublicIPByVersion(instance.PublicIPs, true),
+		AutoConnectGroup: autoConnectGroup,
+		NewInstanceRef:   newInstanceRef,
+		NewAddresses: map[string]interface{}{
+			"public_ips":  instance.PublicIPs,
+			"private_ips": instance.PrivateIPs,
+		},
+		RollbackLabel: cleanupLabel,
+		Rollback:      cleanupProvisionedInstance,
+	}
+
+	cleanupResourceGroup := strings.TrimSpace(payload.CleanupResourceGroup)
+	cleanupName := strings.TrimSpace(payload.CleanupName)
+	cleanupInstanceID := strings.TrimSpace(payload.CleanupInstanceID)
+	if cleanupInstanceID != "" && (cleanupResourceGroup == "" || cleanupName == "") {
+		if decodedGroup, decodedName, decodeErr := azurecloud.DecodeInstanceID(cleanupInstanceID); decodeErr == nil {
+			cleanupResourceGroup = firstNonEmpty(cleanupResourceGroup, decodedGroup)
+			cleanupName = firstNonEmpty(cleanupName, decodedName)
+		}
+	}
+	if cleanupResourceGroup != "" && cleanupName != "" {
+		oldInstanceID := firstNonEmpty(cleanupInstanceID, azurecloud.EncodeInstanceID(cleanupResourceGroup, cleanupName))
+		outcome.OldInstanceRef = map[string]interface{}{
+			"provider":            "azure",
+			"provider_entry_id":   credential.ID,
+			"provider_entry_name": credential.Name,
+			"resource_group":      cleanupResourceGroup,
+			"instance_id":         oldInstanceID,
+			"name":                cleanupName,
+		}
+		outcome.CleanupLabel = "delete azure vm " + cleanupName
+		outcome.Cleanup = func(ctx context.Context) error {
+			if _, err := client.DeleteVirtualMachine(contextOrBackground(ctx), cleanupResourceGroup, cleanupName); err != nil {
+				if isAzureNotFoundError(err) {
+					removeSavedAzureRootPassword(userUUID, addition, credential, oldInstanceID)
+					return nil
+				}
+				return normalizeExecutionStopError(err)
+			}
+			removeSavedAzureRootPassword(userUUID, addition, credential, oldInstanceID)
+			return nil
+		}
+	}
+	return outcome, nil
+}
+
 func provisionLinodeInstance(ctx context.Context, userUUID string, plan models.FailoverPlan) (*actionOutcome, error) {
 	var payload linodeProvisionPayload
 	if err := json.Unmarshal([]byte(plan.Payload), &payload); err != nil {
@@ -5547,6 +6027,29 @@ func firstString(values []string) string {
 		value = strings.TrimSpace(value)
 		if value != "" {
 			return value
+		}
+	}
+	return ""
+}
+
+func firstAzurePublicIPByVersion(values []string, ipv6 bool) string {
+	for _, value := range values {
+		normalized := normalizeIPAddress(value)
+		if normalized == "" {
+			continue
+		}
+		parsed := net.ParseIP(normalized)
+		if parsed == nil {
+			continue
+		}
+		if ipv6 {
+			if parsed.To4() == nil {
+				return normalized
+			}
+			continue
+		}
+		if parsed.To4() != nil {
+			return normalized
 		}
 	}
 	return ""

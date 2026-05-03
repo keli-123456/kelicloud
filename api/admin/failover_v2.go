@@ -360,6 +360,26 @@ func parseFailoverV2PendingCleanupID(c *gin.Context) (uint, bool) {
 	return uint(parsed), true
 }
 
+func auditFailoverV2ServiceAction(c *gin.Context, userUUID, action string, serviceID uint, msgType string) {
+	api.AuditLogForCurrentUser(c, userUUID, fmt.Sprintf("failover v2 %s service:%d", strings.TrimSpace(action), serviceID), msgType)
+}
+
+func auditFailoverV2MemberAction(c *gin.Context, userUUID, action string, serviceID, memberID uint, msgType string) {
+	api.AuditLogForCurrentUser(c, userUUID, fmt.Sprintf("failover v2 %s member:%d service:%d", strings.TrimSpace(action), memberID, serviceID), msgType)
+}
+
+func auditFailoverV2ExecutionAction(c *gin.Context, userUUID, action string, serviceID, memberID, executionID uint, msgType string) {
+	message := fmt.Sprintf("failover v2 %s execution:%d service:%d", strings.TrimSpace(action), executionID, serviceID)
+	if memberID > 0 {
+		message += fmt.Sprintf(" member:%d", memberID)
+	}
+	api.AuditLogForCurrentUser(c, userUUID, message, msgType)
+}
+
+func auditFailoverV2PendingCleanupAction(c *gin.Context, userUUID, action string, serviceID, cleanupID uint, msgType string) {
+	api.AuditLogForCurrentUser(c, userUUID, fmt.Sprintf("failover v2 %s pending cleanup:%d service:%d", strings.TrimSpace(action), cleanupID, serviceID), msgType)
+}
+
 func parseFailoverV2EnabledRequest(c *gin.Context) (bool, bool) {
 	var req failoverV2EnabledRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -1104,7 +1124,7 @@ func validateFailoverV2MemberRequest(scope ownerScope, service *models.FailoverV
 	case models.FailoverV2MemberModeProviderTemplate:
 		provider = strings.ToLower(strings.TrimSpace(req.Provider))
 		switch provider {
-		case digitalOceanProviderName, linodeProviderName, awsProviderName:
+		case digitalOceanProviderName, linodeProviderName, awsProviderName, azureProviderName:
 		default:
 			return nil, fmt.Errorf("unsupported failover v2 member provider: %s", req.Provider)
 		}
@@ -1133,6 +1153,10 @@ func validateFailoverV2MemberRequest(scope ownerScope, service *models.FailoverV
 			}
 		case awsProviderName:
 			if _, err := failoverv2svc.ParseAWSMemberPlanPayload(planPayload); err != nil {
+				return nil, err
+			}
+		case azureProviderName:
+			if _, err := failoverv2svc.ParseAzureMemberPlanPayload(planPayload); err != nil {
 				return nil, err
 			}
 		}
@@ -1494,6 +1518,7 @@ func CreateFailoverV2Service(c *gin.Context) {
 		return
 	}
 
+	auditFailoverV2ServiceAction(c, scope.UserUUID, "create", created.ID, "info")
 	api.RespondSuccess(c, buildFailoverV2ServiceView(created, nil, ws.GetLatestReport(), time.Now()))
 }
 
@@ -1677,6 +1702,7 @@ func RetryFailoverV2PendingCleanup(c *gin.Context) {
 		return
 	}
 
+	auditFailoverV2PendingCleanupAction(c, scope.UserUUID, "retry", serviceID, cleanup.ID, "warn")
 	api.RespondSuccess(c, buildFailoverV2PendingCleanupView(*cleanup))
 }
 
@@ -1705,6 +1731,7 @@ func ResolveFailoverV2PendingCleanup(c *gin.Context) {
 		return
 	}
 
+	auditFailoverV2PendingCleanupAction(c, scope.UserUUID, "resolve", serviceID, cleanup.ID, "warn")
 	api.RespondSuccess(c, buildFailoverV2PendingCleanupView(*cleanup))
 }
 
@@ -1733,6 +1760,7 @@ func MarkFailoverV2PendingCleanupManualReview(c *gin.Context) {
 		return
 	}
 
+	auditFailoverV2PendingCleanupAction(c, scope.UserUUID, "mark manual review", serviceID, cleanup.ID, "warn")
 	api.RespondSuccess(c, buildFailoverV2PendingCleanupView(*cleanup))
 }
 
@@ -1767,6 +1795,7 @@ func RetryFailoverV2ExecutionAttachDNS(c *gin.Context) {
 		return
 	}
 
+	auditFailoverV2ExecutionAction(c, scope.UserUUID, "retry attach dns", serviceID, execution.MemberID, execution.ID, "warn")
 	api.RespondSuccess(c, view)
 }
 
@@ -1801,6 +1830,7 @@ func StopFailoverV2Execution(c *gin.Context) {
 		return
 	}
 
+	auditFailoverV2ExecutionAction(c, scope.UserUUID, "stop", serviceID, execution.MemberID, execution.ID, "warn")
 	api.RespondSuccess(c, view)
 }
 
@@ -1835,6 +1865,7 @@ func RetryFailoverV2ExecutionCleanup(c *gin.Context) {
 		return
 	}
 
+	auditFailoverV2ExecutionAction(c, scope.UserUUID, "retry cleanup", serviceID, execution.MemberID, execution.ID, "warn")
 	api.RespondSuccess(c, view)
 }
 
@@ -1902,6 +1933,7 @@ func UpdateFailoverV2Service(c *gin.Context) {
 		return
 	}
 
+	auditFailoverV2ServiceAction(c, scope.UserUUID, "update", serviceID, "info")
 	api.RespondSuccess(c, view)
 }
 
@@ -1935,6 +1967,13 @@ func SetFailoverV2ServiceEnabled(c *gin.Context) {
 		return
 	}
 
+	action := "enable"
+	msgType := "info"
+	if !enabled {
+		action = "disable"
+		msgType = "warn"
+	}
+	auditFailoverV2ServiceAction(c, scope.UserUUID, action, serviceID, msgType)
 	api.RespondSuccess(c, view)
 }
 
@@ -1962,6 +2001,7 @@ func DeleteFailoverV2Service(c *gin.Context) {
 		return
 	}
 
+	auditFailoverV2ServiceAction(c, scope.UserUUID, "delete", serviceID, "warn")
 	api.RespondSuccess(c, nil)
 }
 
@@ -2002,7 +2042,8 @@ func CreateFailoverV2Member(c *gin.Context) {
 		return
 	}
 
-	if _, err := failoverv2db.CreateMemberForUser(scope.UserUUID, serviceID, member); err != nil {
+	created, err := failoverv2db.CreateMemberForUser(scope.UserUUID, serviceID, member)
+	if err != nil {
 		if isFailoverV2ActiveExecutionError(err) {
 			api.RespondError(c, http.StatusBadRequest, "Failed to create failover v2 member: "+err.Error())
 			return
@@ -2017,6 +2058,7 @@ func CreateFailoverV2Member(c *gin.Context) {
 		return
 	}
 
+	auditFailoverV2MemberAction(c, scope.UserUUID, "create", serviceID, created.ID, "info")
 	api.RespondSuccess(c, view)
 }
 
@@ -2080,6 +2122,7 @@ func UpdateFailoverV2Member(c *gin.Context) {
 		return
 	}
 
+	auditFailoverV2MemberAction(c, scope.UserUUID, "update", serviceID, memberID, "info")
 	api.RespondSuccess(c, view)
 }
 
@@ -2117,6 +2160,13 @@ func SetFailoverV2MemberEnabled(c *gin.Context) {
 		return
 	}
 
+	action := "enable"
+	msgType := "info"
+	if !enabled {
+		action = "disable"
+		msgType = "warn"
+	}
+	auditFailoverV2MemberAction(c, scope.UserUUID, action, serviceID, memberID, msgType)
 	api.RespondSuccess(c, view)
 }
 
@@ -2154,6 +2204,7 @@ func DeleteFailoverV2Member(c *gin.Context) {
 		return
 	}
 
+	auditFailoverV2MemberAction(c, scope.UserUUID, "delete", serviceID, memberID, "warn")
 	api.RespondSuccess(c, view)
 }
 
@@ -2182,6 +2233,7 @@ func DetachFailoverV2MemberDNS(c *gin.Context) {
 		return
 	}
 
+	auditFailoverV2ExecutionAction(c, scope.UserUUID, "detach dns", serviceID, memberID, execution.ID, "warn")
 	api.RespondSuccess(c, buildFailoverV2ExecutionSummaryView(*execution))
 }
 
@@ -2210,5 +2262,6 @@ func RunFailoverV2Member(c *gin.Context) {
 		return
 	}
 
+	auditFailoverV2ExecutionAction(c, scope.UserUUID, "run", serviceID, memberID, execution.ID, "warn")
 	api.RespondSuccess(c, buildFailoverV2ExecutionSummaryView(*execution))
 }

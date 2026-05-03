@@ -37,6 +37,7 @@ komari
 
 # local build caches and generated frontend bundle
 .gocache/
+.gotmp/
 .gomodcache/
 node_modules/
 public/frontend/

@@ -2,21 +2,15 @@ package jsonRpc
 
 import (
 	"context"
-	"path/filepath"
 	"testing"
 	"time"
 
-	"github.com/komari-monitor/komari/cmd/flags"
-	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/utils/rpc"
 )
 
 func TestGetMeClientReturnsClientUUIDFromToken(t *testing.T) {
-	flags.DatabaseType = "sqlite"
-	flags.DatabaseFile = filepath.Join(t.TempDir(), "komari-jsonrpc-getme.db")
-
-	db := dbcore.GetDBInstance()
+	db := configureJSONRPCTestDB()
 	now := models.FromTime(time.Now())
 
 	user := models.User{

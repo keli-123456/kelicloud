@@ -38,6 +38,10 @@ func CreateUser(c *gin.Context) {
 		Role            string    `json:"role"`
 		ServerQuota     *int      `json:"server_quota"`
 		AllowedFeatures *[]string `json:"allowed_features"`
+		PlanName        *string   `json:"plan_name"`
+		PlanExpiresAt   *string   `json:"plan_expires_at"`
+		PlanNote        *string   `json:"plan_note"`
+		AccountDisabled *bool     `json:"account_disabled"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		api.RespondError(c, http.StatusBadRequest, "Invalid request: "+err.Error())
@@ -64,6 +68,11 @@ func CreateUser(c *gin.Context) {
 	if err := config.SetUserPolicy(user.UUID, req.ServerQuota, req.AllowedFeatures); err != nil {
 		_ = accounts.DeleteUserByUUID(user.UUID)
 		api.RespondError(c, http.StatusBadRequest, "Failed to set user policy: "+err.Error())
+		return
+	}
+	if err := config.SetUserCommercialPolicy(user.UUID, req.PlanName, req.PlanExpiresAt, req.PlanNote, req.AccountDisabled); err != nil {
+		_ = accounts.DeleteUserByUUID(user.UUID)
+		api.RespondError(c, http.StatusBadRequest, "Failed to set user commercial policy: "+err.Error())
 		return
 	}
 	user.Passwd = ""
@@ -123,6 +132,11 @@ type adminUserItem struct {
 	ServerQuota     int              `json:"server_quota"`
 	AllowedFeatures []string         `json:"allowed_features,omitempty"`
 	ClientCount     int64            `json:"client_count"`
+	PlanName        string           `json:"plan_name,omitempty"`
+	PlanExpiresAt   string           `json:"plan_expires_at,omitempty"`
+	PlanNote        string           `json:"plan_note,omitempty"`
+	AccountDisabled bool             `json:"account_disabled,omitempty"`
+	AccessStatus    string           `json:"access_status"`
 }
 
 func buildAdminUserItem(user models.User, policy config.UserPolicy, clientCount int64) adminUserItem {
@@ -137,6 +151,11 @@ func buildAdminUserItem(user models.User, policy config.UserPolicy, clientCount 
 		ServerQuota:     policy.ServerQuota,
 		AllowedFeatures: policy.AllowedFeatures,
 		ClientCount:     clientCount,
+		PlanName:        policy.PlanName,
+		PlanExpiresAt:   policy.PlanExpiresAt,
+		PlanNote:        policy.PlanNote,
+		AccountDisabled: policy.AccountDisabled,
+		AccessStatus:    policy.AccessStatus,
 	}
 }
 

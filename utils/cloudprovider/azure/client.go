@@ -164,6 +164,11 @@ type PublicIPReplacementResult struct {
 	NewPublicIP   string `json:"new_public_ip,omitempty"`
 }
 
+type DeleteVirtualMachineResult struct {
+	DeletedResourceIDs []string `json:"deleted_resource_ids,omitempty"`
+	CleanupErrors      []string `json:"cleanup_errors,omitempty"`
+}
+
 type virtualMachineResource struct {
 	ID         string            `json:"id"`
 	Name       string            `json:"name"`
@@ -235,8 +240,9 @@ type instanceStatus struct {
 }
 
 type networkInterfaceResource struct {
-	ID         string `json:"id"`
-	Name       string `json:"name"`
+	ID         string            `json:"id"`
+	Name       string            `json:"name"`
+	Tags       map[string]string `json:"tags"`
 	Properties struct {
 		NetworkSecurityGroup *struct {
 			ID string `json:"id"`
@@ -258,12 +264,21 @@ type networkInterfaceResource struct {
 }
 
 type publicIPAddressResource struct {
+	ID         string            `json:"id"`
+	Name       string            `json:"name"`
+	Tags       map[string]string `json:"tags"`
 	Properties struct {
 		IPAddress   string `json:"ipAddress"`
 		DNSSettings *struct {
 			FQDN string `json:"fqdn"`
 		} `json:"dnsSettings"`
 	} `json:"properties"`
+}
+
+type taggedResource struct {
+	ID   string            `json:"id"`
+	Name string            `json:"name"`
+	Tags map[string]string `json:"tags"`
 }
 
 type resourceSKU struct {
@@ -618,14 +633,17 @@ func (c *Client) CreateVirtualMachine(ctx context.Context, request CreateVirtual
 	nsgName := resourceBase + "-nsg"
 	publicIPName := resourceBase + "-ip"
 	nicName := resourceBase + "-nic"
+	osDiskName := resourceBase + "-osdisk"
 
 	if err := c.ensureResourceGroup(ctx, resourceGroup, location, tags); err != nil {
 		return nil, err
 	}
 	if err := c.ensureVirtualNetwork(ctx, resourceGroup, location, vnetName, subnetName, request.AssignIPv6, tags); err != nil {
+		c.cleanupVirtualMachineCreateFailure(ctx, resourceGroup, name, resourceBase, request.PublicIP, request.AssignIPv6)
 		return nil, err
 	}
 	if err := c.ensureNetworkSecurityGroup(ctx, resourceGroup, location, nsgName, tags); err != nil {
+		c.cleanupVirtualMachineCreateFailure(ctx, resourceGroup, name, resourceBase, request.PublicIP, request.AssignIPv6)
 		return nil, err
 	}
 
@@ -633,12 +651,14 @@ func (c *Client) CreateVirtualMachine(ctx context.Context, request CreateVirtual
 	publicIPv6ID := ""
 	if request.PublicIP {
 		if err := c.ensurePublicIPAddress(ctx, resourceGroup, location, publicIPName, "IPv4", tags); err != nil {
+			c.cleanupVirtualMachineCreateFailure(ctx, resourceGroup, name, resourceBase, request.PublicIP, request.AssignIPv6)
 			return nil, err
 		}
 		publicIPv4ID = c.publicIPAddressPath(resourceGroup, publicIPName)
 		if request.AssignIPv6 {
 			publicIPv6Name := resourceBase + "-ip6"
 			if err := c.ensurePublicIPAddress(ctx, resourceGroup, location, publicIPv6Name, "IPv6", tags); err != nil {
+				c.cleanupVirtualMachineCreateFailure(ctx, resourceGroup, name, resourceBase, request.PublicIP, request.AssignIPv6)
 				return nil, err
 			}
 			publicIPv6ID = c.publicIPAddressPath(resourceGroup, publicIPv6Name)
@@ -657,13 +677,20 @@ func (c *Client) CreateVirtualMachine(ctx context.Context, request CreateVirtual
 		request.AssignIPv6,
 		tags,
 	); err != nil {
+		c.cleanupVirtualMachineCreateFailure(ctx, resourceGroup, name, resourceBase, request.PublicIP, request.AssignIPv6)
 		return nil, err
 	}
-	if err := c.ensureVirtualMachine(ctx, resourceGroup, name, location, nicName, adminUsername, adminPassword, sshPublicKey, size, image, strings.TrimSpace(request.UserData), tags); err != nil {
+	if err := c.ensureVirtualMachine(ctx, resourceGroup, name, location, nicName, osDiskName, adminUsername, adminPassword, sshPublicKey, size, image, strings.TrimSpace(request.UserData), tags); err != nil {
+		c.cleanupVirtualMachineCreateFailure(ctx, resourceGroup, name, resourceBase, request.PublicIP, request.AssignIPv6)
 		return nil, err
 	}
 
-	return c.GetVirtualMachineDetail(ctx, resourceGroup, name)
+	detail, err := c.GetVirtualMachineDetail(ctx, resourceGroup, name)
+	if err != nil {
+		c.cleanupVirtualMachineCreateFailure(ctx, resourceGroup, name, resourceBase, request.PublicIP, request.AssignIPv6)
+		return nil, err
+	}
+	return detail, nil
 }
 
 func (c *Client) StartVirtualMachine(ctx context.Context, resourceGroup, name string) error {
@@ -684,10 +711,38 @@ func (c *Client) DeallocateVirtualMachine(ctx context.Context, resourceGroup, na
 	}, map[string]any{}, nil)
 }
 
-func (c *Client) DeleteVirtualMachine(ctx context.Context, resourceGroup, name string) error {
-	return c.do(ctx, http.MethodDelete, c.vmPath(resourceGroup, name), url.Values{
+func (c *Client) DeleteVirtualMachine(ctx context.Context, resourceGroup, name string) (*DeleteVirtualMachineResult, error) {
+	resourceGroup = strings.TrimSpace(resourceGroup)
+	name = strings.TrimSpace(name)
+	if resourceGroup == "" || name == "" {
+		return nil, errors.New("azure vm resource group and name are required")
+	}
+
+	result := &DeleteVirtualMachineResult{}
+	var vmResource virtualMachineResource
+	if err := c.do(ctx, http.MethodGet, c.vmPath(resourceGroup, name), url.Values{
 		"api-version": {computeAPIVersion},
-	}, nil, nil)
+	}, nil, &vmResource); err != nil {
+		return result, err
+	}
+
+	cleanupResources := c.collectVirtualMachineCleanupResources(ctx, resourceGroup, vmResource, result)
+	if err := c.doAsync(ctx, http.MethodDelete, c.vmPath(resourceGroup, name), url.Values{
+		"api-version": {computeAPIVersion},
+	}, nil); err != nil {
+		return result, err
+	}
+	result.addDeletedResource(firstNonEmpty(vmResource.ID, c.vmPath(resourceGroup, name)))
+
+	for _, resource := range cleanupResources {
+		if err := c.deleteAssociatedResource(ctx, resource); err != nil {
+			result.addCleanupError(fmt.Sprintf("delete %s %s: %v", resource.Kind, firstNonEmpty(resource.ID, resource.Name), err))
+			continue
+		}
+		result.addDeletedResource(resource.ID)
+	}
+
+	return result, nil
 }
 
 func (c *Client) ReplaceVirtualMachinePublicIPv4(ctx context.Context, resourceGroup, name string) (*PublicIPReplacementResult, error) {
@@ -818,6 +873,217 @@ func (c *Client) ReplaceVirtualMachinePublicIPv4(ctx context.Context, resourceGr
 		NewPublicIPID: newPublicIPID,
 		NewPublicIP:   strings.TrimSpace(newPublicIP),
 	}, nil
+}
+
+type virtualMachineCleanupResource struct {
+	ID         string
+	Name       string
+	Kind       string
+	APIVersion string
+}
+
+func (r *DeleteVirtualMachineResult) addDeletedResource(resourceID string) {
+	if r == nil {
+		return
+	}
+	resourceID = strings.TrimSpace(resourceID)
+	if resourceID == "" {
+		return
+	}
+	for _, existing := range r.DeletedResourceIDs {
+		if strings.EqualFold(existing, resourceID) {
+			return
+		}
+	}
+	r.DeletedResourceIDs = append(r.DeletedResourceIDs, resourceID)
+}
+
+func (r *DeleteVirtualMachineResult) addCleanupError(message string) {
+	if r == nil {
+		return
+	}
+	message = strings.TrimSpace(message)
+	if message == "" {
+		return
+	}
+	r.CleanupErrors = append(r.CleanupErrors, message)
+}
+
+func (c *Client) collectVirtualMachineCleanupResources(ctx context.Context, resourceGroup string, vm virtualMachineResource, result *DeleteVirtualMachineResult) []virtualMachineCleanupResource {
+	vmManaged := isKomariManagedTags(vm.Tags)
+	var nicResources []virtualMachineCleanupResource
+	var publicIPResources []virtualMachineCleanupResource
+	var diskResources []virtualMachineCleanupResource
+	var securityGroupResources []virtualMachineCleanupResource
+	var vnetResources []virtualMachineCleanupResource
+
+	if vmManaged && vm.Properties.StorageProfile.OSDisk != nil && vm.Properties.StorageProfile.OSDisk.ManagedDisk != nil {
+		diskID := strings.TrimSpace(vm.Properties.StorageProfile.OSDisk.ManagedDisk.ID)
+		if diskID != "" {
+			diskResources = appendCleanupResource(diskResources, virtualMachineCleanupResource{
+				ID:         diskID,
+				Name:       vm.Properties.StorageProfile.OSDisk.Name,
+				Kind:       "managed disk",
+				APIVersion: computeAPIVersion,
+			})
+		}
+	}
+
+	for _, nicRef := range vm.Properties.NetworkProfile.NetworkInterfaces {
+		nicID := strings.TrimSpace(nicRef.ID)
+		if nicID == "" {
+			continue
+		}
+		nicPath, err := toManagementPath(nicID)
+		if err != nil {
+			result.addCleanupError(fmt.Sprintf("inspect network interface %s: %v", nicID, err))
+			continue
+		}
+
+		var nic networkInterfaceResource
+		if err := c.do(ctx, http.MethodGet, nicPath, url.Values{
+			"api-version": {networkAPIVersion},
+		}, nil, &nic); err != nil {
+			if !isAzureNotFoundError(err) {
+				result.addCleanupError(fmt.Sprintf("inspect network interface %s: %v", nicID, err))
+			}
+			continue
+		}
+
+		nicManaged := isKomariManagedTags(nic.Tags)
+		if nicManaged {
+			nicResources = appendCleanupResource(nicResources, virtualMachineCleanupResource{
+				ID:         firstNonEmpty(nic.ID, nicID),
+				Name:       nic.Name,
+				Kind:       "network interface",
+				APIVersion: networkAPIVersion,
+			})
+		}
+
+		if !vmManaged && !nicManaged {
+			continue
+		}
+
+		if nic.Properties.NetworkSecurityGroup != nil {
+			if resource, ok := c.managedTaggedCleanupResource(ctx, nic.Properties.NetworkSecurityGroup.ID, "network security group", networkAPIVersion, result); ok {
+				securityGroupResources = appendCleanupResource(securityGroupResources, resource)
+			}
+		}
+
+		for _, config := range nic.Properties.IPConfigurations {
+			if config.Properties.PublicIPAddress != nil {
+				if resource, ok := c.managedTaggedCleanupResource(ctx, config.Properties.PublicIPAddress.ID, "public IP address", networkAPIVersion, result); ok {
+					publicIPResources = appendCleanupResource(publicIPResources, resource)
+				}
+			}
+			if config.Properties.Subnet != nil {
+				if vnetID := parentAzureResourceID(config.Properties.Subnet.ID, "/subnets/"); vnetID != "" {
+					if resource, ok := c.managedTaggedCleanupResource(ctx, vnetID, "virtual network", networkAPIVersion, result); ok {
+						vnetResources = appendCleanupResource(vnetResources, resource)
+					}
+				}
+			}
+		}
+	}
+
+	resources := make([]virtualMachineCleanupResource, 0, len(nicResources)+len(publicIPResources)+len(diskResources)+len(securityGroupResources)+len(vnetResources))
+	resources = append(resources, nicResources...)
+	resources = append(resources, publicIPResources...)
+	resources = append(resources, diskResources...)
+	resources = append(resources, securityGroupResources...)
+	resources = append(resources, vnetResources...)
+	return resources
+}
+
+func (c *Client) managedTaggedCleanupResource(ctx context.Context, resourceID, kind, apiVersion string, result *DeleteVirtualMachineResult) (virtualMachineCleanupResource, bool) {
+	resourceID = strings.TrimSpace(resourceID)
+	if resourceID == "" {
+		return virtualMachineCleanupResource{}, false
+	}
+	path, err := toManagementPath(resourceID)
+	if err != nil {
+		result.addCleanupError(fmt.Sprintf("inspect %s %s: %v", kind, resourceID, err))
+		return virtualMachineCleanupResource{}, false
+	}
+
+	var resource taggedResource
+	if err := c.do(ctx, http.MethodGet, path, url.Values{
+		"api-version": {apiVersion},
+	}, nil, &resource); err != nil {
+		if !isAzureNotFoundError(err) {
+			result.addCleanupError(fmt.Sprintf("inspect %s %s: %v", kind, resourceID, err))
+		}
+		return virtualMachineCleanupResource{}, false
+	}
+	if !isKomariManagedTags(resource.Tags) {
+		return virtualMachineCleanupResource{}, false
+	}
+	return virtualMachineCleanupResource{
+		ID:         firstNonEmpty(resource.ID, resourceID),
+		Name:       resource.Name,
+		Kind:       kind,
+		APIVersion: apiVersion,
+	}, true
+}
+
+func appendCleanupResource(resources []virtualMachineCleanupResource, resource virtualMachineCleanupResource) []virtualMachineCleanupResource {
+	resource.ID = strings.TrimSpace(resource.ID)
+	if resource.ID == "" {
+		return resources
+	}
+	for _, existing := range resources {
+		if strings.EqualFold(existing.ID, resource.ID) {
+			return resources
+		}
+	}
+	return append(resources, resource)
+}
+
+func (c *Client) deleteAssociatedResource(ctx context.Context, resource virtualMachineCleanupResource) error {
+	if strings.TrimSpace(resource.ID) == "" {
+		return nil
+	}
+	path, err := toManagementPath(resource.ID)
+	if err != nil {
+		return err
+	}
+	if err := c.doAsync(ctx, http.MethodDelete, path, url.Values{
+		"api-version": {resource.APIVersion},
+	}, nil); err != nil {
+		if isAzureNotFoundError(err) {
+			return nil
+		}
+		return err
+	}
+	return nil
+}
+
+func (c *Client) cleanupVirtualMachineCreateFailure(ctx context.Context, resourceGroup, name, resourceBase string, publicIP, assignIPv6 bool) {
+	_ = c.doAsync(ctx, http.MethodDelete, c.vmPath(resourceGroup, name), url.Values{
+		"api-version": {computeAPIVersion},
+	}, nil)
+
+	result := &DeleteVirtualMachineResult{}
+	resources := make([]virtualMachineCleanupResource, 0, 5)
+	appendKnownTagged := func(resourceID, kind string) {
+		if resource, ok := c.managedTaggedCleanupResource(ctx, resourceID, kind, networkAPIVersion, result); ok {
+			resources = appendCleanupResource(resources, resource)
+		}
+	}
+
+	appendKnownTagged(c.networkInterfacePath(resourceGroup, resourceBase+"-nic"), "network interface")
+	if publicIP {
+		appendKnownTagged(c.publicIPAddressPath(resourceGroup, resourceBase+"-ip"), "public IP address")
+		if assignIPv6 {
+			appendKnownTagged(c.publicIPAddressPath(resourceGroup, resourceBase+"-ip6"), "public IP address")
+		}
+	}
+	appendKnownTagged(c.networkSecurityGroupPath(resourceGroup, resourceBase+"-nsg"), "network security group")
+	appendKnownTagged(c.virtualNetworkPath(resourceGroup, resourceBase+"-vnet"), "virtual network")
+
+	for _, resource := range resources {
+		_ = c.deleteAssociatedResource(ctx, resource)
+	}
 }
 
 func EncodeInstanceID(resourceGroup, name string) string {
@@ -1455,7 +1721,7 @@ func (c *Client) ensureNetworkInterface(ctx context.Context, resourceGroup, loca
 	})
 }
 
-func (c *Client) ensureVirtualMachine(ctx context.Context, resourceGroup, name, location, nicName, adminUsername, adminPassword, sshPublicKey, size string, image ImageReference, userData string, tags map[string]string) error {
+func (c *Client) ensureVirtualMachine(ctx context.Context, resourceGroup, name, location, nicName, osDiskName, adminUsername, adminPassword, sshPublicKey, size string, image ImageReference, userData string, tags map[string]string) error {
 	linuxConfiguration := map[string]any{
 		"disablePasswordAuthentication": strings.TrimSpace(adminPassword) == "",
 		"provisionVMAgent":              true,
@@ -1501,6 +1767,8 @@ func (c *Client) ensureVirtualMachine(ctx context.Context, resourceGroup, name, 
 				},
 				"osDisk": map[string]any{
 					"createOption": "FromImage",
+					"name":         osDiskName,
+					"deleteOption": "Delete",
 					"managedDisk": map[string]any{
 						"storageAccountType": "StandardSSD_LRS",
 					},
@@ -1512,7 +1780,8 @@ func (c *Client) ensureVirtualMachine(ctx context.Context, resourceGroup, name, 
 					{
 						"id": c.networkInterfacePath(resourceGroup, nicName),
 						"properties": map[string]any{
-							"primary": true,
+							"primary":      true,
+							"deleteOption": "Delete",
 						},
 					},
 				},
@@ -1567,6 +1836,19 @@ func resourceGroupFromID(resourceID string) string {
 	return strings.TrimSpace(remaining[:next])
 }
 
+func parentAzureResourceID(resourceID, childMarker string) string {
+	resourceID = strings.TrimSpace(resourceID)
+	childMarker = strings.TrimSpace(childMarker)
+	if resourceID == "" || childMarker == "" {
+		return ""
+	}
+	index := strings.LastIndex(strings.ToLower(resourceID), strings.ToLower(childMarker))
+	if index <= 0 {
+		return ""
+	}
+	return strings.TrimSpace(resourceID[:index])
+}
+
 func toManagementPath(resourceID string) (string, error) {
 	resourceID = strings.TrimSpace(resourceID)
 	if resourceID == "" {
@@ -1583,6 +1865,27 @@ func toManagementPath(resourceID string) (string, error) {
 		return "", errors.New("azure resource id is invalid")
 	}
 	return resourceID, nil
+}
+
+func isKomariManagedTags(tags map[string]string) bool {
+	for key, value := range tags {
+		if strings.EqualFold(strings.TrimSpace(key), "managed-by") && strings.EqualFold(strings.TrimSpace(value), "komari") {
+			return true
+		}
+	}
+	return false
+}
+
+func isAzureNotFoundError(err error) bool {
+	var apiErr *APIError
+	if errors.As(err, &apiErr) {
+		if apiErr.StatusCode == http.StatusNotFound {
+			return true
+		}
+		code := strings.ToLower(strings.TrimSpace(apiErr.Code))
+		return code == "resourcenotfound" || code == "notfound" || code == "resourcegroupnotfound"
+	}
+	return false
 }
 
 func mapFromAny(value any) map[string]any {

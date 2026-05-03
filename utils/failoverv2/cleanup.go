@@ -11,6 +11,7 @@ import (
 	failoverv2db "github.com/komari-monitor/komari/database/failoverv2"
 	"github.com/komari-monitor/komari/database/models"
 	awscloud "github.com/komari-monitor/komari/utils/cloudprovider/aws"
+	azurecloud "github.com/komari-monitor/komari/utils/cloudprovider/azure"
 	"github.com/komari-monitor/komari/utils/cloudprovider/digitalocean"
 	linodecloud "github.com/komari-monitor/komari/utils/cloudprovider/linode"
 )
@@ -260,6 +261,51 @@ func resolveCurrentOldInstanceCleanupFromRef(userUUID string, ref map[string]int
 				},
 			}, nil
 		}
+	case "azure":
+		if entryID == "" {
+			return nil, nil
+		}
+		addition, credential, err := loadAzureCredential(userUUID, entryID)
+		if err != nil {
+			return nil, err
+		}
+		client, err := azurecloud.NewClientFromCredential(credential)
+		if err != nil {
+			return nil, err
+		}
+
+		resourceGroup := strings.TrimSpace(stringMapValue(ref, "resource_group"))
+		instanceName := firstNonEmpty(stringMapValue(ref, "name"), stringMapValue(ref, "instance_name"))
+		instanceID := strings.TrimSpace(stringMapValue(ref, "instance_id"))
+		if instanceID != "" && (resourceGroup == "" || instanceName == "") {
+			if decodedGroup, decodedName, decodeErr := azurecloud.DecodeInstanceID(instanceID); decodeErr == nil {
+				resourceGroup = firstNonEmpty(resourceGroup, decodedGroup)
+				instanceName = firstNonEmpty(instanceName, decodedName)
+			}
+		}
+		if resourceGroup == "" || instanceName == "" {
+			return nil, nil
+		}
+		resolvedInstanceID := firstNonEmpty(instanceID, azurecloud.EncodeInstanceID(resourceGroup, instanceName))
+		resolvedRef := resolvedCurrentInstanceRef(ref, provider, entryID)
+		resolvedRef["resource_group"] = resourceGroup
+		resolvedRef["name"] = instanceName
+		resolvedRef["instance_id"] = resolvedInstanceID
+		return &oldInstanceCleanup{
+			Ref:   resolvedRef,
+			Label: "delete azure vm " + instanceName,
+			Cleanup: func(ctx context.Context) error {
+				if _, err := client.DeleteVirtualMachine(contextOrBackground(ctx), resourceGroup, instanceName); err != nil {
+					if isAzureNotFoundError(err) {
+						removeSavedAzureRootPassword(userUUID, addition, credential, resolvedInstanceID)
+						return nil
+					}
+					return err
+				}
+				removeSavedAzureRootPassword(userUUID, addition, credential, resolvedInstanceID)
+				return nil
+			},
+		}, nil
 	default:
 		return nil, nil
 	}
@@ -326,6 +372,15 @@ func pendingCleanupIdentityFromRef(ref map[string]interface{}) (string, string, 
 			if instanceID := strings.TrimSpace(stringMapValue(ref, "instance_id")); instanceID != "" {
 				return provider, "ec2_instance", instanceID, entryID
 			}
+		}
+	case "azure":
+		if instanceID := strings.TrimSpace(stringMapValue(ref, "instance_id")); instanceID != "" {
+			return provider, "vm", instanceID, entryID
+		}
+		resourceGroup := strings.TrimSpace(stringMapValue(ref, "resource_group"))
+		instanceName := firstNonEmpty(stringMapValue(ref, "name"), stringMapValue(ref, "instance_name"))
+		if resourceGroup != "" && instanceName != "" {
+			return provider, "vm", azurecloud.EncodeInstanceID(resourceGroup, instanceName), entryID
 		}
 	}
 	return "", "", "", ""

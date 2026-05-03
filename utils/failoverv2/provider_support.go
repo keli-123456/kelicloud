@@ -9,6 +9,7 @@ import (
 	"time"
 
 	awscloud "github.com/komari-monitor/komari/utils/cloudprovider/aws"
+	azurecloud "github.com/komari-monitor/komari/utils/cloudprovider/azure"
 	"github.com/komari-monitor/komari/utils/cloudprovider/linode"
 )
 
@@ -50,6 +51,162 @@ func loadCloudflareDNSConfig(userUUID, entryID string) (*cloudflareDNSConfig, er
 		return nil, errors.New("cloudflare api_token is required")
 	}
 	return configValue, nil
+}
+
+func loadAzureAddition(userUUID string) (*azurecloud.Addition, error) {
+	raw, err := loadProviderAddition(userUUID, "azure")
+	if err != nil {
+		return nil, fmt.Errorf("Azure provider is not configured")
+	}
+
+	addition := &azurecloud.Addition{}
+	if raw == "" {
+		raw = "{}"
+	}
+	if err := decodeJSON(raw, addition); err != nil {
+		return nil, fmt.Errorf("Azure configuration is invalid: %w", err)
+	}
+	addition.Normalize()
+	return addition, nil
+}
+
+func loadAzureCredential(userUUID, entryID string) (*azurecloud.Addition, *azurecloud.CredentialRecord, error) {
+	return loadAzureCredentialSelection(userUUID, entryID, "")
+}
+
+func loadAzureCredentialSelection(userUUID, entryID, entryGroup string) (*azurecloud.Addition, *azurecloud.CredentialRecord, error) {
+	addition, err := loadAzureAddition(userUUID)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	entryID = strings.TrimSpace(entryID)
+	entryGroup = normalizeProviderEntryGroup(entryGroup)
+	if entryGroup != "" {
+		if entryID != "" && entryID != activeProviderEntryID {
+			credential := addition.FindCredential(entryID)
+			if credential == nil {
+				return nil, nil, fmt.Errorf("Azure credential not found: %s", entryID)
+			}
+			if normalizeProviderEntryGroup(credential.Group) != entryGroup {
+				return nil, nil, fmt.Errorf("Azure credential %s is not in group %s", entryID, entryGroup)
+			}
+			return addition, credential, nil
+		}
+		if credential := addition.ActiveCredential(); credential != nil && normalizeProviderEntryGroup(credential.Group) == entryGroup {
+			return addition, credential, nil
+		}
+		for index := range addition.Credentials {
+			if normalizeProviderEntryGroup(addition.Credentials[index].Group) == entryGroup {
+				return addition, &addition.Credentials[index], nil
+			}
+		}
+		return nil, nil, fmt.Errorf("Azure credential group not found: %s", entryGroup)
+	}
+	if entryID == "" || entryID == activeProviderEntryID {
+		credential := addition.ActiveCredential()
+		if credential == nil {
+			return nil, nil, errors.New("Azure credential is not configured")
+		}
+		return addition, credential, nil
+	}
+
+	credential := addition.FindCredential(entryID)
+	if credential == nil {
+		return nil, nil, fmt.Errorf("Azure credential not found: %s", entryID)
+	}
+	return addition, credential, nil
+}
+
+func saveAzureAddition(userUUID string, addition *azurecloud.Addition) error {
+	if addition == nil {
+		addition = &azurecloud.Addition{}
+	}
+	addition.Normalize()
+	payload, err := encodeJSON(addition)
+	if err != nil {
+		return err
+	}
+	return saveProviderAddition(userUUID, "azure", payload)
+}
+
+func reloadAzureAdditionCredentialState(userUUID string, credential *azurecloud.CredentialRecord) (*azurecloud.Addition, *azurecloud.CredentialRecord, error) {
+	if credential == nil {
+		return nil, nil, errors.New("Azure credential is not configured")
+	}
+
+	addition, err := loadAzureAddition(userUUID)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	latestCredential := addition.FindCredential(credential.ID)
+	if latestCredential == nil {
+		clientID := strings.TrimSpace(credential.ClientID)
+		subscriptionID := strings.TrimSpace(credential.SubscriptionID)
+		if clientID != "" && subscriptionID != "" {
+			for index := range addition.Credentials {
+				if strings.TrimSpace(addition.Credentials[index].ClientID) == clientID &&
+					strings.TrimSpace(addition.Credentials[index].SubscriptionID) == subscriptionID {
+					latestCredential = &addition.Credentials[index]
+					break
+				}
+			}
+		}
+	}
+	if latestCredential == nil {
+		entryID := strings.TrimSpace(credential.ID)
+		if entryID == "" {
+			return nil, nil, errors.New("Azure credential is not configured")
+		}
+		return nil, nil, fmt.Errorf("Azure credential not found: %s", entryID)
+	}
+
+	return addition, latestCredential, nil
+}
+
+func persistAzureRootPassword(userUUID string, addition *azurecloud.Addition, credential *azurecloud.CredentialRecord, instanceID, instanceName, username, passwordMode, rootPassword string) error {
+	if addition == nil || credential == nil || strings.TrimSpace(instanceID) == "" || strings.TrimSpace(rootPassword) == "" {
+		return nil
+	}
+
+	latestAddition, latestCredential, err := reloadAzureAdditionCredentialState(userUUID, credential)
+	if err != nil {
+		log.Printf("failoverv2: failed to reload Azure credential state for instance %s: %v", instanceID, err)
+		return err
+	}
+	if err := latestCredential.SaveInstancePassword(instanceID, instanceName, username, passwordMode, rootPassword, time.Now()); err != nil {
+		log.Printf("failoverv2: failed to save Azure root password for instance %s: %v", instanceID, err)
+		return err
+	}
+	if err := saveAzureAddition(userUUID, latestAddition); err != nil {
+		latestCredential.RemoveSavedInstancePassword(instanceID)
+		log.Printf("failoverv2: failed to persist Azure root password for instance %s: %v", instanceID, err)
+		return err
+	}
+	return nil
+}
+
+func removeSavedAzureRootPassword(userUUID string, addition *azurecloud.Addition, credential *azurecloud.CredentialRecord, instanceID string) {
+	if addition == nil || credential == nil || strings.TrimSpace(instanceID) == "" {
+		return
+	}
+
+	targetAddition := addition
+	targetCredential := credential
+	if latestAddition, latestCredential, err := reloadAzureAdditionCredentialState(userUUID, credential); err == nil {
+		targetAddition = latestAddition
+		targetCredential = latestCredential
+	} else {
+		log.Printf("failoverv2: failed to reload Azure credential state for instance %s cleanup, falling back to in-memory state: %v", instanceID, err)
+	}
+
+	if !targetCredential.RemoveSavedInstancePassword(instanceID) {
+		return
+	}
+	if err := saveAzureAddition(userUUID, targetAddition); err != nil {
+		log.Printf("failoverv2: failed to remove saved Azure root password for instance %s: %v", instanceID, err)
+	}
 }
 
 func loadLinodeAddition(userUUID string) (*linode.Addition, error) {

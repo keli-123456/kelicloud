@@ -36,5 +36,8 @@ func RequireUserScopeFromSession(c *gin.Context) (userUUID string, ok bool) {
 		RespondError(c, 401, "Login required")
 		return "", false
 	}
+	if rejectInactiveUser(c, userUUID) {
+		return "", false
+	}
 	return userUUID, true
 }

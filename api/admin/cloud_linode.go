@@ -304,6 +304,7 @@ func GetLinodeTokenSecret(c *gin.Context) {
 		return
 	}
 
+	logCloudAuditWithType(c, "view linode token secret: "+tokenID, "warn")
 	api.RespondSuccess(c, token.TokenSecretView())
 }
 
@@ -338,6 +339,7 @@ func GetLinodeInstancePassword(c *gin.Context) {
 		return
 	}
 
+	logCloudAuditWithType(c, fmt.Sprintf("view linode instance password: %d", instanceID), "warn")
 	api.RespondSuccess(c, passwordView)
 }
 

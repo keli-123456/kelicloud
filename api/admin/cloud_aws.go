@@ -31,6 +31,8 @@ const (
 	awsCreateFollowUpNextRunDelay = 15 * time.Second
 	awsAccountIdentityTimeout     = 12 * time.Second
 	awsAccountQuotaTimeout        = 10 * time.Second
+	awsDefaultRequestTimeout      = 45 * time.Second
+	awsLongOperationTimeout       = 4 * time.Minute
 )
 
 type createAWSInstancePayload struct {
@@ -528,6 +530,7 @@ func GetAWSCredentialSecret(c *gin.Context) {
 		return
 	}
 
+	logCloudAuditWithType(c, "view aws credential secret: "+credentialID, "warn")
 	api.RespondSuccess(c, credential.SecretView())
 }
 
@@ -569,6 +572,7 @@ func GetAWSInstancePassword(c *gin.Context) {
 		return
 	}
 
+	logCloudAuditWithType(c, "view aws ec2 password: "+instanceID, "warn")
 	api.RespondSuccess(c, passwordView)
 }
 
@@ -610,6 +614,7 @@ func GetAWSLightsailInstancePassword(c *gin.Context) {
 		return
 	}
 
+	logCloudAuditWithType(c, "view aws lightsail password: "+instanceName, "warn")
 	api.RespondSuccess(c, passwordView)
 }
 
@@ -969,7 +974,7 @@ func CreateAWSInstance(c *gin.Context) {
 	}
 
 	regionOverride := strings.TrimSpace(payload.Region)
-	addition, credential, region, ctx, cancel, err := getAWSActiveCredentialWithRegion(c, scope, regionOverride)
+	addition, credential, region, ctx, cancel, err := getAWSActiveCredentialWithRegionTimeout(c, scope, regionOverride, awsLongOperationTimeout)
 	if err != nil {
 		respondAWSError(c, err)
 		return
@@ -1022,6 +1027,10 @@ func CreateAWSInstance(c *gin.Context) {
 	createResult, err := awscloud.CreateInstance(ctx, credential, region, request)
 	if err != nil {
 		respondAWSError(c, err)
+		return
+	}
+	if createResult == nil || createResult.Instance == nil || strings.TrimSpace(createResult.Instance.InstanceID) == "" {
+		respondAWSError(c, fmt.Errorf("AWS launch returned no instance details"))
 		return
 	}
 
@@ -1122,7 +1131,7 @@ func CreateAWSLightsailInstance(c *gin.Context) {
 	}
 
 	regionOverride := strings.TrimSpace(payload.Region)
-	addition, credential, region, ctx, cancel, err := getAWSActiveCredentialWithRegion(c, scope, regionOverride)
+	addition, credential, region, ctx, cancel, err := getAWSActiveCredentialWithRegionTimeout(c, scope, regionOverride, awsLongOperationTimeout)
 	if err != nil {
 		respondAWSError(c, err)
 		return
@@ -1239,7 +1248,7 @@ func DeleteAWSInstance(c *gin.Context) {
 		return
 	}
 
-	addition, credential, region, ctx, cancel, err := getAWSActiveCredential(c, scope)
+	addition, credential, region, ctx, cancel, err := getAWSActiveCredentialTimeout(c, scope, awsLongOperationTimeout)
 	if err != nil {
 		respondAWSError(c, err)
 		return
@@ -1270,7 +1279,7 @@ func DeleteAWSLightsailInstance(c *gin.Context) {
 		return
 	}
 
-	addition, credential, region, ctx, cancel, err := getAWSActiveCredential(c, scope)
+	addition, credential, region, ctx, cancel, err := getAWSActiveCredentialTimeout(c, scope, awsLongOperationTimeout)
 	if err != nil {
 		respondAWSError(c, err)
 		return
@@ -1301,7 +1310,7 @@ func PostAWSInstanceAction(c *gin.Context) {
 		return
 	}
 
-	_, credential, region, ctx, cancel, err := getAWSActiveCredential(c, scope)
+	_, credential, region, ctx, cancel, err := getAWSActiveCredentialTimeout(c, scope, awsLongOperationTimeout)
 	if err != nil {
 		respondAWSError(c, err)
 		return
@@ -1426,7 +1435,7 @@ func PostAWSLightsailInstanceAction(c *gin.Context) {
 		return
 	}
 
-	_, credential, region, ctx, cancel, err := getAWSActiveCredential(c, scope)
+	_, credential, region, ctx, cancel, err := getAWSActiveCredentialTimeout(c, scope, awsLongOperationTimeout)
 	if err != nil {
 		respondAWSError(c, err)
 		return
@@ -1574,7 +1583,7 @@ func resolveAWSRegion(addition *awscloud.Addition, activeCredential *awscloud.Cr
 	return region
 }
 
-func getAWSActiveCredentialWithRegion(c *gin.Context, scope ownerScope, regionOverride string) (*awscloud.Addition, *awscloud.CredentialRecord, string, context.Context, context.CancelFunc, error) {
+func getAWSActiveCredentialWithRegionTimeout(c *gin.Context, scope ownerScope, regionOverride string, timeout time.Duration) (*awscloud.Addition, *awscloud.CredentialRecord, string, context.Context, context.CancelFunc, error) {
 	_, addition, err := loadAWSAddition(scope, false)
 	if err != nil {
 		return nil, nil, "", nil, nil, err
@@ -1587,8 +1596,19 @@ func getAWSActiveCredentialWithRegion(c *gin.Context, scope ownerScope, regionOv
 
 	region := resolveAWSRegion(addition, activeCredential, regionOverride)
 
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 45*time.Second)
+	if timeout <= 0 {
+		timeout = awsDefaultRequestTimeout
+	}
+	ctx, cancel := context.WithTimeout(c.Request.Context(), timeout)
 	return addition, activeCredential, region, ctx, cancel, nil
+}
+
+func getAWSActiveCredentialWithRegion(c *gin.Context, scope ownerScope, regionOverride string) (*awscloud.Addition, *awscloud.CredentialRecord, string, context.Context, context.CancelFunc, error) {
+	return getAWSActiveCredentialWithRegionTimeout(c, scope, regionOverride, awsDefaultRequestTimeout)
+}
+
+func getAWSActiveCredentialTimeout(c *gin.Context, scope ownerScope, timeout time.Duration) (*awscloud.Addition, *awscloud.CredentialRecord, string, context.Context, context.CancelFunc, error) {
+	return getAWSActiveCredentialWithRegionTimeout(c, scope, "", timeout)
 }
 
 func getAWSActiveCredential(c *gin.Context, scope ownerScope) (*awscloud.Addition, *awscloud.CredentialRecord, string, context.Context, context.CancelFunc, error) {

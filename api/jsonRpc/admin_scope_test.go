@@ -3,25 +3,19 @@ package jsonRpc
 import (
 	"context"
 	"encoding/json"
-	"path/filepath"
 	"testing"
 	"time"
 
 	apiroot "github.com/komari-monitor/komari/api"
-	"github.com/komari-monitor/komari/cmd/flags"
 	"github.com/komari-monitor/komari/common"
 	"github.com/komari-monitor/komari/database/accounts"
-	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/utils/rpc"
 	"github.com/komari-monitor/komari/ws"
 )
 
 func TestPlatformAdminCanReadOtherUsersNodeData(t *testing.T) {
-	flags.DatabaseType = "sqlite"
-	flags.DatabaseFile = filepath.Join(t.TempDir(), "komari-jsonrpc.db")
-
-	db := dbcore.GetDBInstance()
+	db := configureJSONRPCTestDB()
 	now := models.FromTime(time.Now())
 
 	adminUser := models.User{

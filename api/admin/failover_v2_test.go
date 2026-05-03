@@ -5,15 +5,12 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
-	"github.com/komari-monitor/komari/cmd/flags"
 	"github.com/komari-monitor/komari/config"
-	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
 	"gorm.io/gorm"
 )
@@ -33,10 +30,7 @@ type failoverV2BulkValidationTestEnvelope struct {
 func setupFailoverV2APITestDB(t *testing.T) *gorm.DB {
 	t.Helper()
 
-	flags.DatabaseType = "sqlite"
-	flags.DatabaseFile = filepath.Join(t.TempDir(), "komari-failover-v2-api.db")
-
-	db := dbcore.GetDBInstance()
+	db := configureAdminTestDB()
 	if err := db.AutoMigrate(
 		&models.CloudProvider{},
 		&models.Client{},

@@ -632,9 +632,18 @@ func CreateInstance(ctx context.Context, credential *CredentialRecord, region st
 	}
 
 	instanceID := awssdk.ToString(output.Instances[0].InstanceId)
+	if strings.TrimSpace(instanceID) == "" {
+		return nil, errors.New("aws run instances returned an instance without an id")
+	}
 	instance, err := GetInstance(ctx, credential, region, instanceID)
 	if err != nil {
-		return nil, err
+		launchedInstance := mapInstance(output.Instances[0])
+		instance = &launchedInstance
+		networkPlan.Warnings = append(networkPlan.Warnings, fmt.Sprintf(
+			"AWS launched instance %s, but Komari could not refresh its details immediately: %v",
+			instanceID,
+			err,
+		))
 	}
 
 	return &CreateInstanceResult{

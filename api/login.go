@@ -18,6 +18,8 @@ type LoginRequest struct {
 	TwoFa    string `json:"2fa_code"`
 }
 
+const maxLoginRequestBodyBytes = 16 * 1024
+
 func Login(c *gin.Context) {
 	DisablePasswordLogin, _ := config.GetAs[bool](config.DisablePasswordLoginKey, false)
 	if DisablePasswordLogin {
@@ -25,9 +27,13 @@ func Login(c *gin.Context) {
 		return
 	}
 
-	bodyBytes, err := io.ReadAll(c.Request.Body)
+	bodyBytes, err := io.ReadAll(io.LimitReader(c.Request.Body, maxLoginRequestBodyBytes+1))
 	if err != nil {
 		RespondError(c, http.StatusBadRequest, "Invalid request body: "+err.Error())
+		return
+	}
+	if len(bodyBytes) > maxLoginRequestBodyBytes {
+		RespondError(c, http.StatusRequestEntityTooLarge, "Login request body is too large")
 		return
 	}
 	var data LoginRequest
@@ -40,20 +46,29 @@ func Login(c *gin.Context) {
 		RespondError(c, http.StatusBadRequest, "Invalid request body: Username and password are required")
 		return
 	}
+	if rejectLimitedLogin(c, data.Username) {
+		return
+	}
 
 	uuid, success := accounts.CheckPassword(data.Username, data.Password)
 	if !success {
+		recordFailedLoginAttempt(c, data.Username)
 		RespondError(c, http.StatusUnauthorized, "Invalid credentials")
 		return
 	}
 	// 2FA
 	user, _ := accounts.GetUserByUUID(uuid)
+	if rejectInactiveUser(c, uuid) {
+		return
+	}
 	if user.TwoFactor != "" { // 开启了2FA
 		if data.TwoFa == "" {
+			recordFailedLoginAttempt(c, data.Username)
 			RespondError(c, http.StatusUnauthorized, "2FA code is required")
 			return
 		}
 		if ok, err := accounts.Verify2Fa(uuid, data.TwoFa); err != nil || !ok {
+			recordFailedLoginAttempt(c, data.Username)
 			RespondError(c, http.StatusUnauthorized, "Invalid 2FA code")
 			return
 		}
@@ -64,6 +79,7 @@ func Login(c *gin.Context) {
 		RespondError(c, http.StatusInternalServerError, "Failed to create session: "+err.Error())
 		return
 	}
+	recordSuccessfulLoginAttempt(c, data.Username)
 	SetSecureCookie(c, "session_token", session, 2592000)
 	auditlog.Log(c.ClientIP(), uuid, "logged in (password)", "login")
 	RespondSuccess(c, gin.H{"set-cookie": gin.H{"session_token": session}})

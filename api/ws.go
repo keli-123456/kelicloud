@@ -7,7 +7,6 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	"github.com/komari-monitor/komari/common"
-	"github.com/komari-monitor/komari/config"
 	"github.com/komari-monitor/komari/database/clients"
 	"github.com/komari-monitor/komari/ws"
 )
@@ -28,14 +27,8 @@ func GetClients(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "Require WebSocket upgrade"})
 		return
 	}
-	AllowCors, _ := config.GetAs[bool](config.AllowCorsKey, false)
 	upgrader := websocket.Upgrader{
-		CheckOrigin: func(r *http.Request) bool {
-			if AllowCors {
-				return true
-			}
-			return ws.CheckOrigin(r)
-		},
+		CheckOrigin: ws.CheckOrigin,
 	}
 	// Upgrade the HTTP connection to a WebSocket connection
 	conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)

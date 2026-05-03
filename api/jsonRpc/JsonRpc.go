@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/config"
@@ -64,8 +65,6 @@ func OnInternalRequest(ctx context.Context, group string, method string, params 
 
 // Json Rpc2 over websocket, /api/rpc2
 func OnRpcRequest(c *gin.Context) {
-	AllowCors, _ := config.GetAs[bool](config.AllowCorsKey)
-
 	// GET -> WebSocket
 	if c.Request.Method == http.MethodGet {
 		permissionGroup := detectPermissionGroup(c)
@@ -73,17 +72,12 @@ func OnRpcRequest(c *gin.Context) {
 			c.JSON(http.StatusUnauthorized, rpc.ErrorResponse(nil, rpc.PermissionDenied, "Login required", nil))
 			return
 		}
-		_conn, err := ws.UpgradeRequest(c, func(r *http.Request) bool {
-			if AllowCors {
-				return true
-			}
-			return ws.CheckOrigin(r)
-		})
-		conn := ws.NewSafeConn(_conn)
+		_conn, err := ws.UpgradeRequest(c, ws.CheckOrigin)
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "Failed to upgrade to WebSocket." + err.Error()})
 			return
 		}
+		conn := ws.NewSafeConn(_conn)
 		meta := buildContextMeta(c, permissionGroup)
 		defer conn.Close()
 		for {
@@ -176,8 +170,11 @@ func detectPermissionGroup(c *gin.Context) string {
 		permissionGroup = "client"
 	}
 	if session_token, _ := c.Cookie("session_token"); session_token != "" {
-		if _, err := accounts.GetUserBySession(session_token); err == nil {
-			permissionGroup = "admin"
+		if sessionRecord, err := accounts.GetSessionRecord(session_token); err == nil {
+			active, _, accessErr := config.IsUserAccessActive(sessionRecord.UUID, time.Now())
+			if accessErr == nil && active {
+				permissionGroup = "admin"
+			}
 		}
 	}
 	apiKey := c.GetHeader("Authorization")
@@ -212,13 +209,11 @@ func buildContextMeta(c *gin.Context, permissionGroup string) *rpc.ContextMeta {
 	// 提取用户 (session cookie)
 	if session_token, _ := c.Cookie("session_token"); session_token != "" {
 		if sessionRecord, err := accounts.GetSessionRecord(session_token); err == nil {
-			if user, userErr := accounts.GetUserByUUID(sessionRecord.UUID); userErr == nil {
+			active, _, accessErr := config.IsUserAccessActive(sessionRecord.UUID, time.Now())
+			if user, userErr := accounts.GetUserByUUID(sessionRecord.UUID); userErr == nil && accessErr == nil && active {
 				meta.User = &user
 				meta.UserUUID = user.UUID
 			}
-		} else if user, err := accounts.GetUserBySession(session_token); err == nil {
-			meta.User = &user
-			meta.UserUUID = user.UUID
 		}
 	}
 	meta.RemoteIP = c.ClientIP()

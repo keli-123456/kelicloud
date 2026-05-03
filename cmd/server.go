@@ -133,6 +133,8 @@ func RunServer() {
 	r := gin.New()
 	r.Use(logutil.GinLogger())
 	r.Use(logutil.GinRecovery())
+	r.Use(applySecurityHeaders())
+	r.Use(applyRequestBodyLimit())
 
 	// 动态 CORS 中间件
 
@@ -152,20 +154,7 @@ func RunServer() {
 	})
 	r.Use(func(c *gin.Context) {
 		if DynamicCorsEnabled {
-			origin := c.GetHeader("Origin")
-			if origin != "" {
-				c.Header("Access-Control-Allow-Origin", origin)
-				c.Header("Vary", "Origin")
-				c.Header("Access-Control-Allow-Credentials", "true")
-			} else {
-				c.Header("Access-Control-Allow-Origin", "*")
-			}
-			c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS")
-			c.Header("Access-Control-Allow-Headers", "Origin, Content-Length, Content-Type, Authorization, Accept, X-CSRF-Token, X-Requested-With, Set-Cookie")
-			c.Header("Access-Control-Expose-Headers", "Content-Length, Authorization, Set-Cookie")
-			c.Header("Access-Control-Max-Age", "43200") // 12 hours
-			if c.Request.Method == "OPTIONS" {
-				c.AbortWithStatus(204)
+			if handleDynamicCORS(c) {
 				return
 			}
 		}
@@ -518,6 +507,7 @@ func RunServer() {
 		Addr:    flags.Listen,
 		Handler: r,
 	}
+	applyHTTPTimeouts(srv)
 	log.Printf("Starting server on %s ...", flags.Listen)
 	go func() {
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {

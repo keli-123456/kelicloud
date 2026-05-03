@@ -10,6 +10,7 @@ import (
 	"time"
 
 	awscloud "github.com/komari-monitor/komari/utils/cloudprovider/aws"
+	azurecloud "github.com/komari-monitor/komari/utils/cloudprovider/azure"
 	"github.com/komari-monitor/komari/utils/cloudprovider/digitalocean"
 	linodecloud "github.com/komari-monitor/komari/utils/cloudprovider/linode"
 )
@@ -77,6 +78,8 @@ func LoadPlanCatalog(userUUID, providerName, entryID, entryGroup, actionType, se
 			switch providerName {
 			case "aws":
 				return loadAWSPlanCatalog(userUUID, entryID, entryGroup, actionType, service, region, mode)
+			case "azure":
+				return loadAzurePlanCatalog(userUUID, entryID, entryGroup, actionType, region, mode)
 			case "digitalocean":
 				return loadDigitalOceanPlanCatalog(userUUID, entryID, entryGroup, actionType, mode)
 			case "linode":
@@ -347,6 +350,81 @@ func loadAWSPlanCatalog(userUUID, entryID, entryGroup, actionType, service, regi
 		return nil, fmt.Errorf("unsupported aws failover service: %s", service)
 	}
 
+	return catalog, nil
+}
+
+func loadAzurePlanCatalog(userUUID, entryID, entryGroup, actionType, region, mode string) (*PlanCatalog, error) {
+	_, credential, err := loadAzureCredentialSelection(userUUID, entryID, entryGroup)
+	if err != nil {
+		return nil, err
+	}
+
+	resolvedRegion := strings.TrimSpace(region)
+	if resolvedRegion == "" {
+		resolvedRegion = strings.TrimSpace(credential.DefaultLocation)
+	}
+	if resolvedRegion == "" {
+		resolvedRegion = azurecloud.DefaultLocation
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	client, err := azurecloud.NewClientFromCredential(credential)
+	if err != nil {
+		return nil, err
+	}
+
+	catalog := newEmptyPlanCatalog("azure", actionType, "", resolvedRegion)
+	locations, err := client.ListLocations(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, item := range locations {
+		label := strings.TrimSpace(item.DisplayName)
+		if label == "" {
+			label = strings.TrimSpace(item.Name)
+		}
+		catalog.Regions = append(catalog.Regions, CatalogOption{
+			Value: strings.TrimSpace(item.Name),
+			Label: label,
+			Hint:  strings.TrimSpace(item.RegionalDisplayName),
+		})
+	}
+	if mode == "regions" {
+		return catalog, nil
+	}
+
+	sizes, err := client.ListVirtualMachineSizes(ctx, resolvedRegion)
+	if err != nil {
+		return nil, err
+	}
+	for _, item := range sizes {
+		name := strings.TrimSpace(item.Name)
+		if name == "" {
+			continue
+		}
+		hintParts := make([]string, 0, 3)
+		if item.VCPUs > 0 {
+			hintParts = append(hintParts, fmt.Sprintf("%d vCPU", item.VCPUs))
+		}
+		if item.MemoryGB > 0 {
+			hintParts = append(hintParts, fmt.Sprintf("%.1f GiB", item.MemoryGB))
+		}
+		if len(item.Zones) > 0 {
+			hintParts = append(hintParts, "zones "+strings.Join(item.Zones, ","))
+		}
+		catalog.Sizes = append(catalog.Sizes, CatalogOption{
+			Value: name,
+			Label: name,
+			Hint:  strings.Join(hintParts, " · "),
+		})
+	}
+	catalog.Images = []CatalogOption{
+		{Value: "ubuntu-2404", Label: "Ubuntu Server 24.04 LTS", Hint: "Canonical / ubuntu-24_04-lts / server"},
+		{Value: "ubuntu-2204", Label: "Ubuntu Server 22.04 LTS", Hint: "Canonical / 0001-com-ubuntu-server-jammy / 22_04-lts-gen2"},
+		{Value: "debian-12", Label: "Debian 12", Hint: "Debian / debian-12 / 12"},
+	}
 	return catalog, nil
 }
 

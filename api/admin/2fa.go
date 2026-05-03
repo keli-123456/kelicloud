@@ -39,6 +39,7 @@ func Enable2FA(c *gin.Context) {
 		return
 	}
 	api.ClearSecureCookie(c, "2fa_secret")
+	api.AuditLogForCurrentUser(c, uuid.(string), "enable 2fa", "warn")
 
 	api.RespondSuccess(c, "2FA enabled successfully")
 }
@@ -50,5 +51,6 @@ func Disable2FA(c *gin.Context) {
 		api.RespondError(c, 500, "Failed to disable 2FA: "+err.Error())
 		return
 	}
+	api.AuditLogForCurrentUser(c, uuid.(string), "disable 2fa", "warn")
 	api.RespondSuccess(c, "")
 }

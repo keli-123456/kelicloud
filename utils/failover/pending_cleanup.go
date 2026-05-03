@@ -187,6 +187,18 @@ func pendingCleanupIdentityFromRef(ref map[string]interface{}) (string, string, 
 		if instanceID := intMapValue(ref, "instance_id"); instanceID > 0 {
 			return provider, "instance", strconv.Itoa(instanceID), entryID
 		}
+	case "azure":
+		instanceID := strings.TrimSpace(stringMapValue(ref, "instance_id"))
+		if instanceID == "" {
+			resourceGroup := strings.TrimSpace(stringMapValue(ref, "resource_group"))
+			instanceName := strings.TrimSpace(firstNonEmpty(stringMapValue(ref, "name"), stringMapValue(ref, "instance_name")))
+			if resourceGroup != "" && instanceName != "" {
+				instanceID = resourceGroup + "/" + instanceName
+			}
+		}
+		if instanceID != "" {
+			return provider, "virtual_machine", instanceID, entryID
+		}
 	case "aws":
 		service := strings.ToLower(strings.TrimSpace(firstNonEmpty(stringMapValue(ref, "service"), "ec2")))
 		switch service {

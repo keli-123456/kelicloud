@@ -517,6 +517,7 @@ func GetDigitalOceanTokenSecret(c *gin.Context) {
 		return
 	}
 
+	logCloudAuditWithType(c, "view digitalocean token secret: "+tokenID, "warn")
 	api.RespondSuccess(c, token.TokenSecretView())
 }
 
@@ -551,6 +552,7 @@ func GetDigitalOceanDropletPassword(c *gin.Context) {
 		return
 	}
 
+	logCloudAuditWithType(c, fmt.Sprintf("view digitalocean droplet password: %d", dropletID), "warn")
 	api.RespondSuccess(c, passwordView)
 }
 
@@ -1204,6 +1206,10 @@ func saveDigitalOceanAdditionPreservingSecrets(scope ownerScope, addition *digit
 }
 
 func logCloudAudit(c *gin.Context, message string) {
+	logCloudAuditWithType(c, message, "info")
+}
+
+func logCloudAuditWithType(c *gin.Context, message, msgType string) {
 	uuid, exists := c.Get("uuid")
 	if !exists {
 		return
@@ -1212,5 +1218,5 @@ func logCloudAudit(c *gin.Context, message string) {
 	if !ok || userUUID == "" {
 		return
 	}
-	api.AuditLogForCurrentUser(c, userUUID, message, "info")
+	api.AuditLogForCurrentUser(c, userUUID, message, msgType)
 }

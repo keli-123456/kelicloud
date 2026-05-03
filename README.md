@@ -97,6 +97,8 @@ sudo ./install-komari.sh
 
 > [!NOTE]
 > The bundled `docker-compose.yml` builds the current repository into a local image and connects to your existing MySQL server. For database backups, use `mysqldump` or your database provider's snapshot tooling. The web panel backup endpoint currently only supports SQLite.
+>
+> For self-hosting hardening notes, see [自用上线加固清单](./docs/SELF_HOSTING_HARDENING_zh.md).
 
 ### 3. Binary File Deployment
 

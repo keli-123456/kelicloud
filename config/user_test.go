@@ -5,6 +5,15 @@ import (
 	"time"
 )
 
+func mustParseTimeForTest(t *testing.T, value string) time.Time {
+	t.Helper()
+	parsed, err := time.Parse(time.RFC3339, value)
+	if err != nil {
+		t.Fatalf("failed to parse test time %q: %v", value, err)
+	}
+	return parsed
+}
+
 func TestUserScopedConfigIsolation(t *testing.T) {
 	setupConfigTestDB(t)
 
@@ -215,6 +224,63 @@ func TestSetUserPolicyRejectsInvalidFeature(t *testing.T) {
 	err := SetUserPolicy("user-a", nil, &features)
 	if err == nil {
 		t.Fatal("expected invalid feature to be rejected")
+	}
+}
+
+func TestUserCommercialPolicyStatus(t *testing.T) {
+	setupConfigTestDB(t)
+
+	plan := "Ops"
+	expiresAt := "2026-05-03"
+	note := "internal pilot"
+	disabled := false
+	if err := SetUserCommercialPolicy("user-commercial", &plan, &expiresAt, &note, &disabled); err != nil {
+		t.Fatalf("failed to set commercial policy: %v", err)
+	}
+
+	policy, err := GetUserPolicy("user-commercial")
+	if err != nil {
+		t.Fatalf("failed to load commercial policy: %v", err)
+	}
+	if policy.PlanName != plan {
+		t.Fatalf("expected plan %q, got %q", plan, policy.PlanName)
+	}
+	if policy.PlanExpiresAt != expiresAt {
+		t.Fatalf("expected expiration %q, got %q", expiresAt, policy.PlanExpiresAt)
+	}
+	if policy.PlanNote != note {
+		t.Fatalf("expected note %q, got %q", note, policy.PlanNote)
+	}
+	if policy.AccountDisabled {
+		t.Fatal("expected account to remain enabled")
+	}
+
+	active, status, err := IsUserAccessActive("user-commercial", mustParseTimeForTest(t, "2026-05-03T12:00:00Z"))
+	if err != nil {
+		t.Fatalf("failed to evaluate active policy: %v", err)
+	}
+	if !active || status != UserAccessStatusActive {
+		t.Fatalf("expected active access before date-only expiry closes, got active=%v status=%q", active, status)
+	}
+
+	active, status, err = IsUserAccessActive("user-commercial", mustParseTimeForTest(t, "2026-05-04T00:00:00Z"))
+	if err != nil {
+		t.Fatalf("failed to evaluate expired policy: %v", err)
+	}
+	if active || status != UserAccessStatusExpired {
+		t.Fatalf("expected expired access after date-only expiry closes, got active=%v status=%q", active, status)
+	}
+
+	disabled = true
+	if err := SetUserCommercialPolicy("user-commercial", nil, nil, nil, &disabled); err != nil {
+		t.Fatalf("failed to disable user: %v", err)
+	}
+	active, status, err = IsUserAccessActive("user-commercial", mustParseTimeForTest(t, "2026-05-03T12:00:00Z"))
+	if err != nil {
+		t.Fatalf("failed to evaluate disabled policy: %v", err)
+	}
+	if active || status != UserAccessStatusDisabled {
+		t.Fatalf("expected disabled access to win over expiry, got active=%v status=%q", active, status)
 	}
 }
 

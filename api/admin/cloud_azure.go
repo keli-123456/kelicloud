@@ -330,6 +330,7 @@ func GetAzureCredentialSecret(c *gin.Context) {
 		return
 	}
 
+	logCloudAuditWithType(c, "view azure credential secret: "+credentialID, "warn")
 	api.RespondSuccess(c, credential.CredentialSecretView())
 }
 
@@ -370,6 +371,7 @@ func GetAzureInstancePassword(c *gin.Context) {
 		return
 	}
 
+	logCloudAuditWithType(c, "view azure vm password: "+instanceID, "warn")
 	api.RespondSuccess(c, passwordView)
 }
 
@@ -609,6 +611,10 @@ func CreateAzureInstance(c *gin.Context) {
 		respondAzureError(c, err)
 		return
 	}
+	if detail == nil || strings.TrimSpace(detail.Instance.InstanceID) == "" {
+		api.RespondError(c, http.StatusBadGateway, "Azure VM was created, but Komari could not load the created VM details")
+		return
+	}
 
 	passwordSaved := false
 	passwordSaveError := ""
@@ -671,7 +677,7 @@ func DeleteAzureInstance(c *gin.Context) {
 		return
 	}
 
-	addition, credential, _, ctx, cancel, err := getAzureActiveCredential(c, scope)
+	addition, credential, _, ctx, cancel, err := getAzureActiveCredentialWithTimeout(c, scope, 4*time.Minute)
 	if err != nil {
 		respondAzureError(c, err)
 		return
@@ -690,7 +696,8 @@ func DeleteAzureInstance(c *gin.Context) {
 		return
 	}
 
-	if err := client.DeleteVirtualMachine(ctx, resourceGroup, name); err != nil {
+	deleteResult, err := client.DeleteVirtualMachine(ctx, resourceGroup, name)
+	if err != nil {
 		respondAzureError(c, err)
 		return
 	}
@@ -700,7 +707,10 @@ func DeleteAzureInstance(c *gin.Context) {
 	}
 
 	logCloudAudit(c, fmt.Sprintf("delete azure vm: %s/%s", resourceGroup, name))
-	api.RespondSuccess(c, nil)
+	if deleteResult == nil {
+		deleteResult = &azurecloud.DeleteVirtualMachineResult{}
+	}
+	api.RespondSuccess(c, deleteResult)
 }
 
 func PostAzureInstanceAction(c *gin.Context) {
@@ -709,7 +719,7 @@ func PostAzureInstanceAction(c *gin.Context) {
 		return
 	}
 
-	_, credential, _, ctx, cancel, err := getAzureActiveCredential(c, scope)
+	_, credential, _, ctx, cancel, err := getAzureActiveCredentialWithTimeout(c, scope, 4*time.Minute)
 	if err != nil {
 		respondAzureError(c, err)
 		return
@@ -775,6 +785,10 @@ func PostAzureInstanceAction(c *gin.Context) {
 }
 
 func getAzureActiveCredential(c *gin.Context, scope ownerScope) (*azurecloud.Addition, *azurecloud.CredentialRecord, string, context.Context, context.CancelFunc, error) {
+	return getAzureActiveCredentialWithTimeout(c, scope, 60*time.Second)
+}
+
+func getAzureActiveCredentialWithTimeout(c *gin.Context, scope ownerScope, timeout time.Duration) (*azurecloud.Addition, *azurecloud.CredentialRecord, string, context.Context, context.CancelFunc, error) {
 	_, addition, err := loadAzureAddition(scope, false)
 	if err != nil {
 		return nil, nil, "", nil, nil, err
@@ -786,7 +800,10 @@ func getAzureActiveCredential(c *gin.Context, scope ownerScope) (*azurecloud.Add
 	}
 
 	location := firstNonEmpty(addition.ActiveLocation, activeCredential.DefaultLocation, azurecloud.DefaultLocation)
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 60*time.Second)
+	if timeout <= 0 {
+		timeout = 60 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(c.Request.Context(), timeout)
 	return addition, activeCredential, location, ctx, cancel, nil
 }
 

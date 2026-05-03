@@ -26,7 +26,8 @@ import (
 const migrationKeyFailoverCooldownDefaultZero = "20260411_failover_cooldown_default_zero"
 
 func shouldUseSQLiteForTests() bool {
-	return strings.HasSuffix(filepath.Base(os.Args[0]), ".test") && flags.DatabaseType == "sqlite"
+	testBinary := strings.ToLower(filepath.Base(os.Args[0]))
+	return (strings.HasSuffix(testBinary, ".test") || strings.HasSuffix(testBinary, ".test.exe")) && flags.DatabaseType == "sqlite"
 }
 
 // zipDirectoryExcluding 将 srcDir 打包为 dstZip，exclude 是绝对路径集合需要排除

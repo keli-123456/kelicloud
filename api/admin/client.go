@@ -283,5 +283,6 @@ func GetClientToken(c *gin.Context) {
 		return
 	}
 
+	api.AuditLogForCurrentUser(c, userUUID, "view client token:"+uuid, "warn")
 	c.JSON(http.StatusOK, gin.H{"status": "success", "token": token, "message:": ""})
 }

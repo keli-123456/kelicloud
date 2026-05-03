@@ -41,6 +41,33 @@ func ListLogsByUser(userUUID string, limit, offset int) ([]models.Log, int64, er
 	return listLogsByUserWithDB(dbcore.GetDBInstance(), strings.TrimSpace(userUUID), limit, offset)
 }
 
+func ListLogs(limit, offset int) ([]models.Log, int64, error) {
+	return listLogsWithDB(dbcore.GetDBInstance(), limit, offset)
+}
+
+func countLogsWithDB(db *gorm.DB) (int64, error) {
+	var total int64
+	err := db.Model(&models.Log{}).Count(&total).Error
+	return total, err
+}
+
+func listLogsWithDB(db *gorm.DB, limit, offset int) ([]models.Log, int64, error) {
+	total, err := countLogsWithDB(db)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	var logs []models.Log
+	if err := db.Order("time desc").
+		Order("id desc").
+		Limit(limit).
+		Offset(offset).
+		Find(&logs).Error; err != nil {
+		return nil, 0, err
+	}
+	return logs, total, nil
+}
+
 func countLogsByUserWithDB(db *gorm.DB, userUUID string) (int64, error) {
 	var total int64
 	err := db.Model(&models.Log{}).

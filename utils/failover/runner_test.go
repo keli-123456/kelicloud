@@ -274,6 +274,68 @@ func TestClaimTargetRunRejectsConcurrentOutletHandling(t *testing.T) {
 	releaseTargetRun("user-a|watch|client-a", 1)
 }
 
+func TestQueueExecutionRejectsDisabledTaskBeforeClaimingLocks(t *testing.T) {
+	resetRunnerRuntimeStateForTest(t)
+
+	task := &models.FailoverTask{
+		ID:              42,
+		UserID:          "user-a",
+		Enabled:         false,
+		WatchClientUUID: "client-a",
+	}
+	if _, err := queueExecution(task, nil, "manual run"); err == nil || !strings.Contains(err.Error(), "disabled") {
+		t.Fatalf("expected disabled task error, got %v", err)
+	}
+
+	runningTasksMu.Lock()
+	_, taskLocked := runningTasks[task.ID]
+	runningTasksMu.Unlock()
+	if taskLocked {
+		t.Fatal("expected disabled task to leave no task run lock behind")
+	}
+}
+
+func TestQueueExecutionMarksCreatedExecutionFailedWhenTaskUpdateFails(t *testing.T) {
+	configureRunnerSQLiteDB(t)
+	resetRunnerRuntimeStateForTest(t)
+
+	db := dbcore.GetDBInstance()
+	if err := db.AutoMigrate(&models.FailoverTask{}, &models.FailoverExecution{}); err != nil {
+		t.Fatalf("failed to migrate failover queue schema: %v", err)
+	}
+
+	task := &models.FailoverTask{
+		ID:              999,
+		UserID:          "user-queue-failure",
+		Enabled:         true,
+		WatchClientUUID: "client-queue-failure",
+	}
+	if _, err := queueExecution(task, nil, "manual run"); err == nil {
+		t.Fatal("expected queueExecution to fail when the task row is missing")
+	}
+
+	var execution models.FailoverExecution
+	if err := db.Where("task_id = ?", task.ID).First(&execution).Error; err != nil {
+		t.Fatalf("expected queued execution to be persisted before update failure: %v", err)
+	}
+	if execution.Status != models.FailoverExecutionStatusFailed {
+		t.Fatalf("expected dangling execution to be marked failed, got %q", execution.Status)
+	}
+	if !strings.Contains(execution.ErrorMessage, "failed to mark task running") {
+		t.Fatalf("expected queue failure message, got %q", execution.ErrorMessage)
+	}
+	if execution.FinishedAt == nil {
+		t.Fatal("expected failed queued execution to have finished_at set")
+	}
+
+	runningTargetMu.Lock()
+	targetLockedBy := runningTargets["user-queue-failure|watch|client-queue-failure"]
+	runningTargetMu.Unlock()
+	if targetLockedBy != 0 {
+		t.Fatalf("expected target run lock to be released, still held by task %d", targetLockedBy)
+	}
+}
+
 func TestNormalizeIPAddressAcceptsCIDRNotation(t *testing.T) {
 	if got := normalizeIPAddress("2001:db8::10/64"); got != "2001:db8::10" {
 		t.Fatalf("expected normalized ipv6, got %q", got)

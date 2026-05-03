@@ -240,6 +240,8 @@ func provisionMember(ctx context.Context, userUUID string, service *models.Failo
 		return provisionLinodeMember(ctx, userUUID, service, member)
 	case "aws":
 		return provisionAWSMember(ctx, userUUID, service, member)
+	case "azure":
+		return provisionAzureMember(ctx, userUUID, service, member)
 	default:
 		return nil, fmt.Errorf("unsupported V2 member provider: %s", member.Provider)
 	}

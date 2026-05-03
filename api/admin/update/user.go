@@ -1,6 +1,8 @@
 package update
 
 import (
+	"time"
+
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/api"
 	adminapi "github.com/komari-monitor/komari/api/admin"
@@ -17,12 +19,17 @@ func UpdateUser(c *gin.Context) {
 		Role            *string   `json:"role"`
 		ServerQuota     *int      `json:"server_quota"`
 		AllowedFeatures *[]string `json:"allowed_features"`
+		PlanName        *string   `json:"plan_name"`
+		PlanExpiresAt   *string   `json:"plan_expires_at"`
+		PlanNote        *string   `json:"plan_note"`
+		AccountDisabled *bool     `json:"account_disabled"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		api.RespondError(c, 400, "Invalid or missing request body: "+err.Error())
 		return
 	}
-	if req.Password == nil && req.Name == nil && req.SsoType == nil && req.Role == nil && req.ServerQuota == nil && req.AllowedFeatures == nil {
+	policyUpdateRequested := req.ServerQuota != nil || req.AllowedFeatures != nil || req.PlanName != nil || req.PlanExpiresAt != nil || req.PlanNote != nil || req.AccountDisabled != nil
+	if req.Password == nil && req.Name == nil && req.SsoType == nil && req.Role == nil && !policyUpdateRequested {
 		api.RespondError(c, 400, "At least one field must be provided")
 		return
 	}
@@ -50,6 +57,10 @@ func UpdateUser(c *gin.Context) {
 		api.RespondError(c, 403, "You cannot change your own role")
 		return
 	}
+	if isSelf && policyUpdateRequested {
+		api.RespondError(c, 403, "Platform admin permission is required")
+		return
+	}
 	if err := accounts.UpdateUser(req.Uuid, req.Name, req.Password, req.SsoType, req.Role); err != nil {
 		api.RespondError(c, 500, "Failed to update user: "+err.Error())
 		return
@@ -57,6 +68,23 @@ func UpdateUser(c *gin.Context) {
 	if err := config.SetUserPolicy(req.Uuid, req.ServerQuota, req.AllowedFeatures); err != nil {
 		api.RespondError(c, 500, "Failed to update user policy: "+err.Error())
 		return
+	}
+	if err := config.SetUserCommercialPolicy(req.Uuid, req.PlanName, req.PlanExpiresAt, req.PlanNote, req.AccountDisabled); err != nil {
+		api.RespondError(c, 500, "Failed to update user commercial policy: "+err.Error())
+		return
+	}
+	if policyUpdateRequested {
+		active, _, err := config.IsUserAccessActive(req.Uuid, time.Now())
+		if err != nil {
+			api.RespondError(c, 500, "Failed to evaluate user access policy: "+err.Error())
+			return
+		}
+		if !active {
+			if err := accounts.DeleteAllSessionsByUser(req.Uuid); err != nil {
+				api.RespondError(c, 500, "Failed to revoke user sessions: "+err.Error())
+				return
+			}
+		}
 	}
 	if uuid, ok := c.Get("uuid"); ok {
 		if actorUUID, ok := uuid.(string); ok {

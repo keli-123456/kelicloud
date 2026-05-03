@@ -277,6 +277,18 @@ func parseFailoverExecutionID(c *gin.Context) (uint, bool) {
 	return uint(parsed), true
 }
 
+func auditFailoverTaskAction(c *gin.Context, userUUID, action string, taskID uint, msgType string) {
+	api.AuditLogForCurrentUser(c, userUUID, fmt.Sprintf("failover %s task:%d", strings.TrimSpace(action), taskID), msgType)
+}
+
+func auditFailoverExecutionAction(c *gin.Context, userUUID, action string, executionID, taskID uint, msgType string) {
+	message := fmt.Sprintf("failover %s execution:%d", strings.TrimSpace(action), executionID)
+	if taskID > 0 {
+		message += fmt.Sprintf(" task:%d", taskID)
+	}
+	api.AuditLogForCurrentUser(c, userUUID, message, msgType)
+}
+
 func normalizeJSONPayload(raw json.RawMessage, emptyValue string) (string, error) {
 	trimmed := bytes.TrimSpace(raw)
 	if len(trimmed) == 0 {
@@ -619,7 +631,7 @@ func validateCloudProviderEntryForScope(scope ownerScope, providerName, entryID 
 	entryID = strings.TrimSpace(entryID)
 	if entryID == "" {
 		switch providerName {
-		case awsProviderName, digitalOceanProviderName, linodeProviderName:
+		case awsProviderName, azureProviderName, digitalOceanProviderName, linodeProviderName:
 			entryID = "active"
 		default:
 			return fmt.Errorf("provider entry id is required")
@@ -629,6 +641,17 @@ func validateCloudProviderEntryForScope(scope ownerScope, providerName, entryID 
 	switch providerName {
 	case awsProviderName:
 		_, addition, err := loadAWSAddition(scope, false)
+		if err != nil {
+			return err
+		}
+		if entryID == "active" && addition.ActiveCredential() != nil {
+			return nil
+		}
+		if addition.FindCredential(entryID) != nil {
+			return nil
+		}
+	case azureProviderName:
+		_, addition, err := loadAzureAddition(scope, false)
 		if err != nil {
 			return err
 		}
@@ -687,6 +710,38 @@ func validateFailoverProviderSelectionForScope(scope ownerScope, providerName, e
 	switch providerName {
 	case awsProviderName:
 		_, addition, err := loadAWSAddition(scope, false)
+		if err != nil {
+			return err
+		}
+		if entryGroup != "" {
+			if entryID != "active" {
+				credential := addition.FindCredential(entryID)
+				if credential == nil {
+					return fmt.Errorf("provider %s entry %s was not found", providerName, entryID)
+				}
+				if strings.TrimSpace(credential.Group) != entryGroup {
+					return fmt.Errorf("provider %s entry %s is not in group %s", providerName, entryID, entryGroup)
+				}
+				return nil
+			}
+			if active := addition.ActiveCredential(); active != nil && strings.TrimSpace(active.Group) == entryGroup {
+				return nil
+			}
+			for _, credential := range addition.Credentials {
+				if strings.TrimSpace(credential.Group) == entryGroup {
+					return nil
+				}
+			}
+			return fmt.Errorf("provider %s group %s was not found", providerName, entryGroup)
+		}
+		if entryID == "active" && addition.ActiveCredential() != nil {
+			return nil
+		}
+		if addition.FindCredential(entryID) != nil {
+			return nil
+		}
+	case azureProviderName:
+		_, addition, err := loadAzureAddition(scope, false)
 		if err != nil {
 			return err
 		}
@@ -1076,7 +1131,7 @@ func validateFailoverTaskRequest(scope ownerScope, req *failoverTaskRequest) (*m
 	for index, planReq := range req.Plans {
 		provider := strings.ToLower(strings.TrimSpace(planReq.Provider))
 		switch provider {
-		case "aws", "digitalocean", "linode":
+		case "aws", "azure", "digitalocean", "linode":
 		default:
 			return nil, nil, fmt.Errorf("unsupported plan provider: %s", planReq.Provider)
 		}
@@ -1367,6 +1422,7 @@ func CreateFailoverTask(c *gin.Context) {
 		return
 	}
 
+	auditFailoverTaskAction(c, scope.UserUUID, "create", created.ID, "info")
 	api.RespondSuccess(c, buildFailoverTaskView(created, nil, failoverProbeView{Status: "unavailable", Stale: true}, time.Now()))
 }
 
@@ -1467,6 +1523,7 @@ func UpdateFailoverTask(c *gin.Context) {
 		return
 	}
 
+	auditFailoverTaskAction(c, scope.UserUUID, "update", taskID, "info")
 	api.RespondSuccess(c, buildFailoverTaskView(updated, nil, failoverProbeView{Status: "unavailable", Stale: true}, time.Now()))
 }
 
@@ -1497,6 +1554,13 @@ func ToggleFailoverTask(c *gin.Context) {
 		return
 	}
 
+	action := "enable"
+	msgType := "info"
+	if !req.Enabled {
+		action = "disable"
+		msgType = "warn"
+	}
+	auditFailoverTaskAction(c, scope.UserUUID, action, taskID, msgType)
 	api.RespondSuccess(c, buildFailoverTaskView(task, nil, failoverProbeView{Status: "unavailable", Stale: true}, time.Now()))
 }
 
@@ -1520,6 +1584,7 @@ func DeleteFailoverTask(c *gin.Context) {
 		return
 	}
 
+	auditFailoverTaskAction(c, scope.UserUUID, "delete", taskID, "warn")
 	api.RespondSuccess(c, nil)
 }
 
@@ -1550,6 +1615,7 @@ func RunFailoverTask(c *gin.Context) {
 		return
 	}
 
+	auditFailoverExecutionAction(c, scope.UserUUID, "run", execution.ID, taskID, "warn")
 	api.RespondSuccess(c, buildFailoverExecutionView(execution, task, false))
 }
 
@@ -1584,6 +1650,7 @@ func StopFailoverExecution(c *gin.Context) {
 		return
 	}
 
+	auditFailoverExecutionAction(c, scope.UserUUID, "stop", execution.ID, execution.TaskID, "warn")
 	api.RespondSuccess(c, buildFailoverExecutionView(execution, task, true))
 }
 
@@ -1618,6 +1685,7 @@ func RetryFailoverExecutionDNS(c *gin.Context) {
 		return
 	}
 
+	auditFailoverExecutionAction(c, scope.UserUUID, "retry dns", execution.ID, execution.TaskID, "warn")
 	api.RespondSuccess(c, buildFailoverExecutionView(execution, task, true))
 }
 
@@ -1652,6 +1720,7 @@ func RetryFailoverExecutionCleanup(c *gin.Context) {
 		return
 	}
 
+	auditFailoverExecutionAction(c, scope.UserUUID, "retry cleanup", execution.ID, execution.TaskID, "warn")
 	api.RespondSuccess(c, buildFailoverExecutionView(execution, task, true))
 }
 

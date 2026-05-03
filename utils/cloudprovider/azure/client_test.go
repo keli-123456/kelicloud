@@ -93,3 +93,32 @@ func TestBuildNetworkInterfaceIPConfigurationsDualStack(t *testing.T) {
 		t.Fatalf("expected public IPv6 attachment: %#v", ipv6Properties)
 	}
 }
+
+func TestParentAzureResourceID(t *testing.T) {
+	subnetID := "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Network/virtualNetworks/vnet/subnets/default"
+	parent := parentAzureResourceID(subnetID, "/subnets/")
+	expected := "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Network/virtualNetworks/vnet"
+	if parent != expected {
+		t.Fatalf("unexpected parent resource id: %q", parent)
+	}
+}
+
+func TestIsKomariManagedTags(t *testing.T) {
+	if !isKomariManagedTags(map[string]string{"managed-by": "komari"}) {
+		t.Fatal("expected Komari managed tag to be detected")
+	}
+	if !isKomariManagedTags(map[string]string{"Managed-By": "Komari"}) {
+		t.Fatal("expected Komari managed tag detection to be case-insensitive")
+	}
+	if isKomariManagedTags(map[string]string{"managed-by": "manual"}) {
+		t.Fatal("unexpected Komari managed tag detection")
+	}
+}
+
+func TestAppendCleanupResourceDeduplicates(t *testing.T) {
+	resources := appendCleanupResource(nil, virtualMachineCleanupResource{ID: "/resource/id", Kind: "public IP address"})
+	resources = appendCleanupResource(resources, virtualMachineCleanupResource{ID: "/RESOURCE/ID", Kind: "public IP address"})
+	if len(resources) != 1 {
+		t.Fatalf("expected cleanup resource to be deduplicated, got %#v", resources)
+	}
+}

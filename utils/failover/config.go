@@ -12,6 +12,7 @@ import (
 	"github.com/komari-monitor/komari/database"
 	"github.com/komari-monitor/komari/database/models"
 	awscloud "github.com/komari-monitor/komari/utils/cloudprovider/aws"
+	azurecloud "github.com/komari-monitor/komari/utils/cloudprovider/azure"
 	"github.com/komari-monitor/komari/utils/cloudprovider/digitalocean"
 	"github.com/komari-monitor/komari/utils/cloudprovider/linode"
 )
@@ -38,6 +39,8 @@ func (e *providerEntryNotFoundError) Error() string {
 	switch strings.ToLower(strings.TrimSpace(e.Provider)) {
 	case "aws":
 		return fmt.Sprintf("AWS credential not found: %s", entryID)
+	case "azure":
+		return fmt.Sprintf("Azure credential not found: %s", entryID)
 	case "linode":
 		return fmt.Sprintf("Linode token not found: %s", entryID)
 	default:
@@ -211,6 +214,121 @@ func reloadAWSAdditionCredentialState(userUUID string, credential *awscloud.Cred
 			return nil, nil, errors.New("AWS credential is not configured")
 		}
 		return nil, nil, newProviderEntryNotFoundError("aws", entryID)
+	}
+
+	return addition, latestCredential, nil
+}
+
+func loadAzureAddition(userUUID string) (*azurecloud.Addition, error) {
+	raw, err := loadProviderAddition(userUUID, "azure")
+	if err != nil {
+		return nil, fmt.Errorf("Azure provider is not configured")
+	}
+
+	addition := &azurecloud.Addition{}
+	if raw == "" {
+		raw = "{}"
+	}
+	if err := json.Unmarshal([]byte(raw), addition); err != nil {
+		return nil, fmt.Errorf("Azure configuration is invalid: %w", err)
+	}
+	addition.Normalize()
+	return addition, nil
+}
+
+func loadAzureCredential(userUUID, entryID string) (*azurecloud.Addition, *azurecloud.CredentialRecord, error) {
+	return loadAzureCredentialSelection(userUUID, entryID, "")
+}
+
+func loadAzureCredentialSelection(userUUID, entryID, entryGroup string) (*azurecloud.Addition, *azurecloud.CredentialRecord, error) {
+	addition, err := loadAzureAddition(userUUID)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	entryID = strings.TrimSpace(entryID)
+	entryGroup = normalizeProviderEntryGroup(entryGroup)
+	if entryGroup != "" {
+		if entryID != "" && entryID != activeProviderEntryID {
+			credential := addition.FindCredential(entryID)
+			if credential == nil {
+				return nil, nil, newProviderEntryNotFoundError("azure", entryID)
+			}
+			if normalizeProviderEntryGroup(credential.Group) != entryGroup {
+				return nil, nil, fmt.Errorf("Azure credential %s is not in group %s", entryID, entryGroup)
+			}
+			return addition, credential, nil
+		}
+
+		if credential := addition.ActiveCredential(); credential != nil && normalizeProviderEntryGroup(credential.Group) == entryGroup {
+			return addition, credential, nil
+		}
+		for index := range addition.Credentials {
+			if normalizeProviderEntryGroup(addition.Credentials[index].Group) == entryGroup {
+				return addition, &addition.Credentials[index], nil
+			}
+		}
+		return nil, nil, fmt.Errorf("Azure credential group not found: %s", entryGroup)
+	}
+
+	if entryID == "" || entryID == activeProviderEntryID {
+		credential := addition.ActiveCredential()
+		if credential == nil {
+			return nil, nil, errors.New("Azure credential is not configured")
+		}
+		return addition, credential, nil
+	}
+
+	credential := addition.FindCredential(entryID)
+	if credential == nil {
+		return nil, nil, newProviderEntryNotFoundError("azure", entryID)
+	}
+	return addition, credential, nil
+}
+
+func saveAzureAddition(userUUID string, addition *azurecloud.Addition) error {
+	if addition == nil {
+		addition = &azurecloud.Addition{}
+	}
+	addition.Normalize()
+
+	payload, err := json.Marshal(addition)
+	if err != nil {
+		return err
+	}
+	return saveProviderAddition(userUUID, "azure", string(payload))
+}
+
+func reloadAzureAdditionCredentialState(userUUID string, credential *azurecloud.CredentialRecord) (*azurecloud.Addition, *azurecloud.CredentialRecord, error) {
+	if credential == nil {
+		return nil, nil, errors.New("Azure credential is not configured")
+	}
+
+	addition, err := loadAzureAddition(userUUID)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	latestCredential := addition.FindCredential(credential.ID)
+	if latestCredential == nil {
+		clientID := strings.TrimSpace(credential.ClientID)
+		subscriptionID := strings.TrimSpace(credential.SubscriptionID)
+		if clientID != "" && subscriptionID != "" {
+			for index := range addition.Credentials {
+				if strings.TrimSpace(addition.Credentials[index].ClientID) == clientID &&
+					strings.TrimSpace(addition.Credentials[index].SubscriptionID) == subscriptionID {
+					latestCredential = &addition.Credentials[index]
+					break
+				}
+			}
+		}
+	}
+	if latestCredential == nil {
+		entryID := strings.TrimSpace(credential.ID)
+		if entryID == "" {
+			return nil, nil, errors.New("Azure credential is not configured")
+		}
+		return nil, nil, newProviderEntryNotFoundError("azure", entryID)
 	}
 
 	return addition, latestCredential, nil

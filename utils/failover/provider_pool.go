@@ -13,6 +13,7 @@ import (
 	smithyhttp "github.com/aws/smithy-go/transport/http"
 	"github.com/komari-monitor/komari/database/models"
 	awscloud "github.com/komari-monitor/komari/utils/cloudprovider/aws"
+	azurecloud "github.com/komari-monitor/komari/utils/cloudprovider/azure"
 	"github.com/komari-monitor/komari/utils/cloudprovider/digitalocean"
 	linodecloud "github.com/komari-monitor/komari/utils/cloudprovider/linode"
 )
@@ -226,6 +227,45 @@ func listProviderPoolCandidates(userUUID string, plan models.FailoverPlan) ([]pr
 		}
 		if entryGroup != "" && len(candidates) == 0 {
 			return nil, fmt.Errorf("AWS credential group not found: %s", entryGroup)
+		}
+		return sortProviderPoolCandidates(candidates), nil
+	case "azure":
+		raw, err := loadProviderAddition(userUUID, "azure")
+		if err != nil {
+			return nil, fmt.Errorf("Azure provider is not configured")
+		}
+		addition := &azurecloud.Addition{}
+		if strings.TrimSpace(raw) == "" {
+			raw = "{}"
+		}
+		if err := json.Unmarshal([]byte(raw), addition); err != nil {
+			return nil, fmt.Errorf("Azure configuration is invalid: %w", err)
+		}
+		addition.Normalize()
+		if len(addition.Credentials) == 0 {
+			return nil, errors.New("Azure credential is not configured")
+		}
+		preferredID := resolvePreferredEntryID(strings.TrimSpace(plan.ProviderEntryID), addition.ActiveCredentialID)
+		candidates := make([]providerPoolCandidate, 0, len(addition.Credentials))
+		for _, credential := range addition.Credentials {
+			entryID := strings.TrimSpace(credential.ID)
+			if entryID == "" {
+				continue
+			}
+			credentialGroup := normalizeProviderEntryGroup(credential.Group)
+			if entryGroup != "" && credentialGroup != entryGroup {
+				continue
+			}
+			candidates = append(candidates, providerPoolCandidate{
+				EntryID:    entryID,
+				EntryName:  strings.TrimSpace(credential.Name),
+				EntryGroup: credentialGroup,
+				Active:     entryID == strings.TrimSpace(addition.ActiveCredentialID),
+				Preferred:  entryID == preferredID,
+			})
+		}
+		if entryGroup != "" && len(candidates) == 0 {
+			return nil, fmt.Errorf("Azure credential group not found: %s", entryGroup)
 		}
 		return sortProviderPoolCandidates(candidates), nil
 	case "digitalocean":
