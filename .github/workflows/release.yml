@@ -76,11 +76,18 @@ jobs:
 
       - name: Install Zig cross-compiler toolchain
         run: |
-          sudo apt-get update # Update apt package lists
-          sudo apt-get install -y build-essential curl
-          wget https://ziglang.org/download/0.14.1/zig-x86_64-linux-0.14.1.tar.xz
-          sudo tar -C /usr/local -Jxf zig-x86_64-linux-0.14.1.tar.xz
-          echo "PATH=$PATH:/usr/local/zig-x86_64-linux-0.14.1" >> $GITHUB_ENV
+          set -euo pipefail
+          command -v curl
+          ZIG_VERSION=0.14.1
+          ZIG_DIR=/usr/local/zig-x86_64-linux-${ZIG_VERSION}
+          ZIG_ARCHIVE="${RUNNER_TEMP}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz"
+          ZIG_URL="https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz"
+          if [ ! -x "${ZIG_DIR}/zig" ]; then
+            curl --fail --location --retry 10 --retry-all-errors --retry-delay 15 --continue-at - \
+              --output "${ZIG_ARCHIVE}" "${ZIG_URL}"
+            sudo tar -C /usr/local -Jxf "${ZIG_ARCHIVE}"
+          fi
+          echo "${ZIG_DIR}" >> $GITHUB_PATH
 
       - name: Build binary
         env:
