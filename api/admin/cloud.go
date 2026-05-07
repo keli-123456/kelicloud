@@ -29,6 +29,8 @@ func cloudProviderRequiredFeature(providerName string) string {
 		return config.UserFeatureCloudDigitalOcean
 	case "linode":
 		return config.UserFeatureCloudLinode
+	case "vultr":
+		return config.UserFeatureCloudVultr
 	case "azure":
 		return config.UserFeatureCloudAzure
 	case "aws", "ec2", "lightsail":

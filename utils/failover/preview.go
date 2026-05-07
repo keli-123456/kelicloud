@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -488,6 +489,40 @@ func buildPreviewPlanCatalogCheck(userUUID string, plan models.FailoverPlan, can
 		verifyPreviewCatalogOption(&issues, &warnings, "type", planType, catalog.Types)
 		verifyPreviewCatalogOption(&issues, &warnings, "image", image, catalog.Images)
 		return issues, warnings, detail, "", region, nil
+	case "vultr":
+		var payload vultrProvisionPayload
+		if err := json.Unmarshal([]byte(plan.Payload), &payload); err != nil {
+			return nil, nil, detail, "", "", fmt.Errorf("invalid vultr provision payload: %w", err)
+		}
+		region := strings.TrimSpace(payload.Region)
+		planID := strings.TrimSpace(payload.Plan)
+		osID := ""
+		if payload.OSID > 0 {
+			osID = strconv.Itoa(payload.OSID)
+		}
+		detail["region"] = region
+		detail["plan"] = planID
+		detail["os_id"] = osID
+		if region == "" {
+			issues = append(issues, "region is required")
+		}
+		if planID == "" {
+			issues = append(issues, "plan is required")
+		}
+		if osID == "" {
+			issues = append(issues, "os_id is required")
+		}
+		if len(issues) > 0 {
+			return issues, warnings, detail, "", region, nil
+		}
+		catalog, err := LoadPlanCatalog(userUUID, "vultr", candidate.EntryID, "", plan.ActionType, "", region, "full")
+		if err != nil {
+			return nil, nil, detail, "", region, err
+		}
+		verifyPreviewCatalogOption(&issues, &warnings, "region", region, catalog.Regions)
+		verifyPreviewCatalogOption(&issues, &warnings, "plan", planID, catalog.Sizes)
+		verifyPreviewCatalogOption(&issues, &warnings, "os_id", osID, catalog.Images)
+		return issues, warnings, detail, "", region, nil
 	}
 
 	return nil, nil, detail, "", "", fmt.Errorf("unsupported preview provider: %s", plan.Provider)
@@ -622,6 +657,16 @@ func previewAutoConnectInputs(plan models.FailoverPlan) (string, bool, string, s
 			return "", true, "", "", fmt.Errorf("invalid linode provision payload: %w", err)
 		}
 		return strings.TrimSpace(payload.UserData), true, strings.TrimSpace(payload.Region), strings.TrimSpace(payload.Image), nil
+	case "vultr":
+		var payload vultrProvisionPayload
+		if err := json.Unmarshal([]byte(plan.Payload), &payload); err != nil {
+			return "", true, "", "", fmt.Errorf("invalid vultr provision payload: %w", err)
+		}
+		image := ""
+		if payload.OSID > 0 {
+			image = strconv.Itoa(payload.OSID)
+		}
+		return strings.TrimSpace(payload.UserData), true, strings.TrimSpace(payload.Region), image, nil
 	default:
 		return "", true, "", "", fmt.Errorf("unsupported preview provider: %s", plan.Provider)
 	}

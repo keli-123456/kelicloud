@@ -191,6 +191,7 @@ func TestUserPolicyDefaultsAndPersistence(t *testing.T) {
 		UserFeatureCloudDNS,
 		UserFeatureCloudFailover,
 		UserFeatureCloudLinode,
+		UserFeatureCloudVultr,
 	}
 	if len(policy.AllowedFeatures) != len(expectedFeatures) {
 		t.Fatalf("unexpected normalized features: %+v", policy.AllowedFeatures)

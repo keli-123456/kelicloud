@@ -12,6 +12,7 @@ import (
 	azurecloud "github.com/komari-monitor/komari/utils/cloudprovider/azure"
 	"github.com/komari-monitor/komari/utils/cloudprovider/digitalocean"
 	linodecloud "github.com/komari-monitor/komari/utils/cloudprovider/linode"
+	vultrcloud "github.com/komari-monitor/komari/utils/cloudprovider/vultr"
 )
 
 func isDigitalOceanNotFoundError(err error) bool {
@@ -21,6 +22,11 @@ func isDigitalOceanNotFoundError(err error) bool {
 
 func isLinodeNotFoundError(err error) bool {
 	var apiErr *linodecloud.APIError
+	return errors.As(err, &apiErr) && apiErr != nil && apiErr.StatusCode == 404
+}
+
+func isVultrNotFoundError(err error) bool {
+	var apiErr *vultrcloud.APIError
 	return errors.As(err, &apiErr) && apiErr != nil && apiErr.StatusCode == 404
 }
 
@@ -189,6 +195,61 @@ func waitForLinodeInstance(ctx context.Context, client *linodecloud.Client, inst
 	}
 	instance, err := client.GetInstance(ctx, instanceID)
 	return instance, normalizeExecutionStopError(err)
+}
+
+func waitForVultrInstance(ctx context.Context, client *vultrcloud.Client, instanceID string) (*vultrcloud.Instance, error) {
+	deadline := time.Now().Add(5 * time.Minute)
+	ipv4ReadyAt := time.Time{}
+	var latest *vultrcloud.Instance
+	const ipv6GraceAfterIPv4 = 90 * time.Second
+	for time.Now().Before(deadline) {
+		if err := waitContextOrDelay(ctx, 0); err != nil {
+			return nil, err
+		}
+		instance, err := client.GetInstance(ctx, instanceID)
+		if err != nil {
+			if normalizedErr := normalizeExecutionStopError(err); errors.Is(normalizedErr, errExecutionStopped) {
+				return nil, normalizedErr
+			}
+		}
+		if err == nil && instance != nil {
+			latest = instance
+			hasIPv4 := strings.TrimSpace(vultrPublicIPv4(instance)) != ""
+			hasIPv6 := strings.TrimSpace(vultrPublicIPv6(instance)) != ""
+			if hasIPv4 && hasIPv6 {
+				return instance, nil
+			}
+			if hasIPv4 {
+				if ipv4ReadyAt.IsZero() {
+					ipv4ReadyAt = time.Now()
+				} else if time.Since(ipv4ReadyAt) >= ipv6GraceAfterIPv4 {
+					return instance, nil
+				}
+			}
+		}
+		if err := waitContextOrDelay(ctx, 5*time.Second); err != nil {
+			return nil, err
+		}
+	}
+	if latest != nil {
+		return latest, nil
+	}
+	instance, err := client.GetInstance(ctx, instanceID)
+	return instance, normalizeExecutionStopError(err)
+}
+
+func vultrPublicIPv4(instance *vultrcloud.Instance) string {
+	if instance == nil {
+		return ""
+	}
+	return normalizeIPAddress(instance.MainIP)
+}
+
+func vultrPublicIPv6(instance *vultrcloud.Instance) string {
+	if instance == nil {
+		return ""
+	}
+	return normalizeIPAddress(instance.V6MainIP)
 }
 
 func cleanupOnProvisionError(cleanup func(context.Context) error, label string, cause error) error {

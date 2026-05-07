@@ -16,6 +16,7 @@ import (
 	azurecloud "github.com/komari-monitor/komari/utils/cloudprovider/azure"
 	"github.com/komari-monitor/komari/utils/cloudprovider/digitalocean"
 	linodecloud "github.com/komari-monitor/komari/utils/cloudprovider/linode"
+	vultrcloud "github.com/komari-monitor/komari/utils/cloudprovider/vultr"
 )
 
 const (
@@ -336,6 +337,41 @@ func listProviderPoolCandidates(userUUID string, plan models.FailoverPlan) ([]pr
 		}
 		if entryGroup != "" && len(candidates) == 0 {
 			return nil, fmt.Errorf("Linode token group not found: %s", entryGroup)
+		}
+		return sortProviderPoolCandidates(candidates), nil
+	case "vultr":
+		raw, err := loadProviderAddition(userUUID, "vultr")
+		if err != nil {
+			return nil, fmt.Errorf("Vultr provider is not configured")
+		}
+		addition := &vultrcloud.Addition{}
+		if strings.TrimSpace(raw) == "" {
+			raw = "{}"
+		}
+		if err := json.Unmarshal([]byte(raw), addition); err != nil {
+			return nil, fmt.Errorf("Vultr configuration is invalid: %w", err)
+		}
+		addition.Normalize()
+		if len(addition.Tokens) == 0 {
+			return nil, errors.New("Vultr token is not configured")
+		}
+		preferredID := resolvePreferredEntryID(strings.TrimSpace(plan.ProviderEntryID), addition.ActiveTokenID)
+		candidates := make([]providerPoolCandidate, 0, len(addition.Tokens))
+		for _, token := range addition.Tokens {
+			tokenGroup := normalizeProviderEntryGroup(token.Group)
+			if entryGroup != "" && tokenGroup != entryGroup {
+				continue
+			}
+			candidates = append(candidates, providerPoolCandidate{
+				EntryID:    strings.TrimSpace(token.ID),
+				EntryName:  strings.TrimSpace(token.Name),
+				EntryGroup: tokenGroup,
+				Preferred:  strings.TrimSpace(token.ID) == preferredID,
+				Active:     strings.TrimSpace(token.ID) == strings.TrimSpace(addition.ActiveTokenID),
+			})
+		}
+		if entryGroup != "" && len(candidates) == 0 {
+			return nil, fmt.Errorf("Vultr token group not found: %s", entryGroup)
 		}
 		return sortProviderPoolCandidates(candidates), nil
 	default:
@@ -670,6 +706,8 @@ func loadProviderEntryCapacitySnapshot(ctx context.Context, userUUID string, pla
 		return loadDigitalOceanCapacitySnapshot(ctx, userUUID, candidate.EntryID)
 	case "linode":
 		return loadLinodeCapacitySnapshot(ctx, userUUID, candidate.EntryID)
+	case "vultr":
+		return loadVultrCapacitySnapshot(ctx, userUUID, candidate.EntryID)
 	default:
 		return &providerEntryCapacitySnapshot{
 			FetchedAt: time.Now(),
@@ -858,6 +896,38 @@ func loadLinodeCapacitySnapshot(ctx context.Context, userUUID, entryID string) (
 	}, nil
 }
 
+func loadVultrCapacitySnapshot(ctx context.Context, userUUID, entryID string) (*providerEntryCapacitySnapshot, error) {
+	_, token, err := loadVultrToken(userUUID, entryID)
+	if err != nil {
+		return nil, err
+	}
+
+	client, err := vultrcloud.NewClientFromToken(token.Token)
+	if err != nil {
+		return nil, err
+	}
+
+	ctx, cancel := context.WithTimeout(contextOrBackground(ctx), 20*time.Second)
+	defer cancel()
+
+	instances, err := client.ListInstances(ctx)
+	if err != nil {
+		return nil, normalizeExecutionStopError(err)
+	}
+
+	return &providerEntryCapacitySnapshot{
+		FetchedAt: time.Now(),
+		Mode:      providerEntryCapacityModeSerialized,
+		Limit:     1,
+		Used:      len(instances),
+		Detail: map[string]interface{}{
+			"provider":   "vultr",
+			"instances":  len(instances),
+			"token_name": strings.TrimSpace(token.Name),
+		},
+	}, nil
+}
+
 func clearProviderEntryCooldown(userUUID, provider, entryID string) {
 	key := providerEntryStateKey(userUUID, provider, entryID)
 	state := failoverProviderEntryScheduler.stateFor(key)
@@ -922,6 +992,23 @@ func classifyProviderFailure(provider string, err error) providerFailureDecision
 		}
 	case "linode":
 		var apiErr *linodecloud.APIError
+		if errors.As(err, &apiErr) {
+			switch apiErr.StatusCode {
+			case 401, 403:
+				return providerFailureDecision{Class: "auth_invalid", Cooldown: providerEntryCooldownHardFailure}
+			case 429:
+				return providerFailureDecision{Class: "rate_limited", Cooldown: providerEntryCooldownRateLimited}
+			case 400, 402, 422:
+				if isQuotaMessage(message) {
+					return providerFailureDecision{Class: "quota_exhausted", Cooldown: providerEntryCooldownQuota}
+				}
+				if isBillingMessage(message) {
+					return providerFailureDecision{Class: "billing_locked", Cooldown: providerEntryCooldownHardFailure}
+				}
+			}
+		}
+	case "vultr":
+		var apiErr *vultrcloud.APIError
 		if errors.As(err, &apiErr) {
 			switch apiErr.StatusCode {
 			case 401, 403:

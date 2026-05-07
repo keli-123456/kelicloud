@@ -631,7 +631,7 @@ func validateCloudProviderEntryForScope(scope ownerScope, providerName, entryID 
 	entryID = strings.TrimSpace(entryID)
 	if entryID == "" {
 		switch providerName {
-		case awsProviderName, azureProviderName, digitalOceanProviderName, linodeProviderName:
+		case awsProviderName, azureProviderName, digitalOceanProviderName, linodeProviderName, vultrProviderName:
 			entryID = "active"
 		default:
 			return fmt.Errorf("provider entry id is required")
@@ -674,6 +674,17 @@ func validateCloudProviderEntryForScope(scope ownerScope, providerName, entryID 
 		}
 	case linodeProviderName:
 		_, addition, err := loadLinodeAddition(scope, false)
+		if err != nil {
+			return err
+		}
+		if entryID == "active" && addition.ActiveToken() != nil {
+			return nil
+		}
+		if addition.FindToken(entryID) != nil {
+			return nil
+		}
+	case vultrProviderName:
+		_, addition, err := loadVultrAddition(scope, false)
 		if err != nil {
 			return err
 		}
@@ -806,6 +817,38 @@ func validateFailoverProviderSelectionForScope(scope ownerScope, providerName, e
 		}
 	case linodeProviderName:
 		_, addition, err := loadLinodeAddition(scope, false)
+		if err != nil {
+			return err
+		}
+		if entryGroup != "" {
+			if entryID != "active" {
+				token := addition.FindToken(entryID)
+				if token == nil {
+					return fmt.Errorf("provider %s entry %s was not found", providerName, entryID)
+				}
+				if strings.TrimSpace(token.Group) != entryGroup {
+					return fmt.Errorf("provider %s entry %s is not in group %s", providerName, entryID, entryGroup)
+				}
+				return nil
+			}
+			if active := addition.ActiveToken(); active != nil && strings.TrimSpace(active.Group) == entryGroup {
+				return nil
+			}
+			for _, token := range addition.Tokens {
+				if strings.TrimSpace(token.Group) == entryGroup {
+					return nil
+				}
+			}
+			return fmt.Errorf("provider %s group %s was not found", providerName, entryGroup)
+		}
+		if entryID == "active" && addition.ActiveToken() != nil {
+			return nil
+		}
+		if addition.FindToken(entryID) != nil {
+			return nil
+		}
+	case vultrProviderName:
+		_, addition, err := loadVultrAddition(scope, false)
 		if err != nil {
 			return err
 		}
@@ -1131,7 +1174,7 @@ func validateFailoverTaskRequest(scope ownerScope, req *failoverTaskRequest) (*m
 	for index, planReq := range req.Plans {
 		provider := strings.ToLower(strings.TrimSpace(planReq.Provider))
 		switch provider {
-		case "aws", "azure", "digitalocean", "linode":
+		case "aws", "azure", "digitalocean", "linode", "vultr":
 		default:
 			return nil, nil, fmt.Errorf("unsupported plan provider: %s", planReq.Provider)
 		}

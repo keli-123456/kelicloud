@@ -13,6 +13,7 @@ import (
 	azurecloud "github.com/komari-monitor/komari/utils/cloudprovider/azure"
 	"github.com/komari-monitor/komari/utils/cloudprovider/digitalocean"
 	linodecloud "github.com/komari-monitor/komari/utils/cloudprovider/linode"
+	vultrcloud "github.com/komari-monitor/komari/utils/cloudprovider/vultr"
 )
 
 type CatalogOption struct {
@@ -84,6 +85,8 @@ func LoadPlanCatalog(userUUID, providerName, entryID, entryGroup, actionType, se
 				return loadDigitalOceanPlanCatalog(userUUID, entryID, entryGroup, actionType, mode)
 			case "linode":
 				return loadLinodePlanCatalog(userUUID, entryID, entryGroup, actionType, mode)
+			case "vultr":
+				return loadVultrPlanCatalog(userUUID, entryID, entryGroup, actionType, mode)
 			default:
 				return nil, fmt.Errorf("unsupported failover plan provider: %s", providerName)
 			}
@@ -572,6 +575,80 @@ func loadLinodePlanCatalog(userUUID, entryID, entryGroup, actionType, mode strin
 			Value: strings.TrimSpace(item.ID),
 			Label: firstNonEmpty(strings.TrimSpace(item.Label), strings.TrimSpace(item.ID)),
 			Hint:  firstNonEmpty(strings.TrimSpace(item.Description), strings.TrimSpace(item.Vendor)),
+		})
+	}
+	return catalog, nil
+}
+
+func loadVultrPlanCatalog(userUUID, entryID, entryGroup, actionType, mode string) (*PlanCatalog, error) {
+	_, token, err := loadVultrTokenSelection(userUUID, entryID, entryGroup)
+	if err != nil {
+		return nil, err
+	}
+	client, err := vultrcloud.NewClientFromToken(token.Token)
+	if err != nil {
+		return nil, err
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	regions, err := client.ListRegions(ctx)
+	if err != nil {
+		return nil, err
+	}
+	sort.Slice(regions, func(i, j int) bool {
+		return regions[i].ID < regions[j].ID
+	})
+
+	catalog := newEmptyPlanCatalog("vultr", actionType, "", "")
+	for _, item := range regions {
+		catalog.Regions = append(catalog.Regions, CatalogOption{
+			Value: strings.TrimSpace(item.ID),
+			Label: firstNonEmpty(strings.TrimSpace(item.City), strings.TrimSpace(item.ID)),
+			Hint:  strings.TrimSpace(item.Country),
+		})
+	}
+	if mode == "regions" {
+		return catalog, nil
+	}
+
+	plans, err := client.ListPlans(ctx)
+	if err != nil {
+		return nil, err
+	}
+	oses, err := client.ListOS(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	sort.Slice(plans, func(i, j int) bool {
+		return plans[i].MonthlyCost < plans[j].MonthlyCost
+	})
+	sort.Slice(oses, func(i, j int) bool {
+		left := strings.ToLower(strings.TrimSpace(oses[i].Name))
+		right := strings.ToLower(strings.TrimSpace(oses[j].Name))
+		return left < right
+	})
+
+	for _, item := range plans {
+		catalog.Sizes = append(catalog.Sizes, CatalogOption{
+			Value: strings.TrimSpace(item.ID),
+			Label: strings.TrimSpace(item.ID),
+			Hint: fmt.Sprintf(
+				"%d vCPU · %d MB · $%.2f/mo",
+				item.VCPUCount,
+				item.RAM,
+				item.MonthlyCost,
+			),
+		})
+	}
+	for _, item := range oses {
+		value := strconv.Itoa(item.ID)
+		catalog.Images = append(catalog.Images, CatalogOption{
+			Value: value,
+			Label: firstNonEmpty(strings.TrimSpace(item.Name), value),
+			Hint:  strings.TrimSpace(strings.Join([]string{item.Family, item.Arch}, " · ")),
 		})
 	}
 	return catalog, nil

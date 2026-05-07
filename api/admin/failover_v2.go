@@ -1124,7 +1124,7 @@ func validateFailoverV2MemberRequest(scope ownerScope, service *models.FailoverV
 	case models.FailoverV2MemberModeProviderTemplate:
 		provider = strings.ToLower(strings.TrimSpace(req.Provider))
 		switch provider {
-		case digitalOceanProviderName, linodeProviderName, awsProviderName, azureProviderName:
+		case digitalOceanProviderName, linodeProviderName, awsProviderName, azureProviderName, vultrProviderName:
 		default:
 			return nil, fmt.Errorf("unsupported failover v2 member provider: %s", req.Provider)
 		}
@@ -1149,6 +1149,10 @@ func validateFailoverV2MemberRequest(scope ownerScope, service *models.FailoverV
 			}
 		case linodeProviderName:
 			if _, err := failoverv2svc.ParseLinodeMemberPlanPayload(planPayload); err != nil {
+				return nil, err
+			}
+		case vultrProviderName:
+			if _, err := failoverv2svc.ParseVultrMemberPlanPayload(planPayload); err != nil {
 				return nil, err
 			}
 		case awsProviderName:

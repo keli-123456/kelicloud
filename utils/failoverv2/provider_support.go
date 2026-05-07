@@ -11,6 +11,7 @@ import (
 	awscloud "github.com/komari-monitor/komari/utils/cloudprovider/aws"
 	azurecloud "github.com/komari-monitor/komari/utils/cloudprovider/azure"
 	"github.com/komari-monitor/komari/utils/cloudprovider/linode"
+	vultrcloud "github.com/komari-monitor/komari/utils/cloudprovider/vultr"
 )
 
 type cloudflareDNSConfig struct {
@@ -356,6 +357,156 @@ func removeSavedLinodeRootPassword(userUUID string, addition *linode.Addition, t
 	}
 	if err := saveLinodeAddition(userUUID, targetAddition); err != nil {
 		log.Printf("failoverv2: failed to remove saved Linode root password for instance %d: %v", instanceID, err)
+	}
+}
+
+func loadVultrAddition(userUUID string) (*vultrcloud.Addition, error) {
+	raw, err := loadProviderAddition(userUUID, "vultr")
+	if err != nil {
+		return nil, fmt.Errorf("Vultr provider is not configured")
+	}
+
+	addition := &vultrcloud.Addition{}
+	if raw == "" {
+		raw = "{}"
+	}
+	if err := decodeJSON(raw, addition); err != nil {
+		return nil, fmt.Errorf("Vultr configuration is invalid: %w", err)
+	}
+	addition.Normalize()
+	return addition, nil
+}
+
+func loadVultrToken(userUUID, entryID string) (*vultrcloud.Addition, *vultrcloud.TokenRecord, error) {
+	return loadVultrTokenSelection(userUUID, entryID, "")
+}
+
+func loadVultrTokenSelection(userUUID, entryID, entryGroup string) (*vultrcloud.Addition, *vultrcloud.TokenRecord, error) {
+	addition, err := loadVultrAddition(userUUID)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	entryID = strings.TrimSpace(entryID)
+	entryGroup = normalizeProviderEntryGroup(entryGroup)
+	if entryGroup != "" {
+		if entryID != "" && entryID != activeProviderEntryID {
+			token := addition.FindToken(entryID)
+			if token == nil {
+				return nil, nil, fmt.Errorf("Vultr token not found: %s", entryID)
+			}
+			if normalizeProviderEntryGroup(token.Group) != entryGroup {
+				return nil, nil, fmt.Errorf("Vultr token %s is not in group %s", entryID, entryGroup)
+			}
+			return addition, token, nil
+		}
+		if token := addition.ActiveToken(); token != nil && normalizeProviderEntryGroup(token.Group) == entryGroup {
+			return addition, token, nil
+		}
+		for index := range addition.Tokens {
+			if normalizeProviderEntryGroup(addition.Tokens[index].Group) == entryGroup {
+				return addition, &addition.Tokens[index], nil
+			}
+		}
+		return nil, nil, fmt.Errorf("Vultr token group not found: %s", entryGroup)
+	}
+	if entryID == "" || entryID == activeProviderEntryID {
+		token := addition.ActiveToken()
+		if token == nil {
+			return nil, nil, errors.New("Vultr token is not configured")
+		}
+		return addition, token, nil
+	}
+
+	token := addition.FindToken(entryID)
+	if token == nil {
+		return nil, nil, fmt.Errorf("Vultr token not found: %s", entryID)
+	}
+	return addition, token, nil
+}
+
+func saveVultrAddition(userUUID string, addition *vultrcloud.Addition) error {
+	if addition == nil {
+		addition = &vultrcloud.Addition{}
+	}
+	addition.Normalize()
+	payload, err := encodeJSON(addition)
+	if err != nil {
+		return err
+	}
+	return saveProviderAddition(userUUID, "vultr", payload)
+}
+
+func reloadVultrAdditionTokenState(userUUID string, token *vultrcloud.TokenRecord) (*vultrcloud.Addition, *vultrcloud.TokenRecord, error) {
+	if token == nil {
+		return nil, nil, errors.New("Vultr token is not configured")
+	}
+
+	addition, err := loadVultrAddition(userUUID)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	latestToken := addition.FindToken(token.ID)
+	if latestToken == nil {
+		tokenValue := strings.TrimSpace(token.Token)
+		if tokenValue != "" {
+			for index := range addition.Tokens {
+				if strings.TrimSpace(addition.Tokens[index].Token) == tokenValue {
+					latestToken = &addition.Tokens[index]
+					break
+				}
+			}
+		}
+	}
+	if latestToken == nil {
+		return nil, nil, fmt.Errorf("Vultr token not found: %s", strings.TrimSpace(token.ID))
+	}
+
+	return addition, latestToken, nil
+}
+
+func persistVultrRootPassword(userUUID string, addition *vultrcloud.Addition, token *vultrcloud.TokenRecord, instanceID, instanceLabel, passwordMode, rootPassword string) error {
+	if addition == nil || token == nil || strings.TrimSpace(instanceID) == "" || strings.TrimSpace(rootPassword) == "" {
+		return nil
+	}
+
+	latestAddition, latestToken, err := reloadVultrAdditionTokenState(userUUID, token)
+	if err != nil {
+		log.Printf("failoverv2: failed to reload Vultr token state for instance %s: %v", instanceID, err)
+		return err
+	}
+	if err := latestToken.SaveInstancePassword(instanceID, instanceLabel, passwordMode, rootPassword, time.Now()); err != nil {
+		log.Printf("failoverv2: failed to save Vultr root password for instance %s: %v", instanceID, err)
+		return err
+	}
+	if err := saveVultrAddition(userUUID, latestAddition); err != nil {
+		latestToken.RemoveSavedInstancePassword(instanceID)
+		log.Printf("failoverv2: failed to persist Vultr root password for instance %s: %v", instanceID, err)
+		return err
+	}
+	return nil
+}
+
+func removeSavedVultrRootPassword(userUUID string, addition *vultrcloud.Addition, token *vultrcloud.TokenRecord, instanceID string) {
+	if addition == nil || token == nil || strings.TrimSpace(instanceID) == "" {
+		return
+	}
+
+	targetAddition := addition
+	targetToken := token
+	if latestAddition, latestToken, err := reloadVultrAdditionTokenState(userUUID, token); err == nil {
+		targetAddition = latestAddition
+		targetToken = latestToken
+	} else {
+		log.Printf("failoverv2: failed to reload Vultr token state for instance %s cleanup, falling back to in-memory state: %v", instanceID, err)
+	}
+
+	if !targetToken.RemoveSavedInstancePassword(instanceID) {
+		return
+	}
+	if err := saveVultrAddition(userUUID, targetAddition); err != nil {
+		log.Printf("failoverv2: failed to remove saved Vultr root password for instance %s: %v", instanceID, err)
 	}
 }
 

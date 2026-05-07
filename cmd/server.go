@@ -29,6 +29,7 @@ import (
 	"github.com/komari-monitor/komari/config"
 	"github.com/komari-monitor/komari/database/accounts"
 	"github.com/komari-monitor/komari/database/auditlog"
+	"github.com/komari-monitor/komari/database/billing"
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
 	d_notification "github.com/komari-monitor/komari/database/notification"
@@ -74,6 +75,9 @@ func init() {
 func RunServer() {
 	// #region 初始化
 	InitDatabase()
+	if err := billing.EnsureDefaultBillingRecords(); err != nil {
+		log.Printf("Failed to initialize billing defaults: %v", err)
+	}
 	if utils.VersionHash != "unknown" {
 		gin.SetMode(gin.ReleaseMode)
 	}
@@ -251,6 +255,7 @@ func RunServer() {
 			admin.RequireAnyUserFeatureMiddleware(
 				config.UserFeatureCloudDigitalOcean,
 				config.UserFeatureCloudLinode,
+				config.UserFeatureCloudVultr,
 				config.UserFeatureCloudAzure,
 				config.UserFeatureCloudAWS,
 				config.UserFeatureCloudDNS,
@@ -299,6 +304,23 @@ func RunServer() {
 				linodeGroup.POST("/instances", admin.CreateLinodeInstance)
 				linodeGroup.DELETE("/instances/:id", admin.DeleteLinodeInstance)
 				linodeGroup.POST("/instances/:id/actions", admin.PostLinodeInstanceAction)
+			}
+			vultrGroup := cloudGroup.Group("/vultr", admin.RequireUserFeatureMiddleware(config.UserFeatureCloudVultr))
+			{
+				vultrGroup.GET("/tokens", admin.GetVultrTokens)
+				vultrGroup.POST("/tokens", admin.SaveVultrTokens)
+				vultrGroup.POST("/tokens/active", admin.SetVultrActiveToken)
+				vultrGroup.POST("/tokens/check", admin.CheckVultrTokens)
+				vultrGroup.GET("/tokens/:id/secret", admin.GetVultrTokenSecret)
+				vultrGroup.DELETE("/tokens/:id", admin.DeleteVultrToken)
+				vultrGroup.GET("/account", admin.GetVultrAccount)
+				vultrGroup.GET("/catalog", admin.GetVultrCatalog)
+				vultrGroup.GET("/instances", admin.ListVultrInstances)
+				vultrGroup.GET("/instances/:id/password", admin.GetVultrInstancePassword)
+				vultrGroup.GET("/instances/:id", admin.GetVultrInstanceDetail)
+				vultrGroup.POST("/instances", admin.CreateVultrInstance)
+				vultrGroup.DELETE("/instances/:id", admin.DeleteVultrInstance)
+				vultrGroup.POST("/instances/:id/actions", admin.PostVultrInstanceAction)
 			}
 			azureGroup := cloudGroup.Group("/azure", admin.RequireUserFeatureMiddleware(config.UserFeatureCloudAzure))
 			{
@@ -355,6 +377,23 @@ func RunServer() {
 			userGroup.GET("", admin.ListUsers)
 			userGroup.POST("", admin.CreateUser)
 			userGroup.DELETE("/:uuid", admin.DeleteUser)
+		}
+		billingGroup := adminAuthrized.Group("/billing")
+		{
+			billingGroup.GET("/catalog", admin.GetBillingCatalog)
+			billingGroup.POST("/orders", admin.CreateBillingOrder)
+			billingGroup.GET("/my-orders", admin.GetMyBillingOrders)
+
+			platformBillingGroup := billingGroup.Group("", admin.RequirePlatformAdminMiddleware())
+			platformBillingGroup.GET("/plans", admin.ListBillingPlans)
+			platformBillingGroup.POST("/plans", admin.SaveBillingPlan)
+			platformBillingGroup.POST("/plans/:id/archive", admin.ArchiveBillingPlan)
+			platformBillingGroup.GET("/payment-methods", admin.ListPaymentMethods)
+			platformBillingGroup.POST("/payment-methods", admin.SavePaymentMethod)
+			platformBillingGroup.POST("/payment-methods/:id/disable", admin.DisablePaymentMethod)
+			platformBillingGroup.GET("/orders", admin.ListBillingOrders)
+			platformBillingGroup.POST("/orders/:id/paid", admin.MarkBillingOrderPaid)
+			platformBillingGroup.POST("/orders/:id/cancel", admin.CancelBillingOrder)
 		}
 		// clients
 		clientGroup := adminAuthrized.Group("/client", admin.RequireUserFeatureMiddleware(config.UserFeatureClients))

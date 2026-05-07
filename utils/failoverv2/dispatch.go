@@ -238,6 +238,8 @@ func provisionMember(ctx context.Context, userUUID string, service *models.Failo
 		return provisionDigitalOceanMember(ctx, userUUID, service, member)
 	case "linode":
 		return provisionLinodeMember(ctx, userUUID, service, member)
+	case "vultr":
+		return provisionVultrMember(ctx, userUUID, service, member)
 	case "aws":
 		return provisionAWSMember(ctx, userUUID, service, member)
 	case "azure":

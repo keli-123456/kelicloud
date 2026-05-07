@@ -15,6 +15,7 @@ import (
 	azurecloud "github.com/komari-monitor/komari/utils/cloudprovider/azure"
 	"github.com/komari-monitor/komari/utils/cloudprovider/digitalocean"
 	"github.com/komari-monitor/komari/utils/cloudprovider/linode"
+	vultrcloud "github.com/komari-monitor/komari/utils/cloudprovider/vultr"
 )
 
 const (
@@ -43,6 +44,8 @@ func (e *providerEntryNotFoundError) Error() string {
 		return fmt.Sprintf("Azure credential not found: %s", entryID)
 	case "linode":
 		return fmt.Sprintf("Linode token not found: %s", entryID)
+	case "vultr":
+		return fmt.Sprintf("Vultr token not found: %s", entryID)
 	default:
 		return fmt.Sprintf("DigitalOcean token not found: %s", entryID)
 	}
@@ -547,6 +550,115 @@ func reloadLinodeAdditionTokenState(userUUID string, token *linode.TokenRecord) 
 	}
 	if latestToken == nil {
 		return nil, nil, newProviderEntryNotFoundError("linode", token.ID)
+	}
+
+	return addition, latestToken, nil
+}
+
+func loadVultrAddition(userUUID string) (*vultrcloud.Addition, error) {
+	raw, err := loadProviderAddition(userUUID, "vultr")
+	if err != nil {
+		return nil, fmt.Errorf("Vultr provider is not configured")
+	}
+
+	addition := &vultrcloud.Addition{}
+	if raw == "" {
+		raw = "{}"
+	}
+	if err := json.Unmarshal([]byte(raw), addition); err != nil {
+		return nil, fmt.Errorf("Vultr configuration is invalid: %w", err)
+	}
+	addition.Normalize()
+	return addition, nil
+}
+
+func loadVultrToken(userUUID, entryID string) (*vultrcloud.Addition, *vultrcloud.TokenRecord, error) {
+	return loadVultrTokenSelection(userUUID, entryID, "")
+}
+
+func loadVultrTokenSelection(userUUID, entryID, entryGroup string) (*vultrcloud.Addition, *vultrcloud.TokenRecord, error) {
+	addition, err := loadVultrAddition(userUUID)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	entryID = strings.TrimSpace(entryID)
+	entryGroup = normalizeProviderEntryGroup(entryGroup)
+	if entryGroup != "" {
+		if entryID != "" && entryID != activeProviderEntryID {
+			token := addition.FindToken(entryID)
+			if token == nil {
+				return nil, nil, newProviderEntryNotFoundError("vultr", entryID)
+			}
+			if normalizeProviderEntryGroup(token.Group) != entryGroup {
+				return nil, nil, fmt.Errorf("Vultr token %s is not in group %s", entryID, entryGroup)
+			}
+			return addition, token, nil
+		}
+
+		if token := addition.ActiveToken(); token != nil && normalizeProviderEntryGroup(token.Group) == entryGroup {
+			return addition, token, nil
+		}
+		for index := range addition.Tokens {
+			if normalizeProviderEntryGroup(addition.Tokens[index].Group) == entryGroup {
+				return addition, &addition.Tokens[index], nil
+			}
+		}
+		return nil, nil, fmt.Errorf("Vultr token group not found: %s", entryGroup)
+	}
+
+	if entryID == "" || entryID == activeProviderEntryID {
+		token := addition.ActiveToken()
+		if token == nil {
+			return nil, nil, errors.New("Vultr token is not configured")
+		}
+		return addition, token, nil
+	}
+
+	token := addition.FindToken(entryID)
+	if token == nil {
+		return nil, nil, newProviderEntryNotFoundError("vultr", entryID)
+	}
+	return addition, token, nil
+}
+
+func saveVultrAddition(userUUID string, addition *vultrcloud.Addition) error {
+	if addition == nil {
+		addition = &vultrcloud.Addition{}
+	}
+	addition.Normalize()
+
+	payload, err := json.Marshal(addition)
+	if err != nil {
+		return err
+	}
+	return saveProviderAddition(userUUID, "vultr", string(payload))
+}
+
+func reloadVultrAdditionTokenState(userUUID string, token *vultrcloud.TokenRecord) (*vultrcloud.Addition, *vultrcloud.TokenRecord, error) {
+	if token == nil {
+		return nil, nil, errors.New("Vultr token is not configured")
+	}
+
+	addition, err := loadVultrAddition(userUUID)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	latestToken := addition.FindToken(token.ID)
+	if latestToken == nil {
+		tokenValue := strings.TrimSpace(token.Token)
+		if tokenValue != "" {
+			for index := range addition.Tokens {
+				if strings.TrimSpace(addition.Tokens[index].Token) == tokenValue {
+					latestToken = &addition.Tokens[index]
+					break
+				}
+			}
+		}
+	}
+	if latestToken == nil {
+		return nil, nil, newProviderEntryNotFoundError("vultr", token.ID)
 	}
 
 	return addition, latestToken, nil

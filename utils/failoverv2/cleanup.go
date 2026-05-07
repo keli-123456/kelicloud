@@ -14,6 +14,7 @@ import (
 	azurecloud "github.com/komari-monitor/komari/utils/cloudprovider/azure"
 	"github.com/komari-monitor/komari/utils/cloudprovider/digitalocean"
 	linodecloud "github.com/komari-monitor/komari/utils/cloudprovider/linode"
+	vultrcloud "github.com/komari-monitor/komari/utils/cloudprovider/vultr"
 )
 
 type oldInstanceCleanup struct {
@@ -211,6 +212,35 @@ func resolveCurrentOldInstanceCleanupFromRef(userUUID string, ref map[string]int
 				return nil
 			},
 		}, nil
+	case "vultr":
+		instanceID := strings.TrimSpace(stringMapValue(ref, "instance_id"))
+		if instanceID == "" || entryID == "" {
+			return nil, nil
+		}
+		addition, token, err := loadVultrToken(userUUID, entryID)
+		if err != nil {
+			return nil, err
+		}
+		client, err := vultrcloud.NewClientFromToken(token.Token)
+		if err != nil {
+			return nil, err
+		}
+		resolvedRef := resolvedCurrentInstanceRef(ref, provider, entryID)
+		return &oldInstanceCleanup{
+			Ref:   resolvedRef,
+			Label: "delete vultr instance " + instanceID,
+			Cleanup: func(ctx context.Context) error {
+				if err := client.DeleteInstance(contextOrBackground(ctx), instanceID); err != nil {
+					if isVultrNotFoundError(err) {
+						removeSavedVultrRootPassword(userUUID, addition, token, instanceID)
+						return nil
+					}
+					return err
+				}
+				removeSavedVultrRootPassword(userUUID, addition, token, instanceID)
+				return nil
+			},
+		}, nil
 	case "aws":
 		addition, credential, err := loadAWSCredential(userUUID, entryID)
 		if err != nil {
@@ -360,6 +390,10 @@ func pendingCleanupIdentityFromRef(ref map[string]interface{}) (string, string, 
 	case "linode":
 		if instanceID := intMapValue(ref, "instance_id"); instanceID > 0 {
 			return provider, "instance", strconv.Itoa(instanceID), entryID
+		}
+	case "vultr":
+		if instanceID := strings.TrimSpace(stringMapValue(ref, "instance_id")); instanceID != "" {
+			return provider, "instance", instanceID, entryID
 		}
 	case "aws":
 		service := normalizeAWSFailoverService(firstNonEmpty(stringMapValue(ref, "service"), "ec2"))

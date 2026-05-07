@@ -113,9 +113,22 @@ type GPURecord struct {
 type StringArray []string
 
 func (sa *StringArray) Scan(value interface{}) error {
-	bytes, ok := value.([]byte)
-	if !ok {
-		return fmt.Errorf("failed to scan StringArray: value is not []byte")
+	if value == nil {
+		*sa = nil
+		return nil
+	}
+	var bytes []byte
+	switch v := value.(type) {
+	case []byte:
+		bytes = v
+	case string:
+		bytes = []byte(v)
+	default:
+		return fmt.Errorf("failed to scan StringArray: value is not []byte or string")
+	}
+	if len(bytes) == 0 {
+		*sa = nil
+		return nil
 	}
 	return json.Unmarshal(bytes, sa)
 }

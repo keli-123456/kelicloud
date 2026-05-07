@@ -27,6 +27,7 @@ import (
 	azurecloud "github.com/komari-monitor/komari/utils/cloudprovider/azure"
 	"github.com/komari-monitor/komari/utils/cloudprovider/digitalocean"
 	linodecloud "github.com/komari-monitor/komari/utils/cloudprovider/linode"
+	vultrcloud "github.com/komari-monitor/komari/utils/cloudprovider/vultr"
 	"github.com/komari-monitor/komari/ws"
 	"gorm.io/gorm"
 )
@@ -195,6 +196,11 @@ func isDigitalOceanNotFoundError(err error) bool {
 
 func isLinodeNotFoundError(err error) bool {
 	var apiErr *linodecloud.APIError
+	return errors.As(err, &apiErr) && apiErr != nil && apiErr.StatusCode == 404
+}
+
+func isVultrNotFoundError(err error) bool {
+	var apiErr *vultrcloud.APIError
 	return errors.As(err, &apiErr) && apiErr != nil && apiErr.StatusCode == 404
 }
 
@@ -374,6 +380,25 @@ type linodeProvisionPayload struct {
 	RootPasswordMode  string   `json:"root_password_mode,omitempty"`
 	RootPassword      string   `json:"root_password,omitempty"`
 	CleanupInstanceID int      `json:"cleanup_instance_id,omitempty"`
+}
+
+type vultrProvisionPayload struct {
+	Label             string   `json:"label,omitempty"`
+	Hostname          string   `json:"hostname,omitempty"`
+	Region            string   `json:"region,omitempty"`
+	Plan              string   `json:"plan,omitempty"`
+	OSID              int      `json:"os_id,omitempty"`
+	SSHKeyIDs         []string `json:"sshkey_id,omitempty"`
+	EnableIPv6        bool     `json:"enable_ipv6"`
+	DisablePublicIPv4 bool     `json:"disable_public_ipv4"`
+	BackupsEnabled    bool     `json:"backups_enabled"`
+	DDOSProtection    bool     `json:"ddos_protection"`
+	ActivationEmail   bool     `json:"activation_email"`
+	Tags              []string `json:"tags,omitempty"`
+	UserData          string   `json:"user_data,omitempty"`
+	RootPasswordMode  string   `json:"root_password_mode,omitempty"`
+	RootPassword      string   `json:"root_password,omitempty"`
+	CleanupInstanceID string   `json:"cleanup_instance_id,omitempty"`
 }
 
 type awsRebindPayload struct {
@@ -2220,6 +2245,50 @@ func removeSavedLinodeRootPassword(userUUID string, addition *linodecloud.Additi
 	}
 }
 
+func persistVultrRootPassword(userUUID string, addition *vultrcloud.Addition, token *vultrcloud.TokenRecord, instanceID, instanceLabel, passwordMode, rootPassword string) error {
+	if addition == nil || token == nil || strings.TrimSpace(instanceID) == "" || strings.TrimSpace(rootPassword) == "" {
+		return nil
+	}
+
+	latestAddition, latestToken, err := reloadVultrAdditionTokenState(userUUID, token)
+	if err != nil {
+		log.Printf("failover: failed to reload Vultr token state for instance %s: %v", instanceID, err)
+		return err
+	}
+	if err := latestToken.SaveInstancePassword(instanceID, instanceLabel, passwordMode, rootPassword, time.Now()); err != nil {
+		log.Printf("failover: failed to save Vultr root password for instance %s: %v", instanceID, err)
+		return err
+	}
+	if err := saveVultrAddition(userUUID, latestAddition); err != nil {
+		latestToken.RemoveSavedInstancePassword(instanceID)
+		log.Printf("failover: failed to persist Vultr root password for instance %s: %v", instanceID, err)
+		return err
+	}
+	return nil
+}
+
+func removeSavedVultrRootPassword(userUUID string, addition *vultrcloud.Addition, token *vultrcloud.TokenRecord, instanceID string) {
+	if addition == nil || token == nil || strings.TrimSpace(instanceID) == "" {
+		return
+	}
+
+	targetAddition := addition
+	targetToken := token
+	if latestAddition, latestToken, err := reloadVultrAdditionTokenState(userUUID, token); err == nil {
+		targetAddition = latestAddition
+		targetToken = latestToken
+	} else {
+		log.Printf("failover: failed to reload Vultr token state for instance %s cleanup, falling back to in-memory state: %v", instanceID, err)
+	}
+
+	if !targetToken.RemoveSavedInstancePassword(instanceID) {
+		return
+	}
+	if err := saveVultrAddition(userUUID, targetAddition); err != nil {
+		log.Printf("failover: failed to remove saved Vultr root password for instance %s: %v", instanceID, err)
+	}
+}
+
 func persistAzureRootPassword(userUUID string, addition *azurecloud.Addition, credential *azurecloud.CredentialRecord, instanceID, instanceName, username, passwordMode, rootPassword string) error {
 	if addition == nil || credential == nil || strings.TrimSpace(instanceID) == "" || strings.TrimSpace(rootPassword) == "" {
 		return nil
@@ -2506,6 +2575,8 @@ func (r *executionRunner) executeProvisionPlan(plan models.FailoverPlan) (*actio
 		outcome, err = provisionDigitalOceanDroplet(r.ctx, r.task.UserID, plan)
 	case "linode":
 		outcome, err = provisionLinodeInstance(r.ctx, r.task.UserID, plan)
+	case "vultr":
+		outcome, err = provisionVultrInstance(r.ctx, r.task.UserID, plan)
 	default:
 		err = fmt.Errorf("unsupported provision provider: %s", plan.Provider)
 	}
@@ -3137,6 +3208,14 @@ func currentInstanceCleanupLabelFromRef(ref map[string]interface{}, address stri
 			return "delete linode instance at " + address
 		}
 		return "delete linode instance"
+	case "vultr":
+		if instanceID := strings.TrimSpace(stringMapValue(ref, "instance_id")); instanceID != "" {
+			return "delete vultr instance " + instanceID
+		}
+		if address != "" {
+			return "delete vultr instance at " + address
+		}
+		return "delete vultr instance"
 	case "azure":
 		if instanceName := strings.TrimSpace(firstNonEmpty(stringMapValue(ref, "name"), stringMapValue(ref, "instance_name"))); instanceName != "" {
 			return "delete azure vm " + instanceName
@@ -3202,6 +3281,9 @@ func isCurrentInstanceCredentialMissingError(provider string, err error) bool {
 	case "linode":
 		return strings.Contains(message, "linode provider is not configured") ||
 			strings.Contains(message, "linode token is not configured")
+	case "vultr":
+		return strings.Contains(message, "vultr provider is not configured") ||
+			strings.Contains(message, "vultr token is not configured")
 	case "aws":
 		return strings.Contains(message, "aws provider is not configured") ||
 			strings.Contains(message, "aws credential is not configured")
@@ -3549,6 +3631,56 @@ func resolveLinodeCurrentInstanceCleanupForToken(ctx context.Context, userUUID, 
 	return nil, nil
 }
 
+func resolveVultrCurrentInstanceCleanupForToken(ctx context.Context, userUUID, address string, tokenAddition *vultrcloud.Addition, token *vultrcloud.TokenRecord, entryID, entryName string) (*currentInstanceCleanup, error) {
+	if tokenAddition == nil || token == nil {
+		return nil, nil
+	}
+	client, err := vultrcloud.NewClientFromToken(token.Token)
+	if err != nil {
+		return nil, err
+	}
+	instances, err := client.ListInstances(contextOrBackground(ctx))
+	if err != nil {
+		return nil, normalizeExecutionStopError(err)
+	}
+	for _, instance := range instances {
+		if !sameAddress(address, instance.MainIP, instance.V6MainIP) {
+			continue
+		}
+		ref := map[string]interface{}{
+			"provider":            "vultr",
+			"provider_entry_id":   strings.TrimSpace(entryID),
+			"provider_entry_name": firstNonEmpty(strings.TrimSpace(entryName), strings.TrimSpace(token.Name)),
+			"instance_id":         instance.ID,
+			"label":               instance.Label,
+			"region":              instance.Region,
+		}
+		return &currentInstanceCleanup{
+			Ref: ref,
+			Addresses: map[string]interface{}{
+				"main_ip":       instance.MainIP,
+				"v6_main_ip":    instance.V6MainIP,
+				"internal_ip":   instance.InternalIP,
+				"status":        instance.Status,
+				"server_status": instance.ServerStatus,
+			},
+			Label: "delete vultr instance " + instance.ID,
+			Cleanup: func(ctx context.Context) error {
+				if err := client.DeleteInstance(contextOrBackground(ctx), instance.ID); err != nil {
+					if isVultrNotFoundError(err) {
+						removeSavedVultrRootPassword(userUUID, tokenAddition, token, instance.ID)
+						return nil
+					}
+					return normalizeExecutionStopError(err)
+				}
+				removeSavedVultrRootPassword(userUUID, tokenAddition, token, instance.ID)
+				return nil
+			},
+		}, nil
+	}
+	return nil, nil
+}
+
 func (r *executionRunner) resolveCurrentInstanceCleanupByAddress(ctx context.Context, plan models.FailoverPlan, candidate providerPoolCandidate) (*currentInstanceCleanup, error) {
 	address := strings.TrimSpace(r.task.CurrentAddress)
 	if address == "" {
@@ -3575,6 +3707,19 @@ func (r *executionRunner) resolveCurrentInstanceCleanupByAddress(ctx context.Con
 			return nil, err
 		}
 		cleanup, err := resolveLinodeCurrentInstanceCleanupForToken(ctx, r.task.UserID, address, addition, token, candidate.EntryID, candidate.EntryName)
+		if err != nil {
+			return nil, err
+		}
+		if cleanup != nil {
+			return cleanup, nil
+		}
+		return nil, nil
+	case "vultr":
+		addition, token, err := loadVultrToken(r.task.UserID, candidate.EntryID)
+		if err != nil {
+			return nil, err
+		}
+		cleanup, err := resolveVultrCurrentInstanceCleanupForToken(ctx, r.task.UserID, address, addition, token, candidate.EntryID, candidate.EntryName)
 		if err != nil {
 			return nil, err
 		}
@@ -3832,6 +3977,48 @@ func resolveCurrentInstanceCleanupFromRef(ctx context.Context, userUUID string, 
 				return nil
 			},
 		}, nil
+	case "vultr":
+		instanceID := strings.TrimSpace(stringMapValue(ref, "instance_id"))
+		if instanceID == "" {
+			return nil, nil
+		}
+		resolvedRef := resolvedCurrentInstanceRef(ref, "vultr", entryID)
+		addition, token, err := loadVultrToken(userUUID, entryID)
+		if err != nil {
+			if isCurrentInstanceCredentialMissingError("vultr", err) {
+				return providerEntryMissingCurrentInstanceCleanup(ref, "vultr", entryID, "delete vultr instance "+instanceID), nil
+			}
+			return nil, err
+		}
+		client, err := vultrcloud.NewClientFromToken(token.Token)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := client.GetInstance(contextOrBackground(ctx), instanceID); err != nil {
+			if isVultrNotFoundError(err) {
+				return instanceMissingCurrentInstanceCleanup(ref, "vultr", entryID, "delete vultr instance "+instanceID), nil
+			}
+			err = normalizeExecutionStopError(err)
+			if errors.Is(err, errExecutionStopped) {
+				return nil, err
+			}
+			return providerEntryQueryCurrentInstanceCleanup(ref, "vultr", entryID, "delete vultr instance "+instanceID, err), nil
+		}
+		return &currentInstanceCleanup{
+			Ref:   resolvedRef,
+			Label: "delete vultr instance " + instanceID,
+			Cleanup: func(ctx context.Context) error {
+				if err := client.DeleteInstance(contextOrBackground(ctx), instanceID); err != nil {
+					if isVultrNotFoundError(err) {
+						removeSavedVultrRootPassword(userUUID, addition, token, instanceID)
+						return nil
+					}
+					return normalizeExecutionStopError(err)
+				}
+				removeSavedVultrRootPassword(userUUID, addition, token, instanceID)
+				return nil
+			},
+		}, nil
 	case "azure":
 		instanceID := strings.TrimSpace(stringMapValue(ref, "instance_id"))
 		resourceGroup := strings.TrimSpace(stringMapValue(ref, "resource_group"))
@@ -4052,6 +4239,26 @@ func resolveCurrentInstanceCleanupByRefAddress(ctx context.Context, userUUID str
 			return cleanup, nil
 		}
 		return instanceMissingCurrentInstanceCleanup(ref, "linode", entryID, label), nil
+	case "vultr":
+		addition, token, err := loadVultrToken(userUUID, entryID)
+		if err != nil {
+			if isCurrentInstanceCredentialMissingError("vultr", err) {
+				return providerEntryMissingCurrentInstanceCleanup(ref, "vultr", entryID, label), nil
+			}
+			return nil, err
+		}
+		cleanup, err := resolveVultrCurrentInstanceCleanupForToken(ctx, userUUID, address, addition, token, entryID, providerEntryNameFromRef(ref))
+		if err != nil {
+			err = normalizeExecutionStopError(err)
+			if errors.Is(err, errExecutionStopped) {
+				return nil, err
+			}
+			return providerEntryQueryCurrentInstanceCleanup(ref, "vultr", entryID, label, err), nil
+		}
+		if cleanup != nil {
+			return cleanup, nil
+		}
+		return instanceMissingCurrentInstanceCleanup(ref, "vultr", entryID, label), nil
 	case "azure":
 		addition, credential, err := loadAzureCredential(userUUID, entryID)
 		if err != nil {
@@ -4627,6 +4834,10 @@ func currentInstanceRunKey(ref map[string]interface{}) string {
 	case "linode":
 		if instanceID := intMapValue(ref, "instance_id"); instanceID > 0 {
 			return fmt.Sprintf("linode|%s|instance|%d", entryID, instanceID)
+		}
+	case "vultr":
+		if instanceID := strings.TrimSpace(stringMapValue(ref, "instance_id")); instanceID != "" {
+			return fmt.Sprintf("vultr|%s|instance|%s", entryID, instanceID)
 		}
 	case "azure":
 		instanceID := strings.TrimSpace(stringMapValue(ref, "instance_id"))
@@ -5789,6 +6000,206 @@ func provisionLinodeInstance(ctx context.Context, userUUID string, plan models.F
 	return outcome, nil
 }
 
+func provisionVultrInstance(ctx context.Context, userUUID string, plan models.FailoverPlan) (*actionOutcome, error) {
+	var payload vultrProvisionPayload
+	if err := json.Unmarshal([]byte(plan.Payload), &payload); err != nil {
+		return nil, fmt.Errorf("invalid vultr provision payload: %w", err)
+	}
+
+	addition, token, err := loadVultrToken(userUUID, plan.ProviderEntryID)
+	if err != nil {
+		return nil, err
+	}
+	client, err := vultrcloud.NewClientFromToken(token.Token)
+	if err != nil {
+		return nil, err
+	}
+
+	label := strings.TrimSpace(payload.Label)
+	if label == "" {
+		label = "failover-vultr-" + strconv.FormatInt(time.Now().Unix(), 10)
+	}
+	hostname := strings.TrimSpace(payload.Hostname)
+	if hostname == "" {
+		hostname = label
+	}
+	userData := strings.TrimSpace(payload.UserData)
+	autoConnectGroup := ""
+	if plan.AutoConnectGroup != "" || planHasScripts(plan) {
+		userData, autoConnectGroup, err = buildAutoConnectUserData(autoConnectOptions{
+			UserUUID:          userUUID,
+			UserData:          userData,
+			Provider:          "vultr",
+			CredentialName:    token.Name,
+			PoolGroup:         resolveAutoConnectPoolGroup(plan, token.Group),
+			Group:             plan.AutoConnectGroup,
+			WrapInShellScript: true,
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	passwordMode := strings.ToLower(strings.TrimSpace(payload.RootPasswordMode))
+	rootPassword := strings.TrimSpace(payload.RootPassword)
+	switch passwordMode {
+	case "", "provider_default":
+		passwordMode = "provider_default"
+		rootPassword = ""
+	case "none":
+		rootPassword = ""
+	case "random":
+		rootPassword, err = vultrcloud.GenerateRandomPassword(20)
+		if err != nil {
+			return nil, err
+		}
+		userData, err = vultrcloud.BuildRootPasswordUserData(rootPassword, userData)
+		if err != nil {
+			return nil, err
+		}
+	case "custom":
+		if rootPassword == "" {
+			return nil, errors.New("vultr root_password cannot be empty when root_password_mode=custom")
+		}
+		userData, err = vultrcloud.BuildRootPasswordUserData(rootPassword, userData)
+		if err != nil {
+			return nil, err
+		}
+	default:
+		return nil, fmt.Errorf("unsupported vultr root_password_mode: %s", payload.RootPasswordMode)
+	}
+
+	backups := ""
+	if payload.BackupsEnabled {
+		backups = "enabled"
+	}
+	request := vultrcloud.CreateInstanceRequest{
+		Label:             label,
+		Hostname:          hostname,
+		Region:            strings.TrimSpace(payload.Region),
+		Plan:              strings.TrimSpace(payload.Plan),
+		OSID:              payload.OSID,
+		SSHKeyIDs:         trimStrings(payload.SSHKeyIDs),
+		EnableIPv6:        payload.EnableIPv6,
+		DisablePublicIPv4: payload.DisablePublicIPv4,
+		Backups:           backups,
+		DDOSProtection:    payload.DDOSProtection,
+		ActivationEmail:   payload.ActivationEmail,
+		Tags:              trimStrings(payload.Tags),
+	}
+	if request.Region == "" {
+		return nil, errors.New("vultr region is required")
+	}
+	if request.Plan == "" {
+		return nil, errors.New("vultr plan is required")
+	}
+	if request.OSID <= 0 {
+		return nil, errors.New("vultr os_id is required")
+	}
+	if userData != "" {
+		request.UserData = vultrcloud.EncodeUserData(userData)
+	}
+
+	instance, err := client.CreateInstance(ctx, request)
+	if err != nil {
+		return nil, normalizeExecutionStopError(err)
+	}
+	instance, err = waitForVultrInstance(ctx, client, instance.ID)
+	if err != nil {
+		return nil, normalizeExecutionStopError(err)
+	}
+
+	passwordToSave := rootPassword
+	if passwordToSave == "" && passwordMode == "provider_default" && instance != nil {
+		passwordToSave = strings.TrimSpace(instance.DefaultPassword)
+	}
+	passwordSaveErr := persistVultrRootPassword(userUUID, addition, token, instance.ID, instance.Label, passwordMode, passwordToSave)
+	cleanupLabel := "delete failed vultr instance " + instance.ID
+	cleanupProvisionedInstance := func(runCtx context.Context) error {
+		if cleanupErr := client.DeleteInstance(contextOrBackground(runCtx), instance.ID); cleanupErr != nil {
+			if isVultrNotFoundError(cleanupErr) {
+				removeSavedVultrRootPassword(userUUID, addition, token, instance.ID)
+				return nil
+			}
+			return normalizeExecutionStopError(cleanupErr)
+		}
+		removeSavedVultrRootPassword(userUUID, addition, token, instance.ID)
+		return nil
+	}
+	if passwordToSave != "" && passwordSaveErr != nil {
+		cleanupErr := cleanupProvisionedInstance(contextOrBackground(ctx))
+		if cleanupErr != nil {
+			return nil, &provisionCleanupError{
+				Provider:     "vultr",
+				ResourceType: "instance",
+				ResourceID:   instance.ID,
+				CleanupLabel: cleanupLabel,
+				CleanupError: cleanupErr,
+				Cause:        passwordSaveErr,
+			}
+		}
+		return nil, &provisionCleanupError{
+			Provider:     "vultr",
+			ResourceType: "instance",
+			ResourceID:   instance.ID,
+			CleanupLabel: cleanupLabel,
+			Cause:        passwordSaveErr,
+		}
+	}
+
+	newInstanceRef := map[string]interface{}{
+		"provider":            "vultr",
+		"provider_entry_id":   token.ID,
+		"provider_entry_name": token.Name,
+		"region":              instance.Region,
+		"instance_id":         instance.ID,
+		"label":               instance.Label,
+	}
+	if passwordToSave != "" {
+		newInstanceRef["root_password_mode"] = passwordMode
+		newInstanceRef["root_password_saved"] = passwordSaveErr == nil
+		if passwordSaveErr != nil {
+			newInstanceRef["root_password_save_error"] = passwordSaveErr.Error()
+		}
+	}
+	outcome := &actionOutcome{
+		IPv4:             vultrPublicIPv4(instance),
+		IPv6:             vultrPublicIPv6(instance),
+		AutoConnectGroup: autoConnectGroup,
+		NewInstanceRef:   newInstanceRef,
+		NewAddresses: map[string]interface{}{
+			"main_ip":       instance.MainIP,
+			"v6_main_ip":    instance.V6MainIP,
+			"internal_ip":   instance.InternalIP,
+			"status":        instance.Status,
+			"server_status": instance.ServerStatus,
+		},
+		RollbackLabel: cleanupLabel,
+		Rollback:      cleanupProvisionedInstance,
+	}
+	if cleanupInstanceID := strings.TrimSpace(payload.CleanupInstanceID); cleanupInstanceID != "" {
+		outcome.OldInstanceRef = map[string]interface{}{
+			"provider":            "vultr",
+			"provider_entry_id":   token.ID,
+			"provider_entry_name": token.Name,
+			"instance_id":         cleanupInstanceID,
+		}
+		outcome.CleanupLabel = "delete vultr instance " + cleanupInstanceID
+		outcome.Cleanup = func(ctx context.Context) error {
+			if err := client.DeleteInstance(contextOrBackground(ctx), cleanupInstanceID); err != nil {
+				if isVultrNotFoundError(err) {
+					removeSavedVultrRootPassword(userUUID, addition, token, cleanupInstanceID)
+					return nil
+				}
+				return normalizeExecutionStopError(err)
+			}
+			removeSavedVultrRootPassword(userUUID, addition, token, cleanupInstanceID)
+			return nil
+		}
+	}
+	return outcome, nil
+}
+
 func rebindAWSIPAddress(ctx context.Context, task models.FailoverTask, plan models.FailoverPlan) (*actionOutcome, error) {
 	var payload awsRebindPayload
 	if err := json.Unmarshal([]byte(plan.Payload), &payload); err != nil {
@@ -5996,6 +6407,43 @@ func waitForLinodeInstance(ctx context.Context, client *linodecloud.Client, inst
 	}
 	instance, err := client.GetInstance(ctx, instanceID)
 	return instance, normalizeExecutionStopError(err)
+}
+
+func waitForVultrInstance(ctx context.Context, client *vultrcloud.Client, instanceID string) (*vultrcloud.Instance, error) {
+	deadline := time.Now().Add(5 * time.Minute)
+	for time.Now().Before(deadline) {
+		if err := waitContextOrDelay(ctx, 0); err != nil {
+			return nil, err
+		}
+		instance, err := client.GetInstance(ctx, instanceID)
+		if err != nil {
+			if normalizedErr := normalizeExecutionStopError(err); errors.Is(normalizedErr, errExecutionStopped) {
+				return nil, normalizedErr
+			}
+		}
+		if err == nil && instance != nil && vultrPublicIPv4(instance) != "" {
+			return instance, nil
+		}
+		if err := waitContextOrDelay(ctx, 5*time.Second); err != nil {
+			return nil, err
+		}
+	}
+	instance, err := client.GetInstance(ctx, instanceID)
+	return instance, normalizeExecutionStopError(err)
+}
+
+func vultrPublicIPv4(instance *vultrcloud.Instance) string {
+	if instance == nil {
+		return ""
+	}
+	return normalizeIPAddress(instance.MainIP)
+}
+
+func vultrPublicIPv6(instance *vultrcloud.Instance) string {
+	if instance == nil {
+		return ""
+	}
+	return normalizeIPAddress(instance.V6MainIP)
 }
 
 func digitalOceanPublicIPv4(droplet *digitalocean.Droplet) string {

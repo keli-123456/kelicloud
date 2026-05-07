@@ -7,4 +7,5 @@ import (
 	_ "github.com/komari-monitor/komari/utils/cloudprovider/cloudflare"
 	_ "github.com/komari-monitor/komari/utils/cloudprovider/digitalocean"
 	_ "github.com/komari-monitor/komari/utils/cloudprovider/linode"
+	_ "github.com/komari-monitor/komari/utils/cloudprovider/vultr"
 )

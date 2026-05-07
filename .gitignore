@@ -46,3 +46,5 @@ public/frontend/
 utils/cloudflared/data/
 utils/cloudprovider/digitalocean/data/
 utils/cloudprovider/aws/data/
+utils/cloudprovider/azure/data/
+utils/cloudprovider/vultr/data/

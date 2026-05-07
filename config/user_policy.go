@@ -34,6 +34,7 @@ const (
 	UserFeatureCloud             = "cloud"
 	UserFeatureCloudDigitalOcean = "cloud_digitalocean"
 	UserFeatureCloudLinode       = "cloud_linode"
+	UserFeatureCloudVultr        = "cloud_vultr"
 	UserFeatureCloudAzure        = "cloud_azure"
 	UserFeatureCloudAWS          = "cloud_aws"
 	UserFeatureCloudDNS          = "cloud_dns"
@@ -51,6 +52,7 @@ var userFeatureDefaultAllowSet = map[string]struct{}{
 	UserFeatureNotifications:     {},
 	UserFeatureCloudDigitalOcean: {},
 	UserFeatureCloudLinode:       {},
+	UserFeatureCloudVultr:        {},
 	UserFeatureCloudAzure:        {},
 	UserFeatureCloudAWS:          {},
 	UserFeatureCloudDNS:          {},
@@ -72,6 +74,7 @@ var userFeatureSet = map[string]struct{}{
 	UserFeatureCloud:             {},
 	UserFeatureCloudDigitalOcean: {},
 	UserFeatureCloudLinode:       {},
+	UserFeatureCloudVultr:        {},
 	UserFeatureCloudAzure:        {},
 	UserFeatureCloudAWS:          {},
 	UserFeatureCloudDNS:          {},
@@ -89,6 +92,7 @@ var userVisibleFeatureSet = map[string]struct{}{
 	UserFeatureNotifications:     {},
 	UserFeatureCloudDigitalOcean: {},
 	UserFeatureCloudLinode:       {},
+	UserFeatureCloudVultr:        {},
 	UserFeatureCloudAzure:        {},
 	UserFeatureCloudAWS:          {},
 	UserFeatureCloudDNS:          {},
@@ -102,6 +106,7 @@ var legacyFeatureAliases = map[string][]string{
 	UserFeatureCloud: {
 		UserFeatureCloudDigitalOcean,
 		UserFeatureCloudLinode,
+		UserFeatureCloudVultr,
 		UserFeatureCloudAzure,
 		UserFeatureCloudAWS,
 		UserFeatureCloudDNS,
