@@ -148,27 +148,23 @@ func applyBinding(binding models.ClientDDNSBinding, ipv4, ipv6 string) ([]failov
 
 	switch mode {
 	case models.ClientDDNSAddressModeIPv4:
-		result, err := applyDNSRecordFunc(binding.UserID, binding.Provider, binding.EntryID, payloadWithRecordType(binding.Payload, "A"), ipv4, "")
+		result, err := applyDNSRecordFunc(binding.UserID, binding.Provider, binding.EntryID, payloadWithRecordOptions(binding.Payload, "A", false), ipv4, "")
 		if err != nil {
 			return nil, err
 		}
 		results = append(results, *result)
 	case models.ClientDDNSAddressModeIPv6:
-		result, err := applyDNSRecordFunc(binding.UserID, binding.Provider, binding.EntryID, payloadWithRecordType(binding.Payload, "AAAA"), "", ipv6)
+		result, err := applyDNSRecordFunc(binding.UserID, binding.Provider, binding.EntryID, payloadWithRecordOptions(binding.Payload, "AAAA", false), "", ipv6)
 		if err != nil {
 			return nil, err
 		}
 		results = append(results, *result)
 	case models.ClientDDNSAddressModeDual:
-		aResult, err := applyDNSRecordFunc(binding.UserID, binding.Provider, binding.EntryID, payloadWithRecordType(binding.Payload, "A"), ipv4, "")
+		result, err := applyDNSRecordFunc(binding.UserID, binding.Provider, binding.EntryID, payloadWithRecordOptions(binding.Payload, "A", true), ipv4, ipv6)
 		if err != nil {
 			return nil, err
 		}
-		aaaaResult, err := applyDNSRecordFunc(binding.UserID, binding.Provider, binding.EntryID, payloadWithRecordType(binding.Payload, "AAAA"), "", ipv6)
-		if err != nil {
-			return nil, err
-		}
-		results = append(results, *aResult, *aaaaResult)
+		results = append(results, *result)
 	default:
 		return nil, fmt.Errorf("unsupported ddns address mode: %s", binding.AddressMode)
 	}
@@ -177,6 +173,10 @@ func applyBinding(binding models.ClientDDNSBinding, ipv4, ipv6 string) ([]failov
 }
 
 func payloadWithRecordType(payloadJSON, recordType string) string {
+	return payloadWithRecordOptions(payloadJSON, recordType, false)
+}
+
+func payloadWithRecordOptions(payloadJSON, recordType string, syncIPv6 bool) string {
 	recordType = strings.ToUpper(strings.TrimSpace(recordType))
 	if recordType == "" {
 		recordType = "A"
@@ -192,6 +192,11 @@ func payloadWithRecordType(payloadJSON, recordType string) string {
 		object = map[string]interface{}{}
 	}
 	object["record_type"] = recordType
+	if syncIPv6 {
+		object["sync_ipv6"] = true
+	} else {
+		delete(object, "sync_ipv6")
+	}
 
 	encoded, err := json.Marshal(object)
 	if err != nil {
