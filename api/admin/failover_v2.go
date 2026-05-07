@@ -1072,15 +1072,23 @@ func validateFailoverV2MemberRequest(scope ownerScope, service *models.FailoverV
 
 	watchClientUUID := strings.TrimSpace(req.WatchClientUUID)
 	var client *models.Client
-	if watchClientUUID != "" {
+	loadWatchClient := func(required bool) error {
+		if watchClientUUID == "" {
+			return nil
+		}
 		loadedClient, err := clientdb.GetClientByUUIDForUser(watchClientUUID, scope.UserUUID)
 		if err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return nil, fmt.Errorf("watch client not found")
+				if required {
+					return fmt.Errorf("watch client not found")
+				}
+				watchClientUUID = ""
+				return nil
 			}
-			return nil, err
+			return err
 		}
 		client = &loadedClient
+		return nil
 	}
 
 	name := strings.TrimSpace(req.Name)
@@ -1103,9 +1111,6 @@ func validateFailoverV2MemberRequest(scope ownerScope, service *models.FailoverV
 	}
 
 	currentAddress := strings.TrimSpace(req.CurrentAddress)
-	if currentAddress == "" && client != nil {
-		currentAddress = strings.TrimSpace(firstNonEmpty(client.IPv4, client.IPv6))
-	}
 
 	if req.CooldownSeconds < 0 {
 		return nil, fmt.Errorf("cooldown_seconds must be greater than or equal to 0")
@@ -1120,6 +1125,9 @@ func validateFailoverV2MemberRequest(scope ownerScope, service *models.FailoverV
 	case models.FailoverV2MemberModeExistingClient:
 		if watchClientUUID == "" {
 			return nil, fmt.Errorf("watch_client_uuid is required for existing_client mode")
+		}
+		if err := loadWatchClient(true); err != nil {
+			return nil, err
 		}
 	case models.FailoverV2MemberModeProviderTemplate:
 		provider = strings.ToLower(strings.TrimSpace(req.Provider))
@@ -1136,6 +1144,14 @@ func validateFailoverV2MemberRequest(scope ownerScope, service *models.FailoverV
 		providerEntryGroup = failoverv2svc.NormalizeProviderEntryGroup(req.ProviderEntryGroup)
 		if err := validateFailoverProviderSelectionForScope(scope, provider, providerEntryID, providerEntryGroup); err != nil {
 			return nil, err
+		}
+
+		originalWatchClientUUID := watchClientUUID
+		if err := loadWatchClient(false); err != nil {
+			return nil, err
+		}
+		if originalWatchClientUUID != "" && watchClientUUID == "" {
+			currentAddress = ""
 		}
 
 		planPayload, err = normalizeJSONPayload(req.PlanPayload, "{}")
@@ -1164,6 +1180,10 @@ func validateFailoverV2MemberRequest(scope ownerScope, service *models.FailoverV
 				return nil, err
 			}
 		}
+	}
+
+	if currentAddress == "" && client != nil {
+		currentAddress = strings.TrimSpace(firstNonEmpty(client.IPv4, client.IPv6))
 	}
 
 	lines := make([]models.FailoverV2MemberLine, 0, len(dnsLines))

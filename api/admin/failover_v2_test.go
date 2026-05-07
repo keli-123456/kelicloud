@@ -430,6 +430,50 @@ func TestValidateFailoverV2MemberAllowsUninitializedMember(t *testing.T) {
 	}
 }
 
+func TestValidateFailoverV2MemberClearsMissingProviderTemplateWatchClient(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := setupFailoverV2APITestDB(t)
+	seedFailoverV2ValidationProviders(t, db)
+
+	req := testFailoverV2MemberValidationRequest()
+	req.Mode = models.FailoverV2MemberModeProviderTemplate
+	req.WatchClientUUID = "deleted-client"
+	req.CurrentAddress = "203.0.113.10"
+
+	member, err := validateFailoverV2MemberRequest(ownerScope{UserUUID: "user-a"}, &models.FailoverV2Service{
+		ID:     1,
+		UserID: "user-a",
+		Name:   "edge",
+	}, &req)
+	if err != nil {
+		t.Fatalf("expected provider template member to tolerate a missing runtime watch client: %v", err)
+	}
+	if member.WatchClientUUID != "" {
+		t.Fatalf("expected missing provider-template watch client to be cleared, got %q", member.WatchClientUUID)
+	}
+	if member.CurrentAddress != "" {
+		t.Fatalf("expected stale provider-template current address to be cleared, got %q", member.CurrentAddress)
+	}
+}
+
+func TestValidateFailoverV2MemberRejectsMissingExistingClientWatchClient(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	_ = setupFailoverV2APITestDB(t)
+
+	req := testFailoverV2MemberValidationRequest()
+	req.Mode = models.FailoverV2MemberModeExistingClient
+	req.WatchClientUUID = "deleted-client"
+
+	_, err := validateFailoverV2MemberRequest(ownerScope{UserUUID: "user-a"}, &models.FailoverV2Service{
+		ID:     1,
+		UserID: "user-a",
+		Name:   "edge",
+	}, &req)
+	if err == nil || !strings.Contains(err.Error(), "watch client not found") {
+		t.Fatalf("expected existing-client mode to reject a missing watch client, got %v", err)
+	}
+}
+
 func TestValidateFailoverV2MemberAllowsSharedDNSLineAcrossMembers(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	db := setupFailoverV2APITestDB(t)
