@@ -11,19 +11,19 @@ import (
 
 var (
 	publicExactPaths = map[string]struct{}{
-		"/ping":               {},
-		"/api/login":          {},
-		"/api/me":             {},
-		"/api/oauth":          {},
-		"/api/oauth_callback": {},
-		"/api/logout":         {},
-		"/api/version":        {},
-		"/api/public":         {},
+		"/ping":        {},
+		"/api/login":   {},
+		"/api/me":      {},
+		"/api/logout":  {},
+		"/api/version": {},
+		"/api/public":  {},
 	}
 	publicPrefixPaths = []string{
 		"/api/admin",    // 由AdminAuthMiddleware处理
 		"/api/clients/", // 由TokenAuthMiddleware处理
 		"/api/public/cloud/shares/",
+		"/api/public/failover/shares/",
+		"/api/public/failover-v2/shares/",
 	}
 )
 

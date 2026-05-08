@@ -36,8 +36,6 @@ func Static(r *gin.RouterGroup, noRoute func(handlers ...gin.HandlerFunc)) {
 	getConfig := func(c *gin.Context) map[string]any {
 		cfg, _ := config.GetMany(map[string]any{
 			config.DescriptionKey: "A simple server monitor tool.",
-			config.CustomHeadKey:  "",
-			config.CustomBodyKey:  "",
 			config.SitenameKey:    "Komari Monitor",
 		})
 		return cfg
@@ -93,8 +91,6 @@ func Static(r *gin.RouterGroup, noRoute func(handlers ...gin.HandlerFunc)) {
 		replacer := strings.NewReplacer(
 			"<title>Komari Monitor</title>", "<title>"+cfg[config.SitenameKey].(string)+"</title>",
 			"A simple server monitor tool.", cfg[config.DescriptionKey].(string),
-			"</head>", cfg[config.CustomHeadKey].(string)+"</head>",
-			"</body>", cfg[config.CustomBodyKey].(string)+"</body>",
 		)
 
 		c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(replacer.Replace(htmlStr)))

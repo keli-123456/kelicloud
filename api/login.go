@@ -5,7 +5,6 @@ import (
 	"io"
 	"net/http"
 
-	"github.com/komari-monitor/komari/config"
 	"github.com/komari-monitor/komari/database/accounts"
 	"github.com/komari-monitor/komari/database/auditlog"
 
@@ -21,12 +20,6 @@ type LoginRequest struct {
 const maxLoginRequestBodyBytes = 16 * 1024
 
 func Login(c *gin.Context) {
-	DisablePasswordLogin, _ := config.GetAs[bool](config.DisablePasswordLoginKey, false)
-	if DisablePasswordLogin {
-		RespondError(c, http.StatusForbidden, "Password login is disabled")
-		return
-	}
-
 	bodyBytes, err := io.ReadAll(io.LimitReader(c.Request.Body, maxLoginRequestBodyBytes+1))
 	if err != nil {
 		RespondError(c, http.StatusBadRequest, "Invalid request body: "+err.Error())

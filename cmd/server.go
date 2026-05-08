@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"context"
-	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -47,7 +46,6 @@ import (
 	logutil "github.com/komari-monitor/komari/utils/log"
 	"github.com/komari-monitor/komari/utils/messageSender"
 	"github.com/komari-monitor/komari/utils/notifier"
-	"github.com/komari-monitor/komari/utils/oauth"
 	"github.com/komari-monitor/komari/utils/offlinecleanup"
 	"github.com/spf13/cobra"
 )
@@ -88,44 +86,6 @@ func RunServer() {
 	go geoip.InitGeoIp()
 	go DoScheduledWork()
 	messageSender.Initialize()
-	if err := oauth.Initialize(); err != nil {
-		log.Printf("Failed to initialize OIDC provider: %v", err)
-		auditlog.EventLog("error", fmt.Sprintf("Failed to initialize OIDC provider: %v", err))
-	}
-
-	if conf.NezhaCompatEnabled {
-		go func() {
-			if err := StartNezhaCompat(conf.NezhaCompatListen); err != nil {
-				log.Printf("Nezha compat server error: %v", err)
-				auditlog.EventLog("error", fmt.Sprintf("Nezha compat server error: %v", err))
-			}
-		}()
-	}
-
-	config.Subscribe(func(event config.ConfigEvent) {
-		if event.IsChanged(config.OAuthProviderKey) {
-			if err := oauth.Initialize(); err != nil {
-				log.Printf("Failed to reload OIDC provider: %v", err)
-				auditlog.EventLog("error", fmt.Sprintf("Failed to reload OIDC provider: %v", err))
-			}
-		}
-
-		if ok, t := config.IsChangedT[bool](event, config.NezhaCompatEnabledKey); ok {
-			if t {
-				l, _ := config.GetAs[string](config.NezhaCompatListenKey)
-				if err := StartNezhaCompat(l); err != nil {
-					log.Printf("start Nezha compat server error: %v", err)
-					auditlog.EventLog("error", fmt.Sprintf("start Nezha compat server error: %v", err))
-				}
-			} else {
-				if err := StopNezhaCompat(); err != nil {
-					log.Printf("stop Nezha compat server error: %v", err)
-					auditlog.EventLog("error", fmt.Sprintf("stop Nezha compat server error: %v", err))
-				}
-			}
-		}
-
-	})
 	// 初始化 cloudflared
 	if strings.ToLower(GetEnv("KOMARI_ENABLE_CLOUDFLARED", "false")) == "true" {
 		err := cloudflared.RunCloudflared() // 阻塞，确保cloudflared跑起来
@@ -184,8 +144,8 @@ func RunServer() {
 	r.GET("/api/nodes", api.GetNodesInformation)
 	r.GET("/api/public", api.GetPublicSettings)
 	r.GET("/api/public/cloud/shares/:token", api.GetPublicCloudInstanceShare)
-	r.GET("/api/oauth", api.OAuth)
-	r.GET("/api/oauth_callback", api.OAuthCallback)
+	r.GET("/api/public/failover/shares/:token", api.GetPublicFailoverShare)
+	r.GET("/api/public/failover-v2/shares/:token", api.GetPublicFailoverV2Share)
 	r.GET("/api/logout", api.Logout)
 	r.GET("/api/version", api.GetVersion)
 	r.GET("/api/recent/:uuid", api.GetClientRecentRecords)
@@ -245,8 +205,6 @@ func RunServer() {
 			settingsGroup.GET("/system", admin.RequirePlatformAdminMiddleware(), admin.GetSystemSettings)
 			settingsGroup.POST("/system", admin.RequirePlatformAdminMiddleware(), admin.EditSystemSettings)
 			settingsGroup.POST("/proxy/test", admin.RequirePlatformAdminMiddleware(), admin.TestOutboundProxy)
-			settingsGroup.POST("/oidc", admin.RequirePlatformAdminMiddleware(), admin.SetOidcProvider)
-			settingsGroup.GET("/oidc", admin.RequirePlatformAdminMiddleware(), admin.GetOidcProvider)
 			settingsGroup.POST("/message-sender", admin.RequirePlatformAdminMiddleware(), admin.SetMessageSenderProvider)
 			settingsGroup.GET("/message-sender", admin.RequirePlatformAdminMiddleware(), admin.GetMessageSenderProvider)
 		}
@@ -423,12 +381,6 @@ func RunServer() {
 			recordGroup.POST("/clear", admin.ClearRecord)
 			recordGroup.POST("/clear/all", admin.ClearAllRecords)
 		}
-		// oauth2
-		oauth2Group := adminAuthrized.Group("/oauth2")
-		{
-			oauth2Group.GET("/bind", admin.BindingExternalAccount)
-			oauth2Group.POST("/unbind", admin.UnbindExternalAccount)
-		}
 		sessionGroup := adminAuthrized.Group("/session")
 		{
 			sessionGroup.GET("/get", admin.GetSessions)
@@ -491,6 +443,9 @@ func RunServer() {
 			failoverGroup.POST("/tasks", admin.CreateFailoverTask)
 			failoverGroup.POST("/tasks/preview", admin.PreviewFailoverTask)
 			failoverGroup.GET("/tasks/:id", admin.GetFailoverTask)
+			failoverGroup.GET("/tasks/:id/share", admin.GetFailoverShare)
+			failoverGroup.POST("/tasks/:id/share", admin.UpsertFailoverShare)
+			failoverGroup.DELETE("/tasks/:id/share", admin.DeleteFailoverShare)
 			failoverGroup.POST("/tasks/:id", admin.UpdateFailoverTask)
 			failoverGroup.POST("/tasks/:id/toggle", admin.ToggleFailoverTask)
 			failoverGroup.POST("/tasks/:id/remove", admin.DeleteFailoverTask)
@@ -513,6 +468,9 @@ func RunServer() {
 			failoverV2Group.POST("/services/validate", admin.ValidateFailoverV2Service)
 			failoverV2Group.POST("/services", admin.CreateFailoverV2Service)
 			failoverV2Group.GET("/services/:id", admin.GetFailoverV2Service)
+			failoverV2Group.GET("/services/:id/share", admin.GetFailoverV2Share)
+			failoverV2Group.POST("/services/:id/share", admin.UpsertFailoverV2Share)
+			failoverV2Group.DELETE("/services/:id/share", admin.DeleteFailoverV2Share)
 			failoverV2Group.GET("/services/:id/executions", admin.GetFailoverV2Executions)
 			failoverV2Group.GET("/services/:id/executions/:execution_id", admin.GetFailoverV2Execution)
 			failoverV2Group.GET("/services/:id/pending-cleanups", admin.GetFailoverV2PendingCleanups)
@@ -579,13 +537,32 @@ func InitDatabase() {
 	// 	log.Printf("环境变量配置: [KOMARI_DB_TYPE=%s] [KOMARI_DB_FILE=%s]",
 	// 		os.Getenv("KOMARI_DB_TYPE"), os.Getenv("KOMARI_DB_FILE"))
 	// }
+	db := dbcore.GetDBInstance()
 	var count int64 = 0
-	if dbcore.GetDBInstance().Model(&models.User{}).Count(&count); count == 0 {
+	if db.Model(&models.User{}).Count(&count); count == 0 {
 		user, passwd, err := accounts.CreateDefaultAdminAccount()
 		if err != nil {
 			panic(err)
 		}
 		log.Println("Default admin account created. Username:", user, ", Password:", passwd)
+	}
+	adminUUID, err := accounts.GetPreferredAdminUserUUID()
+	if err != nil {
+		log.Printf("Failed to resolve default admin owner for legacy data backfill: %v", err)
+		return
+	}
+	summary, err := accounts.BackfillLegacyUserScopedData(adminUUID)
+	if err != nil {
+		log.Printf("Failed to backfill legacy user-scoped data: %v", err)
+		return
+	}
+	if summary.TotalUpdated() > 0 || summary.TotalSkipped() > 0 {
+		log.Printf(
+			"Backfilled legacy user-scoped data to admin %s: updated=%v skipped=%v",
+			adminUUID,
+			summary.Updated,
+			summary.Skipped,
+		)
 	}
 }
 

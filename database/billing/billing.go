@@ -273,7 +273,7 @@ func EnsureDefaultBillingRecords() error {
 			{
 				Code:         "ops",
 				Name:         "Ops",
-				Description:  "适合日常运维场景，开放脚本执行、通知和延迟检测。",
+				Description:  "适合日常运维场景，开放脚本执行、通知和审计日志。",
 				PriceCents:   2900,
 				Currency:     "CNY",
 				DurationDays: 30,
@@ -282,7 +282,6 @@ func EnsureDefaultBillingRecords() error {
 					"clients",
 					"records",
 					"tasks",
-					"ping",
 					"notifications",
 					"clipboard",
 					"logs",

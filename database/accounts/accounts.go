@@ -248,49 +248,6 @@ func GetUserByUsername(username string) (user models.User, err error) {
 	return user, nil
 }
 
-// 通过 SSO 信息获取用户
-func GetUserBySSO(ssoID string) (user models.User, err error) {
-	db := dbcore.GetDBInstance()
-
-	// 首先尝试查找已存在的用户
-	err = db.Where("sso_id = ?", ssoID).First(&user).Error
-	if err == nil {
-		user.Role = NormalizeUserRole(user.Role)
-		return user, nil
-	}
-
-	// 如果找不到用户，返回明确的错误信息
-	return models.User{}, fmt.Errorf("用户不存在：%s", ssoID)
-}
-
-func BindingExternalAccount(uuid string, sso_id string) error {
-	db := dbcore.GetDBInstance()
-	err := db.Model(&models.User{}).Where("uuid = ?", uuid).Update("sso_id", sso_id).Error
-	if err != nil {
-		return err
-	}
-	return nil
-}
-
-func UnbindExternalAccount(uuid string) error {
-	db := dbcore.GetDBInstance()
-	err := db.Model(&models.User{}).Where("uuid = ?", uuid).Update("sso_id", "").Error
-	if err != nil {
-		return err
-	}
-	return nil
-}
-
-func HasAnySSOBoundUser() (bool, error) {
-	db := dbcore.GetDBInstance()
-	var total int64
-	err := db.Model(&models.User{}).Where("sso_id <> ''").Count(&total).Error
-	if err != nil {
-		return false, err
-	}
-	return total > 0, nil
-}
-
 func ListUsers() ([]models.User, error) {
 	db := dbcore.GetDBInstance()
 	var users []models.User
@@ -434,6 +391,8 @@ func DeleteUserByUUID(userUUID string) error {
 		cleanupByUserID := []interface{}{
 			&models.CloudProvider{},
 			&models.CloudInstanceShare{},
+			&models.FailoverShare{},
+			&models.FailoverV2Share{},
 			&models.Clipboard{},
 			&models.ClientDDNSBinding{},
 			&models.Log{},
