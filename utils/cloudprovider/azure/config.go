@@ -46,19 +46,29 @@ type CredentialRecord struct {
 }
 
 type CredentialImport struct {
-	ID              string `json:"id,omitempty"`
-	Name            string `json:"name"`
-	Group           string `json:"group,omitempty"`
-	TenantID        string `json:"tenant_id"`
-	ClientID        string `json:"client_id"`
-	ClientSecret    string `json:"client_secret"`
-	SubscriptionID  string `json:"subscription_id"`
-	DefaultLocation string `json:"default_location,omitempty"`
-	Tenant          string `json:"tenant,omitempty"`
-	AppID           string `json:"appId,omitempty"`
-	Password        string `json:"password,omitempty"`
-	LoginUser       string `json:"login_user,omitempty"`
-	LoginPasswd     string `json:"login_passwd,omitempty"`
+	ID                   string `json:"id,omitempty"`
+	Name                 string `json:"name"`
+	Group                string `json:"group,omitempty"`
+	TenantID             string `json:"tenant_id"`
+	TenantIDCamel        string `json:"tenantId,omitempty"`
+	ClientID             string `json:"client_id"`
+	ClientIDCamel        string `json:"clientId,omitempty"`
+	ClientSecret         string `json:"client_secret"`
+	ClientSecretCamel    string `json:"clientSecret,omitempty"`
+	SubscriptionID       string `json:"subscription_id"`
+	SubscriptionIDCamel  string `json:"subscriptionId,omitempty"`
+	Subscription         string `json:"subscription,omitempty"`
+	DefaultLocation      string `json:"default_location,omitempty"`
+	DefaultLocationCamel string `json:"defaultLocation,omitempty"`
+	Tenant               string `json:"tenant,omitempty"`
+	AppID                string `json:"appId,omitempty"`
+	AppIDSnake           string `json:"app_id,omitempty"`
+	Password             string `json:"password,omitempty"`
+	DisplayName          string `json:"displayName,omitempty"`
+	DisplayNameSnake     string `json:"display_name,omitempty"`
+	LoginUser            string `json:"login_user,omitempty"`
+	LoginUserCamel       string `json:"loginUser,omitempty"`
+	LoginPasswd          string `json:"login_passwd,omitempty"`
 }
 
 type CredentialView struct {
@@ -134,8 +144,7 @@ func (a *Addition) Normalize() {
 	if len(a.Credentials) == 0 &&
 		a.TenantID != "" &&
 		a.ClientID != "" &&
-		a.ClientSecret != "" &&
-		a.SubscriptionID != "" {
+		a.ClientSecret != "" {
 		a.Credentials = []CredentialRecord{
 			{
 				ID:              uuid.NewString(),
@@ -171,7 +180,7 @@ func (a *Addition) Normalize() {
 		credential.LastCheckedAt = strings.TrimSpace(credential.LastCheckedAt)
 		credential.InstanceCredentials = normalizeInstanceCredentials(credential.InstanceCredentials)
 
-		if credential.TenantID == "" || credential.ClientID == "" || credential.ClientSecret == "" || credential.SubscriptionID == "" {
+		if credential.TenantID == "" || credential.ClientID == "" || credential.ClientSecret == "" {
 			continue
 		}
 		if credential.ID == "" {
@@ -349,14 +358,15 @@ func (a *Addition) findCredentialForPersistentStateMerge(id, tenantID, clientID,
 	tenantID = strings.TrimSpace(tenantID)
 	clientID = strings.TrimSpace(clientID)
 	subscriptionID = strings.TrimSpace(subscriptionID)
-	if tenantID == "" || clientID == "" || subscriptionID == "" {
+	if tenantID == "" || clientID == "" {
 		return nil
 	}
 
 	for index := range a.Credentials {
+		currentSubscriptionID := strings.TrimSpace(a.Credentials[index].SubscriptionID)
 		if strings.TrimSpace(a.Credentials[index].TenantID) == tenantID &&
 			strings.TrimSpace(a.Credentials[index].ClientID) == clientID &&
-			strings.TrimSpace(a.Credentials[index].SubscriptionID) == subscriptionID {
+			((subscriptionID == "" && currentSubscriptionID == "") || currentSubscriptionID == subscriptionID) {
 			return &a.Credentials[index]
 		}
 	}
@@ -415,19 +425,19 @@ func (a *Addition) UpsertCredentials(inputs []CredentialImport) int {
 
 	count := 0
 	for _, input := range inputs {
-		tenantID := firstNonEmpty(input.TenantID, input.Tenant)
-		clientID := firstNonEmpty(input.ClientID, input.AppID)
-		clientSecret := firstNonEmpty(input.ClientSecret, input.Password)
-		subscriptionID := strings.TrimSpace(input.SubscriptionID)
+		tenantID := firstNonEmpty(input.TenantID, input.TenantIDCamel, input.Tenant)
+		clientID := firstNonEmpty(input.ClientID, input.ClientIDCamel, input.AppID, input.AppIDSnake)
+		clientSecret := firstNonEmpty(input.ClientSecret, input.ClientSecretCamel, input.Password, input.LoginPasswd)
+		subscriptionID := firstNonEmpty(input.SubscriptionID, input.SubscriptionIDCamel, input.Subscription)
 		inputID := strings.TrimSpace(input.ID)
-		hasCredentialValue := tenantID != "" && clientID != "" && clientSecret != "" && subscriptionID != ""
+		hasCredentialValue := tenantID != "" && clientID != "" && clientSecret != ""
 		if !hasCredentialValue && inputID == "" {
 			continue
 		}
 
-		name := firstNonEmpty(input.Name, input.LoginUser)
+		name := firstNonEmpty(input.Name, input.DisplayName, input.DisplayNameSnake, input.LoginUser, input.LoginUserCamel)
 		group := normalizeCredentialGroup(input.Group)
-		defaultLocation := normalizeLocation(input.DefaultLocation)
+		defaultLocation := normalizeLocation(firstNonEmpty(input.DefaultLocation, input.DefaultLocationCamel))
 
 		var matched *CredentialRecord
 		for index := range a.Credentials {
@@ -435,10 +445,7 @@ func (a *Addition) UpsertCredentials(inputs []CredentialImport) int {
 				matched = &a.Credentials[index]
 				break
 			}
-			if hasCredentialValue &&
-				a.Credentials[index].TenantID == tenantID &&
-				a.Credentials[index].ClientID == clientID &&
-				a.Credentials[index].SubscriptionID == subscriptionID {
+			if hasCredentialValue && credentialValuesMatch(a.Credentials[index], tenantID, clientID, subscriptionID) {
 				matched = &a.Credentials[index]
 				break
 			}
@@ -453,7 +460,9 @@ func (a *Addition) UpsertCredentials(inputs []CredentialImport) int {
 				matched.TenantID = tenantID
 				matched.ClientID = clientID
 				matched.ClientSecret = clientSecret
-				matched.SubscriptionID = subscriptionID
+				if subscriptionID != "" || strings.TrimSpace(matched.SubscriptionID) == "" {
+					matched.SubscriptionID = subscriptionID
+				}
 			}
 			if defaultLocation != "" {
 				matched.DefaultLocation = defaultLocation
@@ -483,6 +492,20 @@ func (a *Addition) UpsertCredentials(inputs []CredentialImport) int {
 
 	a.Normalize()
 	return count
+}
+
+func credentialValuesMatch(credential CredentialRecord, tenantID, clientID, subscriptionID string) bool {
+	if strings.TrimSpace(credential.TenantID) != strings.TrimSpace(tenantID) ||
+		strings.TrimSpace(credential.ClientID) != strings.TrimSpace(clientID) {
+		return false
+	}
+
+	currentSubscriptionID := strings.TrimSpace(credential.SubscriptionID)
+	subscriptionID = strings.TrimSpace(subscriptionID)
+	if subscriptionID == "" {
+		return currentSubscriptionID == ""
+	}
+	return currentSubscriptionID == "" || currentSubscriptionID == subscriptionID
 }
 
 func (a *Addition) RemoveCredential(id string) bool {
@@ -585,6 +608,9 @@ func (c *CredentialRecord) SetCheckResult(checkedAt time.Time, subscription *Sub
 	c.LastStatus = CredentialStatusHealthy
 	c.LastError = ""
 	if subscription != nil {
+		if strings.TrimSpace(c.SubscriptionID) == "" && strings.TrimSpace(subscription.SubscriptionID) != "" {
+			c.SubscriptionID = strings.TrimSpace(subscription.SubscriptionID)
+		}
 		if subscription.DisplayName != "" {
 			c.SubscriptionDisplayName = strings.TrimSpace(subscription.DisplayName)
 		}

@@ -366,7 +366,7 @@ func newClient(credential *CredentialRecord, authorityURL, managementURL string)
 	record.SubscriptionID = strings.TrimSpace(record.SubscriptionID)
 	record.DefaultLocation = normalizeLocation(record.DefaultLocation)
 
-	if record.TenantID == "" || record.ClientID == "" || record.ClientSecret == "" || record.SubscriptionID == "" {
+	if record.TenantID == "" || record.ClientID == "" || record.ClientSecret == "" {
 		return nil, errors.New("azure credential is incomplete")
 	}
 
@@ -388,6 +388,10 @@ func newClient(credential *CredentialRecord, authorityURL, managementURL string)
 }
 
 func (c *Client) GetSubscription(ctx context.Context) (*Subscription, error) {
+	if strings.TrimSpace(c.credential.SubscriptionID) == "" {
+		return c.ResolveDefaultSubscription(ctx)
+	}
+
 	var subscription Subscription
 	if err := c.do(ctx, http.MethodGet, fmt.Sprintf("/subscriptions/%s", url.PathEscape(c.credential.SubscriptionID)), url.Values{
 		"api-version": {subscriptionAPIVersion},
@@ -395,6 +399,55 @@ func (c *Client) GetSubscription(ctx context.Context) (*Subscription, error) {
 		return nil, err
 	}
 	return &subscription, nil
+}
+
+func (c *Client) ListSubscriptions(ctx context.Context) ([]Subscription, error) {
+	var subscriptions []Subscription
+	if err := listAll(ctx, c, "/subscriptions", url.Values{
+		"api-version": {subscriptionAPIVersion},
+	}, &subscriptions); err != nil {
+		return nil, err
+	}
+
+	sort.Slice(subscriptions, func(i, j int) bool {
+		leftState := strings.ToLower(strings.TrimSpace(subscriptions[i].State))
+		rightState := strings.ToLower(strings.TrimSpace(subscriptions[j].State))
+		if leftState != rightState {
+			return leftState == "enabled"
+		}
+		leftName := strings.TrimSpace(firstNonEmpty(subscriptions[i].DisplayName, subscriptions[i].SubscriptionID))
+		rightName := strings.TrimSpace(firstNonEmpty(subscriptions[j].DisplayName, subscriptions[j].SubscriptionID))
+		return leftName < rightName
+	})
+
+	return subscriptions, nil
+}
+
+func (c *Client) ResolveDefaultSubscription(ctx context.Context) (*Subscription, error) {
+	subscriptions, err := c.ListSubscriptions(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	for index := range subscriptions {
+		subscriptionID := strings.TrimSpace(subscriptions[index].SubscriptionID)
+		if subscriptionID == "" {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(subscriptions[index].State), "enabled") {
+			c.credential.SubscriptionID = subscriptionID
+			return &subscriptions[index], nil
+		}
+	}
+	for index := range subscriptions {
+		subscriptionID := strings.TrimSpace(subscriptions[index].SubscriptionID)
+		if subscriptionID != "" {
+			c.credential.SubscriptionID = subscriptionID
+			return &subscriptions[index], nil
+		}
+	}
+
+	return nil, errors.New("azure service principal has no accessible subscriptions")
 }
 
 func (c *Client) ListLocations(ctx context.Context) ([]Location, error) {

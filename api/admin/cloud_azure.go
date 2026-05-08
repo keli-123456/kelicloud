@@ -798,12 +798,31 @@ func getAzureActiveCredentialWithTimeout(c *gin.Context, scope ownerScope, timeo
 	if activeCredential == nil {
 		return nil, nil, "", nil, nil, fmt.Errorf("Azure credential is not configured")
 	}
-
-	location := firstNonEmpty(addition.ActiveLocation, activeCredential.DefaultLocation, azurecloud.DefaultLocation)
 	if timeout <= 0 {
 		timeout = 60 * time.Second
 	}
 	ctx, cancel := context.WithTimeout(c.Request.Context(), timeout)
+
+	if strings.TrimSpace(activeCredential.SubscriptionID) == "" {
+		subscription, resolveErr := getAzureSubscriptionSnapshot(ctx, activeCredential)
+		if resolveErr != nil {
+			cancel()
+			return nil, nil, "", nil, nil, resolveErr
+		}
+		activeCredential.SetCheckResult(time.Now().UTC(), subscription, nil)
+		addition.Normalize()
+		if saveErr := saveAzureAdditionPreservingSecrets(scope, addition); saveErr != nil {
+			cancel()
+			return nil, nil, "", nil, nil, fmt.Errorf("Failed to save Azure credential health: %w", saveErr)
+		}
+		activeCredential = addition.ActiveCredential()
+		if activeCredential == nil {
+			cancel()
+			return nil, nil, "", nil, nil, fmt.Errorf("Azure credential is not configured")
+		}
+	}
+
+	location := firstNonEmpty(addition.ActiveLocation, activeCredential.DefaultLocation, azurecloud.DefaultLocation)
 	return addition, activeCredential, location, ctx, cancel, nil
 }
 
