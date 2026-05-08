@@ -856,6 +856,7 @@ func GetDBInstance() *gorm.DB {
 			&models.Log{},
 			&models.Clipboard{},
 			&models.ClientDDNSBinding{},
+			&models.ClientPortForwardRule{},
 			&models.LoadNotification{},
 			&models.OfflineNotification{},
 			&models.PingRecord{},

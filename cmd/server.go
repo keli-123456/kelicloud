@@ -373,6 +373,13 @@ func RunServer() {
 				clientDDNSGroup.POST("/sync", admin.SyncClientDDNSBinding)
 				clientDDNSGroup.GET("/catalog", admin.GetClientDDNSCatalog)
 			}
+			clientPortForwardGroup := clientGroup.Group("/:uuid/port-forward")
+			{
+				clientPortForwardGroup.GET("", admin.GetClientPortForwardRules)
+				clientPortForwardGroup.POST("", admin.SaveClientPortForwardRule)
+				clientPortForwardGroup.POST("/apply", admin.ApplyClientPortForwardRules)
+				clientPortForwardGroup.POST("/:id/remove", admin.DeleteClientPortForwardRule)
+			}
 		}
 
 		// records

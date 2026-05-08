@@ -56,6 +56,7 @@ func backfillLegacyUserScopedDataWithDB(db *gorm.DB, ownerUUID string) (LegacyUs
 		{"aws_follow_up_tasks", &models.AWSFollowUpTask{}},
 		{"clipboards", &models.Clipboard{}},
 		{"client_ddns_bindings", &models.ClientDDNSBinding{}},
+		{"client_port_forward_rules", &models.ClientPortForwardRule{}},
 		{"logs", &models.Log{}},
 		{"load_notifications", &models.LoadNotification{}},
 		{"ping_tasks", &models.PingTask{}},

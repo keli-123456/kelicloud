@@ -395,6 +395,7 @@ func DeleteUserByUUID(userUUID string) error {
 			&models.FailoverV2Share{},
 			&models.Clipboard{},
 			&models.ClientDDNSBinding{},
+			&models.ClientPortForwardRule{},
 			&models.Log{},
 			&models.LoadNotification{},
 			&models.PingTask{},
