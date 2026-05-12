@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/komari-monitor/komari/common"
@@ -21,6 +22,7 @@ const (
 	scheduledExecutionLogCleanupRunInterval   = 24 * time.Hour
 	scheduledExecutionLogCleanupBatchLimit    = 1000
 	scheduledExecutionLogCleanupMaxBatches    = 20
+	scheduledAutomaticExecutionConcurrency    = 4
 )
 
 type scheduledTriggerCandidate struct {
@@ -28,6 +30,8 @@ type scheduledTriggerCandidate struct {
 	report *common.Report
 	reason string
 }
+
+var scheduledAutomaticExecutionSlots = make(chan struct{}, scheduledAutomaticExecutionConcurrency)
 
 func RunScheduledWork() error {
 	now := time.Now()
@@ -47,7 +51,7 @@ func RunScheduledWork() error {
 		log.Printf("failoverv2: pending cleanup retry failed: %v", err)
 	}
 
-	services, err := failoverv2db.ListEnabledServices()
+	services, err := failoverv2db.ListScheduledCheckCandidateServices(now)
 	if err != nil {
 		return err
 	}
@@ -63,13 +67,12 @@ func RunScheduledWork() error {
 		triggers := evaluateServiceHealth(service, latestReports, now)
 		if len(triggers) == 0 {
 			status, message := summarizeServiceHealth(service)
-			if err := failoverv2db.UpdateServiceFieldsForUser(service.UserID, service.ID, map[string]interface{}{
-				"last_status":     status,
-				"last_message":    message,
-				"last_checked_at": checkedAt,
-			}); err != nil {
+			fields := scheduledChangedServiceHealthFields(service, status, message, checkedAt)
+			if err := failoverv2db.UpdateServiceFieldsForUser(service.UserID, service.ID, fields); err != nil {
 				log.Printf("failoverv2: failed to update service %d health: %v", service.ID, err)
 			} else {
+				service.LastStatus = status
+				service.LastMessage = message
 				service.LastCheckedAt = &checkedAt
 			}
 			continue
@@ -90,6 +93,15 @@ func RunScheduledWork() error {
 				strings.TrimSpace(triggerReason),
 			)
 			var execution *models.FailoverV2Execution
+			releaseExecutionSlot, acquired := tryAcquireScheduledAutomaticExecutionSlot()
+			if !acquired {
+				log.Printf(
+					"failoverv2: delayed automatic action for service %d member %d because automatic execution concurrency limit is reached",
+					service.ID,
+					triggerMember.ID,
+				)
+				continue
+			}
 			if memberUsesExistingClient(triggerMember) {
 				execution, err = queueMemberDetachExecution(
 					service.UserID,
@@ -98,6 +110,7 @@ func RunScheduledWork() error {
 					"automatic existing_client protection",
 					buildTriggerSnapshot(triggerReport),
 					startMessage,
+					releaseExecutionSlot,
 				)
 			} else {
 				execution, err = queueMemberProvisioningFailoverExecution(
@@ -107,6 +120,7 @@ func RunScheduledWork() error {
 					triggerReason,
 					buildTriggerSnapshot(triggerReport),
 					startMessage,
+					releaseExecutionSlot,
 				)
 			}
 			if err != nil {
@@ -137,6 +151,20 @@ func RunScheduledWork() error {
 	}
 
 	return nil
+}
+
+func tryAcquireScheduledAutomaticExecutionSlot() (func(), bool) {
+	select {
+	case scheduledAutomaticExecutionSlots <- struct{}{}:
+		var once sync.Once
+		return func() {
+			once.Do(func() {
+				<-scheduledAutomaticExecutionSlots
+			})
+		}, true
+	default:
+		return nil, false
+	}
 }
 
 func runScheduledExecutionLogCleanup(now time.Time) error {
@@ -298,10 +326,12 @@ func evaluateServiceHealth(service *models.FailoverV2Service, latestReports map[
 		report := latestReports[strings.TrimSpace(member.WatchClientUUID)]
 		shouldTrigger, fields, reason := evaluateMemberHealth(member, report, now)
 		if len(fields) > 0 {
-			if err := failoverv2db.UpdateMemberFieldsForUser(service.UserID, service.ID, member.ID, fields); err != nil {
-				log.Printf("failoverv2: failed to update member %d health: %v", member.ID, err)
-			} else {
-				applyScheduledMemberFields(member, fields)
+			changedFields := scheduledChangedMemberFields(member, fields)
+			applyScheduledMemberFields(member, fields)
+			if len(changedFields) > 0 {
+				if err := failoverv2db.UpdateMemberFieldsForUser(service.UserID, service.ID, member.ID, changedFields); err != nil {
+					log.Printf("failoverv2: failed to update member %d health: %v", member.ID, err)
+				}
 			}
 		}
 		if shouldTrigger {
@@ -391,6 +421,50 @@ func evaluateMemberHealth(member *models.FailoverV2Member, report *common.Report
 	return false, fields, ""
 }
 
+func scheduledChangedMemberFields(member *models.FailoverV2Member, fields map[string]interface{}) map[string]interface{} {
+	if member == nil || len(fields) == 0 {
+		return fields
+	}
+	changed := map[string]interface{}{}
+	for key, value := range fields {
+		switch key {
+		case "last_status":
+			if strings.TrimSpace(stringMapValue(fields, key)) != strings.TrimSpace(member.LastStatus) {
+				changed[key] = value
+			}
+		case "last_message":
+			if strings.TrimSpace(stringMapValue(fields, key)) != strings.TrimSpace(member.LastMessage) {
+				changed[key] = value
+			}
+		case "trigger_failure_count":
+			if intMapValue(fields, key) != member.TriggerFailureCount {
+				changed[key] = value
+			}
+		default:
+			changed[key] = value
+		}
+	}
+	return changed
+}
+
+func scheduledChangedServiceHealthFields(service *models.FailoverV2Service, status, message string, checkedAt models.LocalTime) map[string]interface{} {
+	fields := map[string]interface{}{
+		"last_checked_at": checkedAt,
+	}
+	if service == nil {
+		fields["last_status"] = status
+		fields["last_message"] = message
+		return fields
+	}
+	if strings.TrimSpace(status) != strings.TrimSpace(service.LastStatus) {
+		fields["last_status"] = status
+	}
+	if strings.TrimSpace(message) != strings.TrimSpace(service.LastMessage) {
+		fields["last_message"] = message
+	}
+	return fields
+}
+
 func appendCooldownUntilMessage(base string, cooldownUntil time.Time) string {
 	base = strings.TrimSpace(base)
 	if cooldownUntil.IsZero() {
@@ -408,9 +482,10 @@ func appendCooldownUntilMessage(base string, cooldownUntil time.Time) string {
 }
 
 func parseCooldownUntilFromMessage(message string) (time.Time, bool) {
-	message = strings.ToLower(strings.TrimSpace(message))
+	message = strings.TrimSpace(message)
+	lowered := strings.ToLower(message)
 	marker := "cooldown until "
-	idx := strings.Index(message, marker)
+	idx := strings.Index(lowered, marker)
 	if idx < 0 {
 		return time.Time{}, false
 	}

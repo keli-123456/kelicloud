@@ -125,3 +125,72 @@ func TestLoginRejectsOversizedBody(t *testing.T) {
 
 	assert.Equal(t, http.StatusRequestEntityTooLarge, w.Code)
 }
+
+func TestRegisterCreatesUserAndSession(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	configureAPITestDB()
+	resetLoginAttemptsForTest(t)
+
+	router := gin.New()
+	router.POST("/register", Register)
+
+	username := "register-user-session"
+	t.Cleanup(func() {
+		_ = accounts.DeleteAccountByUsername(username)
+		accounts.DeleteAllSessions()
+	})
+
+	jsonBody, _ := json.Marshal(RegisterRequest{
+		Username: username,
+		Password: "correctpassword",
+	})
+	req, _ := http.NewRequest(http.MethodPost, "/register", bytes.NewBuffer(jsonBody))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	router.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.NotEmpty(t, w.Result().Cookies())
+
+	var response map[string]interface{}
+	err := json.Unmarshal(w.Body.Bytes(), &response)
+	assert.NoError(t, err)
+	assert.Equal(t, "success", response["status"])
+
+	user, err := accounts.GetUserByUsername(username)
+	assert.NoError(t, err)
+	assert.Equal(t, accounts.RoleUser, accounts.NormalizeUserRole(user.Role))
+}
+
+func TestRegisterRejectsDuplicateUsername(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	configureAPITestDB()
+
+	username := "register-duplicate-user"
+	_, err := accounts.CreateAccount(username, "correctpassword")
+	assert.NoError(t, err)
+	t.Cleanup(func() {
+		_ = accounts.DeleteAccountByUsername(username)
+		accounts.DeleteAllSessions()
+	})
+
+	router := gin.New()
+	router.POST("/register", Register)
+
+	jsonBody, _ := json.Marshal(RegisterRequest{
+		Username: username,
+		Password: "anotherpassword",
+	})
+	req, _ := http.NewRequest(http.MethodPost, "/register", bytes.NewBuffer(jsonBody))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	router.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusConflict, w.Code)
+	var response map[string]interface{}
+	err = json.Unmarshal(w.Body.Bytes(), &response)
+	assert.NoError(t, err)
+	assert.Equal(t, "Username already exists", response["message"])
+}

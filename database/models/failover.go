@@ -95,7 +95,7 @@ type FailoverTask struct {
 	ID                            uint                `json:"id,omitempty" gorm:"primaryKey;autoIncrement"`
 	UserID                        string              `json:"user_id,omitempty" gorm:"type:varchar(36);index"`
 	Name                          string              `json:"name" gorm:"type:varchar(255);not null;index"`
-	Enabled                       bool                `json:"enabled" gorm:"default:true"`
+	Enabled                       bool                `json:"enabled" gorm:"default:true;index:idx_failover_tasks_scheduler_enabled"`
 	WatchClientUUID               string              `json:"watch_client_uuid" gorm:"type:varchar(36);not null;index"`
 	CurrentAddress                string              `json:"current_address" gorm:"type:varchar(255)"`
 	CurrentInstanceRef            string              `json:"current_instance_ref" gorm:"type:longtext"`

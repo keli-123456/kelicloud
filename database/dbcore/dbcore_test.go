@@ -156,6 +156,28 @@ func TestPrepareFailoverV2MemberSchemaCompatibilityRebuildsLegacyUniqueIndex(t *
 	})
 }
 
+func TestFailoverSchedulerIndexesCreated(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("failed to open sqlite database: %v", err)
+	}
+	if err := db.AutoMigrate(&models.FailoverTask{}, &models.FailoverV2Service{}, &models.FailoverV2Member{}); err != nil {
+		t.Fatalf("failed to migrate failover schema: %v", err)
+	}
+
+	migrator := db.Migrator()
+	assertIndex := func(model interface{}, indexName string) {
+		t.Helper()
+		if !migrator.HasIndex(model, indexName) {
+			t.Fatalf("expected scheduler index %s to exist", indexName)
+		}
+	}
+
+	assertIndex(&models.FailoverTask{}, "idx_failover_tasks_scheduler_enabled")
+	assertIndex(&models.FailoverV2Service{}, "idx_failover_v2_scheduler_due")
+	assertIndex(&models.FailoverV2Member{}, "idx_failover_v2_member_cooldown")
+}
+
 func TestApplyFailoverCooldownDefaultZeroMigration(t *testing.T) {
 	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	if err != nil {

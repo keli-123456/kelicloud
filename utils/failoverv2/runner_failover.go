@@ -138,18 +138,20 @@ func RunMemberFailoverNowForUser(userUUID string, serviceID, memberID uint) (*mo
 	return execution, runErr
 }
 
-func queueMemberFailoverExecution(userUUID string, service *models.FailoverV2Service, member *models.FailoverV2Member, triggerReason, triggerSnapshot, startMessage string) (*models.FailoverV2Execution, error) {
+func queueMemberFailoverExecution(userUUID string, service *models.FailoverV2Service, member *models.FailoverV2Member, triggerReason, triggerSnapshot, startMessage string, onDone ...func()) (*models.FailoverV2Execution, error) {
 	if memberUsesExistingClient(member) {
-		return queueMemberDetachExecution(userUUID, service, member, triggerReason, triggerSnapshot, startMessage)
+		return queueMemberDetachExecution(userUUID, service, member, triggerReason, triggerSnapshot, startMessage, onDone...)
 	}
-	return queueMemberProvisioningFailoverExecution(userUUID, service, member, triggerReason, triggerSnapshot, startMessage)
+	return queueMemberProvisioningFailoverExecution(userUUID, service, member, triggerReason, triggerSnapshot, startMessage, onDone...)
 }
 
-func queueMemberProvisioningFailoverExecution(userUUID string, service *models.FailoverV2Service, member *models.FailoverV2Member, triggerReason, triggerSnapshot, startMessage string) (*models.FailoverV2Execution, error) {
+func queueMemberProvisioningFailoverExecution(userUUID string, service *models.FailoverV2Service, member *models.FailoverV2Member, triggerReason, triggerSnapshot, startMessage string, onDone ...func()) (*models.FailoverV2Execution, error) {
 	if service == nil {
+		releaseMemberExecutionCallbacks(onDone)
 		return nil, errors.New("service is required")
 	}
 	if member == nil {
+		releaseMemberExecutionCallbacks(onDone)
 		return nil, errors.New("member is required")
 	}
 	triggerReason = strings.TrimSpace(triggerReason)
@@ -180,6 +182,7 @@ func queueMemberProvisioningFailoverExecution(userUUID string, service *models.F
 		func(runner *memberExecutionRunner) {
 			runner.runProvisioningFailover()
 		},
+		onDone...,
 	)
 }
 

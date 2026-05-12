@@ -199,6 +199,177 @@ func TestListEnabledServicesWithDBReturnsOnlyEnabledServices(t *testing.T) {
 	}
 }
 
+func TestListScheduledCheckCandidateServicesWithDBLoadsOnlyDueServices(t *testing.T) {
+	db := openFailoverV2TestDB(t)
+	if err := db.AutoMigrate(&models.FailoverV2Service{}, &models.FailoverV2Member{}); err != nil {
+		t.Fatalf("failed to migrate failover v2 schema: %v", err)
+	}
+
+	now := time.Date(2026, time.May, 12, 8, 0, 0, 0, time.UTC)
+	oldCheckedAt := models.FromTime(now.Add(-2 * time.Minute))
+	recentCheckedAt := models.FromTime(now.Add(-30 * time.Second))
+
+	dueService := models.FailoverV2Service{
+		UserID:               "user-a",
+		Name:                 "due-service",
+		Enabled:              true,
+		DNSProvider:          models.FailoverDNSProviderAliyun,
+		DNSEntryID:           "dns-entry-1",
+		DNSPayload:           `{"domain_name":"example.com","rr":"@"}`,
+		CheckIntervalSeconds: 60,
+		LastCheckedAt:        &oldCheckedAt,
+	}
+	recentService := models.FailoverV2Service{
+		UserID:               "user-a",
+		Name:                 "recent-service",
+		Enabled:              true,
+		DNSProvider:          models.FailoverDNSProviderAliyun,
+		DNSEntryID:           "dns-entry-2",
+		DNSPayload:           `{"domain_name":"example.net","rr":"@"}`,
+		CheckIntervalSeconds: 60,
+		LastCheckedAt:        &recentCheckedAt,
+	}
+	disabledService := models.FailoverV2Service{
+		UserID:               "user-a",
+		Name:                 "disabled-service",
+		Enabled:              false,
+		DNSProvider:          models.FailoverDNSProviderAliyun,
+		DNSEntryID:           "dns-entry-3",
+		DNSPayload:           `{"domain_name":"example.org","rr":"@"}`,
+		CheckIntervalSeconds: 60,
+		LastCheckedAt:        &oldCheckedAt,
+	}
+	if err := db.Create(&dueService).Error; err != nil {
+		t.Fatalf("failed to create due service: %v", err)
+	}
+	if err := db.Create(&recentService).Error; err != nil {
+		t.Fatalf("failed to create recent service: %v", err)
+	}
+	if err := db.Create(&disabledService).Error; err != nil {
+		t.Fatalf("failed to create disabled service: %v", err)
+	}
+	if err := db.Model(&models.FailoverV2Service{}).
+		Where("id = ?", disabledService.ID).
+		Update("enabled", false).Error; err != nil {
+		t.Fatalf("failed to persist disabled service state: %v", err)
+	}
+
+	dueMember := models.FailoverV2Member{
+		ServiceID:       dueService.ID,
+		Name:            "due-member",
+		Enabled:         true,
+		Priority:        1,
+		WatchClientUUID: "client-due",
+		DNSLine:         "default",
+		Provider:        "digitalocean",
+		ProviderEntryID: "token-1",
+	}
+	recentMember := models.FailoverV2Member{
+		ServiceID:       recentService.ID,
+		Name:            "recent-member",
+		Enabled:         true,
+		Priority:        1,
+		WatchClientUUID: "client-recent",
+		DNSLine:         "default",
+		Provider:        "digitalocean",
+		ProviderEntryID: "token-1",
+	}
+	disabledMember := models.FailoverV2Member{
+		ServiceID:       disabledService.ID,
+		Name:            "disabled-member",
+		Enabled:         true,
+		Priority:        1,
+		WatchClientUUID: "client-disabled",
+		DNSLine:         "default",
+		Provider:        "digitalocean",
+		ProviderEntryID: "token-1",
+	}
+	if err := db.Create(&[]models.FailoverV2Member{dueMember, recentMember, disabledMember}).Error; err != nil {
+		t.Fatalf("failed to create members: %v", err)
+	}
+
+	var loadedDueMember models.FailoverV2Member
+	if err := db.Where("service_id = ?", dueService.ID).First(&loadedDueMember).Error; err != nil {
+		t.Fatalf("failed to reload due member: %v", err)
+	}
+	if err := db.Create(&models.FailoverV2MemberLine{
+		ServiceID: dueService.ID,
+		MemberID:  loadedDueMember.ID,
+		LineCode:  "default",
+	}).Error; err != nil {
+		t.Fatalf("failed to create due member line: %v", err)
+	}
+
+	services, err := listScheduledCheckCandidateServicesWithDB(db, now)
+	if err != nil {
+		t.Fatalf("failed to list scheduled check candidates: %v", err)
+	}
+	if len(services) != 1 {
+		t.Fatalf("expected one scheduled check candidate, got %d", len(services))
+	}
+	if services[0].ID != dueService.ID {
+		t.Fatalf("expected due service id %d, got %d", dueService.ID, services[0].ID)
+	}
+	if len(services[0].Members) != 1 {
+		t.Fatalf("expected due service members to preload, got %d", len(services[0].Members))
+	}
+	if len(services[0].Members[0].Lines) != 1 {
+		t.Fatalf("expected due service member lines to preload, got %d", len(services[0].Members[0].Lines))
+	}
+}
+
+func TestListScheduledCheckCandidateServicesWithDBIncludesExpiredCooldown(t *testing.T) {
+	db := openFailoverV2TestDB(t)
+	if err := db.AutoMigrate(&models.FailoverV2Service{}, &models.FailoverV2Member{}); err != nil {
+		t.Fatalf("failed to migrate failover v2 schema: %v", err)
+	}
+
+	now := time.Date(2026, time.May, 12, 8, 0, 0, 0, time.UTC)
+	recentCheckedAt := models.FromTime(now.Add(-30 * time.Second))
+	triggeredAt := models.FromTime(now.Add(-2 * time.Minute))
+	service := models.FailoverV2Service{
+		UserID:               "user-a",
+		Name:                 "cooldown-service",
+		Enabled:              true,
+		DNSProvider:          models.FailoverDNSProviderAliyun,
+		DNSEntryID:           "dns-entry-1",
+		DNSPayload:           `{"domain_name":"example.com","rr":"@"}`,
+		CheckIntervalSeconds: 60,
+		LastCheckedAt:        &recentCheckedAt,
+	}
+	if err := db.Create(&service).Error; err != nil {
+		t.Fatalf("failed to create cooldown service: %v", err)
+	}
+	member := models.FailoverV2Member{
+		ServiceID:       service.ID,
+		Name:            "cooldown-member",
+		Enabled:         true,
+		Priority:        1,
+		WatchClientUUID: "client-cooldown",
+		DNSLine:         "default",
+		Provider:        "digitalocean",
+		ProviderEntryID: "token-1",
+		CooldownSeconds: 60,
+		LastStatus:      models.FailoverV2MemberStatusCooldown,
+		LastMessage:     "cooldown until " + now.Add(-time.Minute).UTC().Format(time.RFC3339),
+		LastTriggeredAt: &triggeredAt,
+	}
+	if err := db.Create(&member).Error; err != nil {
+		t.Fatalf("failed to create cooldown member: %v", err)
+	}
+
+	services, err := listScheduledCheckCandidateServicesWithDB(db, now)
+	if err != nil {
+		t.Fatalf("failed to list scheduled check candidates: %v", err)
+	}
+	if len(services) != 1 {
+		t.Fatalf("expected cooldown service candidate, got %d", len(services))
+	}
+	if services[0].ID != service.ID {
+		t.Fatalf("expected service id %d, got %d", service.ID, services[0].ID)
+	}
+}
+
 func TestListExecutionsByServiceForUserWithDBScopesServiceOwnership(t *testing.T) {
 	db := openFailoverV2TestDB(t)
 	if err := db.AutoMigrate(&models.FailoverV2Service{}, &models.FailoverV2Execution{}); err != nil {

@@ -314,6 +314,167 @@ func ListEnabledServices() ([]models.FailoverV2Service, error) {
 	return listEnabledServicesWithDB(dbcore.GetDBInstance())
 }
 
+func listScheduledCheckCandidateServicesWithDB(db *gorm.DB, now time.Time) ([]models.FailoverV2Service, error) {
+	if now.IsZero() {
+		now = time.Now()
+	}
+
+	var enabledServices []models.FailoverV2Service
+	if err := db.Model(&models.FailoverV2Service{}).
+		Select("id", "user_id", "name", "enabled", "check_interval_seconds", "last_checked_at", "last_status", "last_message").
+		Where("enabled = ?", true).
+		Order("id ASC").
+		Find(&enabledServices).Error; err != nil {
+		return nil, err
+	}
+	if len(enabledServices) == 0 {
+		return []models.FailoverV2Service{}, nil
+	}
+
+	serviceByID := make(map[uint]*models.FailoverV2Service, len(enabledServices))
+	dueIDs := make(map[uint]struct{})
+	orderedDueIDs := make([]uint, 0, len(enabledServices))
+	addDueID := func(id uint) {
+		if id == 0 {
+			return
+		}
+		if _, exists := dueIDs[id]; exists {
+			return
+		}
+		dueIDs[id] = struct{}{}
+		orderedDueIDs = append(orderedDueIDs, id)
+	}
+
+	for index := range enabledServices {
+		service := &enabledServices[index]
+		serviceByID[service.ID] = service
+		if scheduledServiceDueByInterval(service, now) {
+			addDueID(service.ID)
+		}
+	}
+
+	var cooldownMembers []models.FailoverV2Member
+	if err := db.Model(&models.FailoverV2Member{}).
+		Select("id", "service_id", "enabled", "cooldown_seconds", "last_status", "last_message", "last_triggered_at").
+		Where("enabled = ?", true).
+		Where("last_status = ?", models.FailoverV2MemberStatusCooldown).
+		Find(&cooldownMembers).Error; err != nil {
+		return nil, err
+	}
+	for index := range cooldownMembers {
+		member := &cooldownMembers[index]
+		if _, alreadyDue := dueIDs[member.ServiceID]; alreadyDue {
+			continue
+		}
+		service := serviceByID[member.ServiceID]
+		if service == nil {
+			continue
+		}
+		var lastChecked time.Time
+		if service.LastCheckedAt != nil {
+			lastChecked = service.LastCheckedAt.ToTime()
+		}
+		if scheduledCooldownMemberDue(member, lastChecked, now) {
+			addDueID(member.ServiceID)
+		}
+	}
+	if len(orderedDueIDs) == 0 {
+		return []models.FailoverV2Service{}, nil
+	}
+
+	var services []models.FailoverV2Service
+	if err := preloadFailoverV2Service(db).
+		Where("id IN ?", orderedDueIDs).
+		Order("id ASC").
+		Find(&services).Error; err != nil {
+		return nil, err
+	}
+	return services, nil
+}
+
+func ListScheduledCheckCandidateServices(now time.Time) ([]models.FailoverV2Service, error) {
+	return listScheduledCheckCandidateServicesWithDB(dbcore.GetDBInstance(), now)
+}
+
+func scheduledServiceIntervalSeconds(service *models.FailoverV2Service) int {
+	if service == nil {
+		return defaultCheckIntervalSec
+	}
+	if service.CheckIntervalSeconds < models.FailoverV2MinCheckIntervalSeconds {
+		return defaultCheckIntervalSec
+	}
+	return service.CheckIntervalSeconds
+}
+
+func scheduledServiceDueByInterval(service *models.FailoverV2Service, now time.Time) bool {
+	if service == nil {
+		return false
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	if service.LastCheckedAt == nil {
+		return true
+	}
+	lastChecked := service.LastCheckedAt.ToTime()
+	if lastChecked.IsZero() {
+		return true
+	}
+	nextCheckAt := lastChecked.Add(time.Duration(scheduledServiceIntervalSeconds(service)) * time.Second)
+	return !nextCheckAt.After(now)
+}
+
+func scheduledCooldownMemberDue(member *models.FailoverV2Member, lastChecked, now time.Time) bool {
+	if member == nil || !member.Enabled {
+		return false
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	if strings.TrimSpace(member.LastStatus) != models.FailoverV2MemberStatusCooldown {
+		return false
+	}
+	if cooldownUntil, ok := parseScheduledCooldownUntil(member.LastMessage); ok {
+		if cooldownUntil.After(now) {
+			return false
+		}
+		if lastChecked.IsZero() || lastChecked.Before(cooldownUntil) {
+			return true
+		}
+	}
+	if member.CooldownSeconds <= 0 || member.LastTriggeredAt == nil {
+		return true
+	}
+	nextRun := member.LastTriggeredAt.ToTime().Add(time.Duration(member.CooldownSeconds) * time.Second)
+	return !nextRun.IsZero() && !nextRun.After(now)
+}
+
+func parseScheduledCooldownUntil(message string) (time.Time, bool) {
+	trimmed := strings.TrimSpace(message)
+	lowered := strings.ToLower(trimmed)
+	marker := "cooldown until "
+	idx := strings.Index(lowered, marker)
+	if idx < 0 {
+		return time.Time{}, false
+	}
+
+	suffix := strings.TrimSpace(trimmed[idx+len(marker):])
+	if suffix == "" {
+		return time.Time{}, false
+	}
+	if semicolon := strings.Index(suffix, ";"); semicolon >= 0 {
+		suffix = strings.TrimSpace(suffix[:semicolon])
+	}
+	if suffix == "" {
+		return time.Time{}, false
+	}
+	cooldownUntil, err := time.Parse(time.RFC3339, suffix)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return cooldownUntil, true
+}
+
 func getServiceByIDForUserWithDB(db *gorm.DB, userUUID string, serviceID uint) (*models.FailoverV2Service, error) {
 	userUUID, err := normalizeFailoverV2UserID(userUUID)
 	if err != nil {

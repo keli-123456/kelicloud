@@ -139,6 +139,7 @@ func RunServer() {
 	})
 	// #region 公开路由
 	r.POST("/api/login", api.Login)
+	r.POST("/api/register", api.Register)
 	r.GET("/api/me", api.GetMe)
 	r.GET("/api/clients", api.GetClients)
 	r.GET("/api/nodes", api.GetNodesInformation)

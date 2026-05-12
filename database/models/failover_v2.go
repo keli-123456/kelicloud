@@ -53,7 +53,7 @@ type FailoverV2Service struct {
 	ID                   uint                  `json:"id,omitempty" gorm:"primaryKey;autoIncrement"`
 	UserID               string                `json:"user_id,omitempty" gorm:"type:varchar(36);index"`
 	Name                 string                `json:"name" gorm:"type:varchar(255);not null;index"`
-	Enabled              bool                  `json:"enabled" gorm:"default:true"`
+	Enabled              bool                  `json:"enabled" gorm:"default:true;index:idx_failover_v2_scheduler_due,priority:1"`
 	DNSProvider          string                `json:"dns_provider" gorm:"type:varchar(32);not null"`
 	DNSEntryID           string                `json:"dns_entry_id" gorm:"type:varchar(64);not null"`
 	DNSPayload           string                `json:"dns_payload" gorm:"type:longtext"`
@@ -64,7 +64,7 @@ type FailoverV2Service struct {
 	DeleteStrategy       string                `json:"delete_strategy" gorm:"type:varchar(64);not null;default:'keep'"`
 	DeleteDelaySeconds   int                   `json:"delete_delay_seconds" gorm:"type:int;not null;default:0"`
 	LastExecutionID      *uint                 `json:"last_execution_id,omitempty" gorm:"index"`
-	LastCheckedAt        *LocalTime            `json:"last_checked_at" gorm:"type:timestamp"`
+	LastCheckedAt        *LocalTime            `json:"last_checked_at" gorm:"type:timestamp;index:idx_failover_v2_scheduler_due,priority:2"`
 	LastStatus           string                `json:"last_status" gorm:"type:varchar(64);not null;default:'unknown'"`
 	LastMessage          string                `json:"last_message" gorm:"type:text"`
 	Members              []FailoverV2Member    `json:"members,omitempty" gorm:"foreignKey:ServiceID;references:ID;constraint:OnDelete:CASCADE,OnUpdate:CASCADE"`
@@ -75,9 +75,9 @@ type FailoverV2Service struct {
 
 type FailoverV2Member struct {
 	ID                  uint                   `json:"id,omitempty" gorm:"primaryKey;autoIncrement"`
-	ServiceID           uint                   `json:"service_id" gorm:"not null;index;index:idx_failover_v2_service_line,priority:1;index:idx_failover_v2_service_client"`
+	ServiceID           uint                   `json:"service_id" gorm:"not null;index;index:idx_failover_v2_service_line,priority:1;index:idx_failover_v2_service_client;index:idx_failover_v2_member_cooldown,priority:3"`
 	Name                string                 `json:"name" gorm:"type:varchar(255);not null"`
-	Enabled             bool                   `json:"enabled" gorm:"default:true"`
+	Enabled             bool                   `json:"enabled" gorm:"default:true;index:idx_failover_v2_member_cooldown,priority:1"`
 	Priority            int                    `json:"priority" gorm:"type:int;not null;default:1"`
 	Mode                string                 `json:"mode" gorm:"type:varchar(32);not null;default:'provider_template'"`
 	WatchClientUUID     string                 `json:"watch_client_uuid" gorm:"type:varchar(36);index;index:idx_failover_v2_service_client"`
@@ -94,9 +94,9 @@ type FailoverV2Member struct {
 	CooldownSeconds     int                    `json:"cooldown_seconds" gorm:"type:int;not null;default:0"`
 	TriggerFailureCount int                    `json:"trigger_failure_count" gorm:"type:int;not null;default:0"`
 	LastExecutionID     *uint                  `json:"last_execution_id,omitempty" gorm:"index"`
-	LastStatus          string                 `json:"last_status" gorm:"type:varchar(64);not null;default:'unknown'"`
+	LastStatus          string                 `json:"last_status" gorm:"type:varchar(64);not null;default:'unknown';index:idx_failover_v2_member_cooldown,priority:2"`
 	LastMessage         string                 `json:"last_message" gorm:"type:text"`
-	LastTriggeredAt     *LocalTime             `json:"last_triggered_at" gorm:"type:timestamp"`
+	LastTriggeredAt     *LocalTime             `json:"last_triggered_at" gorm:"type:timestamp;index:idx_failover_v2_member_cooldown,priority:4"`
 	LastSucceededAt     *LocalTime             `json:"last_succeeded_at" gorm:"type:timestamp"`
 	LastFailedAt        *LocalTime             `json:"last_failed_at" gorm:"type:timestamp"`
 	Lines               []FailoverV2MemberLine `json:"lines,omitempty" gorm:"foreignKey:MemberID;references:ID;constraint:OnDelete:CASCADE,OnUpdate:CASCADE"`

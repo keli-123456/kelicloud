@@ -915,8 +915,9 @@ func RunScheduledWork() error {
 		taskCopy := task
 		report := latestReports[strings.TrimSpace(taskCopy.WatchClientUUID)]
 		shouldTrigger, statusFields, reason := evaluateTaskHealth(&taskCopy, report, now)
-		if len(statusFields) > 0 {
-			if err := failoverdb.UpdateTaskFields(taskCopy.ID, statusFields); err != nil {
+		changedStatusFields := scheduledChangedTaskStatusFields(&taskCopy, statusFields)
+		if len(changedStatusFields) > 0 {
+			if err := failoverdb.UpdateTaskFields(taskCopy.ID, changedStatusFields); err != nil {
 				log.Printf("failover: failed to update task %d status: %v", taskCopy.ID, err)
 			}
 		}
@@ -1017,6 +1018,32 @@ func evaluateTaskHealth(task *models.FailoverTask, report *common.Report, now ti
 	fields["last_status"] = models.FailoverTaskStatusHealthy
 	fields["last_message"] = report.CNConnectivity.Status
 	return false, fields, ""
+}
+
+func scheduledChangedTaskStatusFields(task *models.FailoverTask, fields map[string]interface{}) map[string]interface{} {
+	if task == nil || len(fields) == 0 {
+		return fields
+	}
+	changed := map[string]interface{}{}
+	for key, value := range fields {
+		switch key {
+		case "last_status":
+			if strings.TrimSpace(stringMapValue(fields, key)) != strings.TrimSpace(task.LastStatus) {
+				changed[key] = value
+			}
+		case "last_message":
+			if strings.TrimSpace(stringMapValue(fields, key)) != strings.TrimSpace(task.LastMessage) {
+				changed[key] = value
+			}
+		case "trigger_failure_count":
+			if intMapValue(fields, key) != task.TriggerFailureCount {
+				changed[key] = value
+			}
+		default:
+			changed[key] = value
+		}
+	}
+	return changed
 }
 
 func evaluateMissingReportHealth(task *models.FailoverTask, fields map[string]interface{}, baseMessage string) (bool, map[string]interface{}, string) {

@@ -322,7 +322,19 @@ func queueMemberExecution(
 	startMessage string,
 	markTriggeredAt bool,
 	run func(*memberExecutionRunner),
+	onDone ...func(),
 ) (*models.FailoverV2Execution, error) {
+	var done func()
+	if len(onDone) > 0 {
+		done = onDone[0]
+	}
+	doneHeld := done != nil
+	defer func() {
+		if doneHeld && done != nil {
+			done()
+		}
+	}()
+
 	if service == nil {
 		return nil, errors.New("service is required")
 	}
@@ -404,12 +416,15 @@ func queueMemberExecution(
 		return nil, err
 	}
 
-	go func(serviceCopy models.FailoverV2Service, memberCopy models.FailoverV2Member, executionCopy models.FailoverV2Execution, ownershipCopy *ServiceDNSOwnership, memberRunLockCopy *failoverV2RunLockHandle) {
+	go func(serviceCopy models.FailoverV2Service, memberCopy models.FailoverV2Member, executionCopy models.FailoverV2Execution, ownershipCopy *ServiceDNSOwnership, memberRunLockCopy *failoverV2RunLockHandle, doneCopy func()) {
 		defer func() {
 			if memberRunLockCopy != nil {
 				memberRunLockCopy.release()
 			}
 			releaseServiceExecutionLocks(serviceCopy.ID, ownershipCopy)
+			if doneCopy != nil {
+				doneCopy()
+			}
 		}()
 		ctx, cancel := context.WithCancel(context.Background())
 		registerExecutionCancel(executionCopy.ID, cancel)
@@ -422,14 +437,22 @@ func queueMemberExecution(
 			ctx:       ctx,
 		}
 		run(runner)
-	}(*service, *member, *execution, ownership, memberRunLock)
+	}(*service, *member, *execution, ownership, memberRunLock, done)
 	memberLockHeld = false
 	serviceLocksHeld = false
+	doneHeld = false
 
 	return execution, nil
 }
 
-func queueMemberDetachExecution(userUUID string, service *models.FailoverV2Service, member *models.FailoverV2Member, triggerReason, triggerSnapshot, startMessage string) (*models.FailoverV2Execution, error) {
+func releaseMemberExecutionCallbacks(callbacks []func()) {
+	if len(callbacks) == 0 || callbacks[0] == nil {
+		return
+	}
+	callbacks[0]()
+}
+
+func queueMemberDetachExecution(userUUID string, service *models.FailoverV2Service, member *models.FailoverV2Member, triggerReason, triggerSnapshot, startMessage string, onDone ...func()) (*models.FailoverV2Execution, error) {
 	triggerReason = strings.TrimSpace(triggerReason)
 	if triggerReason == "" {
 		triggerReason = "manual detach dns"
@@ -456,6 +479,7 @@ func queueMemberDetachExecution(userUUID string, service *models.FailoverV2Servi
 		func(runner *memberExecutionRunner) {
 			runner.runDetachOnly()
 		},
+		onDone...,
 	)
 }
 
