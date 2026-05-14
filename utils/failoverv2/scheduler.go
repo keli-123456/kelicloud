@@ -15,14 +15,15 @@ import (
 )
 
 const (
-	scheduledDefaultFailureThreshold          = 2
-	scheduledDefaultStaleAfterSeconds         = 300
-	scheduledDefaultCheckIntervalSec          = models.FailoverV2DefaultCheckIntervalSeconds
-	scheduledExecutionLogRetentionDefaultDays = 30
-	scheduledExecutionLogCleanupRunInterval   = 24 * time.Hour
-	scheduledExecutionLogCleanupBatchLimit    = 1000
-	scheduledExecutionLogCleanupMaxBatches    = 20
-	scheduledAutomaticExecutionConcurrency    = 4
+	scheduledDefaultFailureThreshold              = 2
+	scheduledDefaultStaleAfterSeconds             = 300
+	scheduledDefaultCheckIntervalSec              = models.FailoverV2DefaultCheckIntervalSeconds
+	scheduledExecutionLogRetentionDefaultDays     = 30
+	scheduledExecutionLogCleanupRunInterval       = 24 * time.Hour
+	scheduledExecutionLogCleanupBatchLimit        = 1000
+	scheduledExecutionLogCleanupMaxBatches        = 20
+	scheduledAutomaticExecutionGlobalConcurrency  = 32
+	scheduledAutomaticExecutionPerUserConcurrency = 4
 )
 
 type scheduledTriggerCandidate struct {
@@ -31,7 +32,74 @@ type scheduledTriggerCandidate struct {
 	reason string
 }
 
-var scheduledAutomaticExecutionSlots = make(chan struct{}, scheduledAutomaticExecutionConcurrency)
+var scheduledAutomaticExecutionLimiter = newScheduledAutomaticExecutionLimiter(
+	scheduledAutomaticExecutionGlobalConcurrency,
+	scheduledAutomaticExecutionPerUserConcurrency,
+)
+
+type scheduledAutomaticExecutionLimiterState struct {
+	globalSlots chan struct{}
+	perUser     int
+	mu          sync.Mutex
+	userSlots   map[string]chan struct{}
+}
+
+func newScheduledAutomaticExecutionLimiter(global, perUser int) *scheduledAutomaticExecutionLimiterState {
+	if global <= 0 {
+		global = scheduledAutomaticExecutionGlobalConcurrency
+	}
+	if perUser <= 0 {
+		perUser = scheduledAutomaticExecutionPerUserConcurrency
+	}
+	return &scheduledAutomaticExecutionLimiterState{
+		globalSlots: make(chan struct{}, global),
+		perUser:     perUser,
+		userSlots:   map[string]chan struct{}{},
+	}
+}
+
+func (limiter *scheduledAutomaticExecutionLimiterState) slotForUser(userUUID string) chan struct{} {
+	userUUID = strings.TrimSpace(userUUID)
+	if userUUID == "" {
+		userUUID = "unknown"
+	}
+
+	limiter.mu.Lock()
+	defer limiter.mu.Unlock()
+	if slot := limiter.userSlots[userUUID]; slot != nil {
+		return slot
+	}
+	slot := make(chan struct{}, limiter.perUser)
+	limiter.userSlots[userUUID] = slot
+	return slot
+}
+
+func (limiter *scheduledAutomaticExecutionLimiterState) tryAcquire(userUUID string) (func(), bool) {
+	if limiter == nil {
+		return func() {}, true
+	}
+
+	select {
+	case limiter.globalSlots <- struct{}{}:
+	default:
+		return nil, false
+	}
+
+	userSlot := limiter.slotForUser(userUUID)
+	select {
+	case userSlot <- struct{}{}:
+		var once sync.Once
+		return func() {
+			once.Do(func() {
+				<-userSlot
+				<-limiter.globalSlots
+			})
+		}, true
+	default:
+		<-limiter.globalSlots
+		return nil, false
+	}
+}
 
 func RunScheduledWork() error {
 	now := time.Now()
@@ -93,12 +161,13 @@ func RunScheduledWork() error {
 				strings.TrimSpace(triggerReason),
 			)
 			var execution *models.FailoverV2Execution
-			releaseExecutionSlot, acquired := tryAcquireScheduledAutomaticExecutionSlot()
+			releaseExecutionSlot, acquired := tryAcquireScheduledAutomaticExecutionSlot(service.UserID)
 			if !acquired {
 				log.Printf(
-					"failoverv2: delayed automatic action for service %d member %d because automatic execution concurrency limit is reached",
+					"failoverv2: delayed automatic action for service %d member %d because automatic execution concurrency limit is reached for user %s",
 					service.ID,
 					triggerMember.ID,
+					strings.TrimSpace(service.UserID),
 				)
 				continue
 			}
@@ -153,18 +222,8 @@ func RunScheduledWork() error {
 	return nil
 }
 
-func tryAcquireScheduledAutomaticExecutionSlot() (func(), bool) {
-	select {
-	case scheduledAutomaticExecutionSlots <- struct{}{}:
-		var once sync.Once
-		return func() {
-			once.Do(func() {
-				<-scheduledAutomaticExecutionSlots
-			})
-		}, true
-	default:
-		return nil, false
-	}
+func tryAcquireScheduledAutomaticExecutionSlot(userUUID string) (func(), bool) {
+	return scheduledAutomaticExecutionLimiter.tryAcquire(userUUID)
 }
 
 func runScheduledExecutionLogCleanup(now time.Time) error {

@@ -50,7 +50,85 @@ var (
 
 const interruptedExecutionMessage = "failover execution was interrupted before completion"
 
+const (
+	scheduledAutomaticExecutionGlobalConcurrency  = 32
+	scheduledAutomaticExecutionPerUserConcurrency = 4
+)
+
 var errExecutionStopped = errors.New("failover execution stopped by user")
+
+var scheduledAutomaticExecutionLimiter = newScheduledAutomaticExecutionLimiter(
+	scheduledAutomaticExecutionGlobalConcurrency,
+	scheduledAutomaticExecutionPerUserConcurrency,
+)
+
+type scheduledAutomaticExecutionLimiterState struct {
+	globalSlots chan struct{}
+	perUser     int
+	mu          sync.Mutex
+	userSlots   map[string]chan struct{}
+}
+
+func newScheduledAutomaticExecutionLimiter(global, perUser int) *scheduledAutomaticExecutionLimiterState {
+	if global <= 0 {
+		global = scheduledAutomaticExecutionGlobalConcurrency
+	}
+	if perUser <= 0 {
+		perUser = scheduledAutomaticExecutionPerUserConcurrency
+	}
+	return &scheduledAutomaticExecutionLimiterState{
+		globalSlots: make(chan struct{}, global),
+		perUser:     perUser,
+		userSlots:   map[string]chan struct{}{},
+	}
+}
+
+func (limiter *scheduledAutomaticExecutionLimiterState) slotForUser(userUUID string) chan struct{} {
+	userUUID = strings.TrimSpace(userUUID)
+	if userUUID == "" {
+		userUUID = "unknown"
+	}
+
+	limiter.mu.Lock()
+	defer limiter.mu.Unlock()
+	if slot := limiter.userSlots[userUUID]; slot != nil {
+		return slot
+	}
+	slot := make(chan struct{}, limiter.perUser)
+	limiter.userSlots[userUUID] = slot
+	return slot
+}
+
+func (limiter *scheduledAutomaticExecutionLimiterState) tryAcquire(userUUID string) (func(), bool) {
+	if limiter == nil {
+		return func() {}, true
+	}
+
+	select {
+	case limiter.globalSlots <- struct{}{}:
+	default:
+		return nil, false
+	}
+
+	userSlot := limiter.slotForUser(userUUID)
+	select {
+	case userSlot <- struct{}{}:
+		var once sync.Once
+		return func() {
+			once.Do(func() {
+				<-userSlot
+				<-limiter.globalSlots
+			})
+		}, true
+	default:
+		<-limiter.globalSlots
+		return nil, false
+	}
+}
+
+func tryAcquireScheduledAutomaticExecutionSlot(userUUID string) (func(), bool) {
+	return scheduledAutomaticExecutionLimiter.tryAcquire(userUUID)
+}
 
 type executionRunner struct {
 	task      models.FailoverTask
@@ -924,7 +1002,16 @@ func RunScheduledWork() error {
 		if !shouldTrigger {
 			continue
 		}
-		if _, err := queueExecution(&taskCopy, report, reason); err != nil {
+		releaseExecutionSlot, acquired := tryAcquireScheduledAutomaticExecutionSlot(taskCopy.UserID)
+		if !acquired {
+			log.Printf(
+				"failover: delayed automatic action for task %d because automatic execution concurrency limit is reached for user %s",
+				taskCopy.ID,
+				strings.TrimSpace(taskCopy.UserID),
+			)
+			continue
+		}
+		if _, err := queueExecution(&taskCopy, report, reason, releaseExecutionSlot); err != nil {
 			var duplicateErr *duplicateTargetRunError
 			if errors.As(err, &duplicateErr) {
 				log.Printf(
@@ -1066,7 +1153,18 @@ func evaluateMissingReportHealth(task *models.FailoverTask, fields map[string]in
 	return false, fields, ""
 }
 
-func queueExecution(task *models.FailoverTask, report *common.Report, reason string) (*models.FailoverExecution, error) {
+func queueExecution(task *models.FailoverTask, report *common.Report, reason string, onDone ...func()) (*models.FailoverExecution, error) {
+	var done func()
+	if len(onDone) > 0 {
+		done = onDone[0]
+	}
+	doneHeld := done != nil
+	defer func() {
+		if doneHeld && done != nil {
+			done()
+		}
+	}()
+
 	if task == nil {
 		return nil, errors.New("task is required")
 	}
@@ -1143,9 +1241,14 @@ func queueExecution(task *models.FailoverTask, report *common.Report, reason str
 		return nil, err
 	}
 
-	go func(taskCopy models.FailoverTask, execCopy models.FailoverExecution, reportCopy *common.Report, runKey string) {
+	go func(taskCopy models.FailoverTask, execCopy models.FailoverExecution, reportCopy *common.Report, runKey string, doneCopy func()) {
 		defer releaseTargetRun(runKey, taskCopy.ID)
 		defer releaseTaskRun(taskCopy.ID)
+		defer func() {
+			if doneCopy != nil {
+				doneCopy()
+			}
+		}()
 		ctx, cancel := context.WithCancel(context.Background())
 		registerExecutionCancel(execCopy.ID, cancel)
 		defer unregisterExecutionCancel(execCopy.ID)
@@ -1156,7 +1259,8 @@ func queueExecution(task *models.FailoverTask, report *common.Report, reason str
 			startedAt: now,
 		}
 		runner.run(reportCopy)
-	}(*task, *execution, cloneReport(report), targetRunKey)
+	}(*task, *execution, cloneReport(report), targetRunKey, done)
+	doneHeld = false
 
 	return execution, nil
 }
