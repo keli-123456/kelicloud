@@ -31,6 +31,7 @@ type createVultrInstancePayload struct {
 	BackupsEnabled    bool     `json:"backups_enabled"`
 	DDOSProtection    bool     `json:"ddos_protection"`
 	ActivationEmail   bool     `json:"activation_email"`
+	FirewallGroupID   string   `json:"firewall_group_id"`
 	Tags              []string `json:"tags,omitempty"`
 	UserData          string   `json:"user_data,omitempty"`
 	AutoConnect       bool     `json:"auto_connect"`
@@ -553,6 +554,7 @@ func CreateVultrInstance(c *gin.Context) {
 		DDOSProtection:    payload.DDOSProtection,
 		ActivationEmail:   payload.ActivationEmail,
 		Tags:              payload.Tags,
+		FirewallGroupID:   strings.TrimSpace(payload.FirewallGroupID),
 	}
 	if resolvedUserData != "" {
 		request.UserData = vultrcloud.EncodeUserData(resolvedUserData)
